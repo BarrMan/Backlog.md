@@ -221,38 +221,7 @@ const SideNavigation = memo(function SideNavigation({
 					/>
 				)}
 				<nav className="flex-1 overflow-y-auto">
-					{error &&
-						(isCollapsed ? (
-							onRetry && (
-								<div className="px-2 py-3" role="alert">
-									<button
-										type="button"
-										onClick={onRetry}
-										className="flex w-full items-center justify-center rounded-md bg-red-50 p-3 font-bold text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30"
-										aria-label="Failed to load navigation. Retry"
-										title="Failed to load navigation. Retry"
-									>
-										<span aria-hidden="true">!</span>
-										<span className="sr-only">Retry</span>
-									</button>
-								</div>
-							)
-						) : (
-							<div className="px-4 py-4">
-								<div className="text-center p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-									<p className="text-sm text-red-700 dark:text-red-400 mb-2">Failed to load navigation</p>
-									{onRetry && (
-										<button
-											type="button"
-											onClick={onRetry}
-											className="text-xs px-3 py-1 bg-red-600 dark:bg-red-700 text-white rounded hover:bg-red-700 dark:hover:bg-red-600 transition-colors duration-200"
-										>
-											Retry
-										</button>
-									)}
-								</div>
-							</div>
-						))}
+					<NavigationLoadError error={error} isCollapsed={isCollapsed} onRetry={onRetry} />
 					{isCollapsed ? (
 						<CollapsedProjectNavigation
 							pathname={location.pathname}
@@ -315,6 +284,49 @@ const SideNavigation = memo(function SideNavigation({
 		</ErrorBoundary>
 	);
 });
+
+const NavigationLoadError = ({
+	error,
+	isCollapsed,
+	onRetry,
+}: {
+	error?: Error | null;
+	isCollapsed: boolean;
+	onRetry?: () => void;
+}) => {
+	if (!error) return null;
+	if (isCollapsed)
+		return onRetry ? (
+			<div className="px-2 py-3" role="alert">
+				<button
+					type="button"
+					onClick={onRetry}
+					className="flex w-full items-center justify-center rounded-md bg-red-50 p-3 font-bold text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30"
+					aria-label="Failed to load navigation. Retry"
+					title="Failed to load navigation. Retry"
+				>
+					<span aria-hidden="true">!</span>
+					<span className="sr-only">Retry</span>
+				</button>
+			</div>
+		) : null;
+	return (
+		<div className="px-4 py-4">
+			<div className="text-center p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+				<p className="text-sm text-red-700 dark:text-red-400 mb-2">Failed to load navigation</p>
+				{onRetry && (
+					<button
+						type="button"
+						onClick={onRetry}
+						className="text-xs px-3 py-1 bg-red-600 dark:bg-red-700 text-white rounded hover:bg-red-700 dark:hover:bg-red-600 transition-colors duration-200"
+					>
+						Retry
+					</button>
+				)}
+			</div>
+		</div>
+	);
+};
 
 const SearchResults = ({
 	results,

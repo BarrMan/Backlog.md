@@ -717,6 +717,49 @@ describe("shared immutable branch task loading", () => {
 		}
 	});
 
+	it("retries a local milestone-filtered query when the selected backlog directory changes during filtering", async () => {
+		const core = new Core("/tmp/logical-root-filtered-query");
+		const filesystem = core.fs;
+		filesystem.setBacklogDirectory("root-a");
+		const oldTask: Task = {
+			id: "TASK-1",
+			title: "Root A task",
+			status: "To Do",
+			assignee: [],
+			createdDate: "2026-08-10",
+			labels: [],
+			dependencies: [],
+			milestone: "Release",
+			filePath: "/tmp/logical-root-filtered-query/root-a/tasks/task-1.md",
+		};
+		const newTask = {
+			...oldTask,
+			title: "Root B task",
+			filePath: "/tmp/logical-root-filtered-query/root-b/tasks/task-1.md",
+		};
+		const milestoneReadStarted = deferred();
+		const releaseMilestoneRead = deferred();
+		let taskReads = 0;
+		let milestoneReads = 0;
+		filesystem.listTasks = async () => (taskReads++ === 0 ? [oldTask] : [newTask]);
+		filesystem.listMilestones = async () => {
+			if (milestoneReads++ === 0) {
+				milestoneReadStarted.resolve();
+				await releaseMilestoneRead.promise;
+			}
+			return [];
+		};
+		filesystem.listArchivedMilestones = async () => [];
+
+		const query = core.queryTasks({ includeCrossBranch: false, filters: { milestone: "Release" } });
+		await milestoneReadStarted.promise;
+		filesystem.setBacklogDirectory("root-b");
+		releaseMilestoneRead.resolve();
+
+		expect((await query).map((task) => task.title)).toEqual(["Root B task"]);
+		expect(taskReads).toBe(2);
+	});
+
 	it("rechecks a newer branch snapshot after joining an older refresh", async () => {
 		const core = new Core("/tmp/coalesced-branch-refresh");
 		core.fs.loadConfig = async () => ({ ...config, remoteOperations: false });

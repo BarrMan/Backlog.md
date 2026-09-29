@@ -112,13 +112,9 @@ import {
 	type DuplicateRepairResult,
 	previewDuplicateTaskIdRepair,
 } from "./duplicate-task-repair.ts";
+import { planOrderedTaskPlacement } from "./ordered-task-move-planner.ts";
 import { migrateDraftPrefixes, needsDraftPrefixMigration } from "./prefix-migration.ts";
-import {
-	calculateBlockOrdinals,
-	calculateNewOrdinal,
-	DEFAULT_ORDINAL_STEP,
-	resolveOrdinalConflicts,
-} from "./reorder.ts";
+import { calculateNewOrdinal, DEFAULT_ORDINAL_STEP, resolveOrdinalConflicts } from "./reorder.ts";
 import { SearchService } from "./search-service.ts";
 import {
 	completedTaskIdentityRecord,
@@ -214,6 +210,12 @@ interface ActiveBranchSnapshot {
 	fingerprint: string;
 	stabilityFingerprint: string;
 	settingsKey: string;
+}
+
+class TaskCorpusSnapshotRetry extends Error {
+	constructor(readonly snapshot?: ActiveBranchSnapshot) {
+		super("Project root or active branch refs changed while tasks were loading");
+	}
 }
 
 export type TuiTaskEditFailureReason =
@@ -985,6 +987,17 @@ export class Core {
 		return typeof options.limit === "number" && options.limit >= 0 ? tasks.slice(0, options.limit) : tasks;
 	}
 
+	private captureTaskReadContext(): { filesystem: FileSystem; projectChanged: () => boolean } {
+		const generation = this.projectGeneration;
+		const filesystem = this.fs;
+		const backlogRoot = filesystem.backlogDir;
+		return {
+			filesystem,
+			projectChanged: () =>
+				generation !== this.projectGeneration || filesystem !== this.fs || backlogRoot !== filesystem.backlogDir,
+		};
+	}
+
 	private async queryCrossBranchTasks(
 		options: TaskQueryOptions,
 		filesystem: FileSystem,
@@ -1024,15 +1037,13 @@ export class Core {
 
 	async queryTasks(options: TaskQueryOptions = {}): Promise<Task[]> {
 		while (true) {
-			const generation = this.projectGeneration;
-			const filesystem = this.fs;
-			const projectChanged = () =>
-				generation !== this.projectGeneration || filesystem !== this.fs || filesystem.backlogDir !== this.fs.backlogDir;
+			const { filesystem, projectChanged } = this.captureTaskReadContext();
 			if (options.includeCrossBranch === false) {
 				const localTasks = await filesystem.listTasks();
 				const query = options.query?.trim();
 				const tasks = query ? createTaskSearchIndex(localTasks).search({ query }) : localTasks;
-				if (!projectChanged()) return await this.filterTaskQueryResults(tasks, options, filesystem);
+				const filteredTasks = await this.filterTaskQueryResults(tasks, options, filesystem);
+				if (!projectChanged()) return filteredTasks;
 				continue;
 			}
 			const tasks = await this.queryCrossBranchTasks(options, filesystem, projectChanged);
@@ -1042,11 +1053,7 @@ export class Core {
 
 	async getTask(taskId: string, options: TaskReadOptions = {}): Promise<Task | null> {
 		while (true) {
-			const generation = this.projectGeneration;
-			const filesystem = this.fs;
-			const backlogRoot = filesystem.backlogDir;
-			const projectChanged = () =>
-				generation !== this.projectGeneration || filesystem !== this.fs || backlogRoot !== filesystem.backlogDir;
+			const { filesystem, projectChanged } = this.captureTaskReadContext();
 			const storeAlreadyReady = this.contentStore?.isInitialized() ?? false;
 			const store = await this.getContentStore();
 			if (projectChanged() || store !== this.contentStore) continue;
@@ -1073,20 +1080,16 @@ export class Core {
 
 	async getTaskWithSubtasks(taskId: string, localTasks?: Task[], options: TaskReadOptions = {}): Promise<Task | null> {
 		while (true) {
-			const generation = this.projectGeneration;
-			const filesystem = this.fs;
-			const backlogRoot = filesystem.backlogDir;
+			const { filesystem, projectChanged } = this.captureTaskReadContext();
 			const task =
 				options.includeCrossBranch === false
 					? await this.loadWorkingCopyTask(taskId, false, localTasks)
 					: await this.getTask(taskId, options);
-			if (generation !== this.projectGeneration || filesystem !== this.fs || backlogRoot !== filesystem.backlogDir)
-				continue;
+			if (projectChanged()) continue;
 			if (!task) return null;
 
 			const tasks = localTasks ?? (await filesystem.listTasks());
-			if (generation !== this.projectGeneration || filesystem !== this.fs || backlogRoot !== filesystem.backlogDir)
-				continue;
+			if (projectChanged()) continue;
 			return attachSubtaskSummaries(task, tasks);
 		}
 	}
@@ -2548,58 +2551,14 @@ export class Core {
 		applyMove: (task: Task) => Task,
 		defaultStep: number,
 	): MoveTaskPlacement {
-		const seenOrdered = new Set<string>();
-		for (const id of orderedTaskIds) {
-			const key = canonicalTaskId(id);
-			if (seenOrdered.has(key)) throw new Error(`Duplicate task ID in orderedTaskIds: ${id}`);
-			seenOrdered.add(key);
-		}
-		for (const task of tasksToMove) {
-			if (!seenOrdered.has(canonicalTaskId(task.id))) {
-				throw new Error("orderedTaskIds must include every task being moved");
-			}
-		}
-
-		const movedByKey = new Map(tasksToMove.map((task) => [canonicalTaskId(task.id), task]));
-		const failedKeys = new Set(failures.map((failure) => canonicalTaskId(failure.taskId)));
-		const rows: Array<{ task: Task; moved: boolean }> = [];
-		for (const id of orderedTaskIds) {
-			const key = canonicalTaskId(id);
-			if (failedKeys.has(key)) continue;
-			const movedTask = movedByKey.get(key);
-			if (movedTask) rows.push({ task: movedTask, moved: true });
-			else {
-				const resolution = store.resolveTaskForMutation(key);
-				if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(id, resolution.candidates);
-				if (resolution.status === "found") rows.push({ task: resolution.task, moved: false });
-			}
-		}
-
-		let requiresRebalance = false;
-		const tasksInOrder: Task[] = [];
-		for (let index = 0; index < rows.length; ) {
-			const row = rows[index];
-			if (!row) break;
-			if (!row.moved) {
-				tasksInOrder.push(row.task);
-				index += 1;
-				continue;
-			}
-			let runEnd = index;
-			while (runEnd < rows.length && rows[runEnd]?.moved) runEnd += 1;
-			const block = calculateBlockOrdinals({
-				previous: index > 0 ? (rows[index - 1]?.task ?? null) : null,
-				next: rows[runEnd]?.task ?? null,
-				count: runEnd - index,
-				defaultStep,
-			});
-			requiresRebalance ||= block.requiresRebalance;
-			for (let offset = index; offset < runEnd; offset += 1) {
-				const movedRow = rows[offset];
-				if (movedRow) tasksInOrder.push({ ...applyMove(movedRow.task), ordinal: block.ordinals[offset - index] });
-			}
-			index = runEnd;
-		}
+		const { tasksInOrder, originalTasks, requiresRebalance } = planOrderedTaskPlacement({
+			store,
+			orderedTaskIds,
+			tasksToMove,
+			failures,
+			applyMove,
+			defaultStep,
+		});
 		return this.reconcileMovedTasks(
 			tasksInOrder,
 			resolveOrdinalConflicts(tasksInOrder, {
@@ -2607,7 +2566,7 @@ export class Core {
 				startOrdinal: defaultStep,
 				forceSequential: requiresRebalance,
 			}),
-			rows.map(({ task }) => task),
+			originalTasks,
 			tasksToMove,
 			applyMove,
 		);
@@ -3712,9 +3671,22 @@ export class Core {
 		});
 	}
 
-	private async loadTasksWithStableBranchSnapshot(
+	private async loadTasksWithStableBranchSnapshot(options: TaskCorpusLoadOptions): Promise<TaskCorpusSnapshot> {
+		let retrySnapshot: ActiveBranchSnapshot | undefined;
+		for (let attempt = 0; attempt <= 2; attempt += 1) {
+			try {
+				return await this.loadTaskCorpusSnapshotAttempt(options, retrySnapshot);
+			} catch (error) {
+				if (!(error instanceof TaskCorpusSnapshotRetry)) throw error;
+				retrySnapshot = error.snapshot;
+			}
+		}
+		throw new Error("Project root or active branch refs kept changing while tasks were loading");
+	}
+
+	/** One stable corpus read; its caller owns the bounded retry policy. */
+	private async loadTaskCorpusSnapshotAttempt(
 		options: TaskCorpusLoadOptions,
-		snapshotAttempt = 0,
 		retrySnapshot?: ActiveBranchSnapshot,
 	): Promise<TaskCorpusSnapshot> {
 		const { progressCallback, abortSignal } = options;
@@ -3731,26 +3703,23 @@ export class Core {
 			branchTaskLoader !== this.branchTaskLoader ||
 			projectRoot !== this.fs.rootDir ||
 			backlogRoot !== filesystem.backlogDir;
-		const retryForCurrentProject = async (nextSnapshot?: ActiveBranchSnapshot) => {
-			if (snapshotAttempt >= 2) {
-				throw new Error("Project root or active branch refs kept changing while tasks were loading");
-			}
-			return await this.loadTasksWithStableBranchSnapshot(options, snapshotAttempt + 1, nextSnapshot);
+		const assertCurrentProject = () => {
+			if (projectChanged()) throw new TaskCorpusSnapshotRetry();
 		};
 
 		const config = await filesystem.loadConfig();
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 		git.setConfig(config);
 		// A cancelled load must not wait out the fetch timeout before noticing.
 		this.assertTaskLoadNotCancelled(abortSignal);
 		await this.refreshRemoteRefsForTaskRead(config, git, { force: options.forceRemoteRefresh });
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 		const settingsKey = JSON.stringify(this.getActiveBranchSettings(config, filesystem));
 		const snapshotBefore =
 			retrySnapshot?.settingsKey === settingsKey
 				? retrySnapshot
 				: await this.getActiveBranchSnapshot(config, generation, filesystem, git);
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 		const statuses = config?.statuses || [...DEFAULT_STATUSES];
 		const resolutionStrategy = config?.taskResolutionStrategy || "most_progressed";
 		const includeCompleted = options.includeCompleted ?? false;
@@ -3763,7 +3732,7 @@ export class Core {
 			this.listTasksWithMetadata(false, filesystem, git),
 			filesystem.listCompletedTasks(),
 		]);
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 
 		this.assertTaskLoadNotCancelled(abortSignal);
 		const branchLoad = await this.loadBranchTaskState(
@@ -3776,7 +3745,7 @@ export class Core {
 			filesystem.backlogDirName,
 			progressCallback,
 		);
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 
 		this.assertTaskLoadNotCancelled(abortSignal);
 
@@ -3793,16 +3762,16 @@ export class Core {
 			filesystem,
 			git,
 		);
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 		const filteredTasks = identityIndex.getTasks(options.visibleCompleted ?? includeCompleted);
 
 		// This read must begin after this scan finishes. Reusing an unrelated
 		// in-flight pre-scan snapshot could otherwise publish a generation that
 		// moved while immutable commit trees were still being indexed.
 		const snapshotAfter = await this.computeActiveBranchSnapshot(await filesystem.loadConfig(), filesystem, git);
-		if (projectChanged()) return await retryForCurrentProject();
+		assertCurrentProject();
 		if (snapshotBefore.stabilityFingerprint !== snapshotAfter.stabilityFingerprint) {
-			return await retryForCurrentProject(snapshotAfter);
+			throw new TaskCorpusSnapshotRetry(snapshotAfter);
 		}
 		// Only the corpus this Core installs into its ContentStore may advance shared
 		// freshness state. A standalone load (statistics, ID allocation, a TUI board

@@ -487,6 +487,77 @@ describe("Markdown Serializer", () => {
 			expect(result).not.toContain("updated_date:");
 		});
 
+		it("emits populated frontmatter in canonical order and omits empty optional lists", () => {
+			const result = serializeTask({
+				id: "task-policy",
+				title: "Frontmatter policy",
+				status: "In Progress",
+				assignee: ["@developer"],
+				reporter: "@reporter",
+				createdDate: "2026-09-29",
+				updatedDate: "2026-09-30",
+				dueDate: "2026-10-01",
+				labels: ["serializer"],
+				milestone: "v1",
+				dependencies: ["task-1"],
+				references: ["docs/design.md"],
+				documentation: ["doc-1"],
+				modifiedFiles: ["src/markdown/serializer.ts"],
+				parentTaskId: "task-parent",
+				subtasks: ["task-policy.1"],
+				priority: "high",
+				type: "feature",
+				project: "cli",
+				ordinal: 0,
+				onStatusChange: "bun test",
+			});
+
+			const frontmatter = parseFrontmatter(result).data;
+			expect(Object.keys(frontmatter)).toEqual([
+				"id",
+				"title",
+				"status",
+				"assignee",
+				"reporter",
+				"created_date",
+				"updated_date",
+				"due_date",
+				"labels",
+				"milestone",
+				"dependencies",
+				"references",
+				"documentation",
+				"modified_files",
+				"parent_task_id",
+				"subtasks",
+				"priority",
+				"type",
+				"project",
+				"ordinal",
+				"onStatusChange",
+			]);
+			expect(result).toContain("created_date: '2026-09-29'");
+			expect(result).toContain("due_date: '2026-10-01'");
+			expect(frontmatter.ordinal).toBe(0);
+
+			const emptyOptionals = serializeTask({
+				id: "task-empty-optionals",
+				title: "Empty optionals",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2026-09-29",
+				labels: [],
+				dependencies: [],
+				references: [],
+				documentation: [],
+				modifiedFiles: [],
+				subtasks: [],
+			});
+			expect(emptyOptionals).toContain("labels: []");
+			expect(emptyOptionals).toContain("dependencies: []");
+			expect(emptyOptionals).not.toMatch(/(?:references|documentation|modified_files|subtasks):/);
+		});
+
 		it("removes acceptance criteria section when list becomes empty", () => {
 			const task: Task = {
 				id: "task-clean",

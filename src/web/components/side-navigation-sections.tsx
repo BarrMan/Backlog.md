@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import type { Decision, Document } from "../../types";
 import type { DocsTreeNode } from "../lib/docs-tree";
@@ -6,7 +6,7 @@ import { sanitizeUrlTitle } from "../utils/urlHelpers";
 import { SideNavigationDocumentLink, SideNavigationFolderNode } from "./side-navigation-documents";
 import { SideNavigationCount, SideNavigationLoadingPhase } from "./side-navigation-status";
 
-type Icon = () => React.ReactNode;
+type Icon = () => ReactNode;
 
 const icon =
 	(path: string): Icon =>
@@ -128,6 +128,72 @@ interface ContentNavigationSectionsProps {
 	onCreateDocument: () => void;
 }
 
+interface ContentNavigationSectionProps {
+	label: string;
+	countLabel: string;
+	Icon: Icon;
+	count: number;
+	isLoading: boolean;
+	error?: Error | null;
+	isCollapsed: boolean;
+	onToggle: () => void;
+	action?: ReactNode;
+	children: ReactNode;
+}
+
+const ContentNavigationSection = ({
+	label,
+	countLabel,
+	Icon,
+	count,
+	isLoading,
+	error,
+	isCollapsed,
+	onToggle,
+	action,
+	children,
+}: ContentNavigationSectionProps) => (
+	<section className="px-4 py-4">
+		<div className="flex items-center justify-between mb-4">
+			<div className="flex items-center space-x-3">
+				<button
+					type="button"
+					onClick={onToggle}
+					className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded transition-colors duration-200"
+					title={isCollapsed ? `Expand ${label.toLowerCase()}` : `Collapse ${label.toLowerCase()}`}
+				>
+					{isCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronDown />}
+				</button>
+				<span className="text-gray-500 dark:text-gray-400">
+					<Icon />
+				</span>
+				<span className="text-sm font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-400 whitespace-nowrap">
+					{label} (
+					<SideNavigationCount count={count} isLoading={isLoading} error={error} label={countLabel} />)
+				</span>
+			</div>
+			{action}
+		</div>
+		{!isCollapsed && <div className="space-y-1">{children}</div>}
+	</section>
+);
+
+const ContentSectionState = ({ isLoading, error, count, label, children }: { isLoading: boolean; error?: Error | null; count: number; label: string; children: ReactNode }) => {
+	if (isLoading) return <SideNavigationLoadingPhase className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400" />;
+	if (error) return <p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">{label} unavailable</p>;
+	if (count === 0) return <p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">No {label.toLowerCase()}</p>;
+	return children;
+};
+
+const CreateDocumentButton = ({ onClick }: { onClick: () => void }) => (
+	<button type="button" onClick={onClick} className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors duration-200" title="Create new document">
+		<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+			<circle cx="12" cy="12" r="10" />
+		</svg>
+	</button>
+);
+
 export const ContentNavigationSections = memo(function ContentNavigationSections({
 	docs,
 	decisions,
@@ -147,114 +213,69 @@ export const ContentNavigationSections = memo(function ContentNavigationSections
 	return (
 		<>
 			<div className="mx-4 my-2 border-t border-gray-200 dark:border-gray-700" />
-			<section className="px-4 py-4">
-				<div className="flex items-center justify-between mb-4">
-					<div className="flex items-center space-x-3">
-						<button
-							type="button"
-							onClick={onToggleDocs}
-							className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded transition-colors duration-200"
-							title={isDocsCollapsed ? "Expand documents" : "Collapse documents"}
-						>
-							{isDocsCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronDown />}
-						</button>
-						<span className="text-gray-500 dark:text-gray-400">
-							<Icons.Document />
-						</span>
-						<span className="text-sm font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-400 whitespace-nowrap">
-							Documents (
-							<SideNavigationCount count={docs.length} isLoading={isLoading} error={error} label="document" />)
-						</span>
-					</div>
-					<button
-						type="button"
-						onClick={onCreateDocument}
-						className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors duration-200"
-						title="Create new document"
-					>
-						<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-							<circle cx="12" cy="12" r="10" />
-						</svg>
-					</button>
-				</div>
-				{!isDocsCollapsed && (
-					<div className="space-y-1">
-						{isLoading ? (
-							<SideNavigationLoadingPhase className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400" />
-						) : error ? (
-							<p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">Documents unavailable</p>
-						) : docs.length === 0 ? (
-							<p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">No documents</p>
-						) : searchQuery.trim() ? (
-							docs.map((doc) => <SideNavigationDocumentLink key={doc.id} doc={doc} />)
-						) : (
-							<>
-								{tree.map((node) => (
-									<SideNavigationFolderNode
-										key={node.path}
-										node={node}
-										depth={0}
-										folderExpanded={folderExpanded}
-										onToggleFolder={onToggleFolder}
-									/>
-								))}
-								{ungroupedDocs.map((doc) => (
-									<SideNavigationDocumentLink key={doc.id} doc={doc} />
-								))}
-							</>
-						)}
-					</div>
-				)}
-			</section>
+			<ContentNavigationSection
+				label="Documents"
+				countLabel="document"
+				Icon={Icons.Document}
+				count={docs.length}
+				isLoading={isLoading}
+				error={error}
+				isCollapsed={isDocsCollapsed}
+				onToggle={onToggleDocs}
+				action={<CreateDocumentButton onClick={onCreateDocument} />}
+			>
+				<ContentSectionState
+					isLoading={isLoading}
+					error={error}
+					count={docs.length}
+					label="Documents"
+				>
+					{searchQuery.trim() ? (
+						docs.map((doc) => <SideNavigationDocumentLink key={doc.id} doc={doc} />)
+					) : (
+						<>
+							{tree.map((node) => (
+								<SideNavigationFolderNode
+									key={node.path}
+									node={node}
+									depth={0}
+									folderExpanded={folderExpanded}
+									onToggleFolder={onToggleFolder}
+								/>
+							))}
+						{ungroupedDocs.map((doc) => <SideNavigationDocumentLink key={doc.id} doc={doc} />)}
+						</>
+					)}
+				</ContentSectionState>
+			</ContentNavigationSection>
 			<div className="mx-4 my-2 border-t border-gray-200 dark:border-gray-700" />
-			<section className="px-4 py-4">
-				<div className="flex items-center justify-between mb-4">
-					<div className="flex items-center space-x-3">
-						<button
-							type="button"
-							onClick={onToggleDecisions}
-							className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded transition-colors duration-200"
-							title={isDecisionsCollapsed ? "Expand decisions" : "Collapse decisions"}
+			<ContentNavigationSection
+				label="Decisions"
+				countLabel="decision"
+				Icon={Icons.Decision}
+				count={decisions.length}
+				isLoading={isLoading}
+				error={error}
+				isCollapsed={isDecisionsCollapsed}
+				onToggle={onToggleDecisions}
+			>
+				<ContentSectionState isLoading={isLoading} error={error} count={decisions.length} label="Decisions">
+					{decisions.map((decision) => (
+						<NavLink
+							key={decision.id}
+							to={`/decisions/${decision.id.replace(/^[a-zA-Z]+-/, "")}/${sanitizeUrlTitle(decision.title)}`}
+							className={({ isActive }) =>
+								`flex items-center space-x-3 px-3 py-2 text-sm rounded-lg transition-colors duration-200 ${isActive ? "bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium" : "text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100"}`
+							}
 						>
-							{isDecisionsCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronDown />}
-						</button>
-						<span className="text-gray-500 dark:text-gray-400">
-							<Icons.Decision />
-						</span>
-						<span className="text-sm font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-400 whitespace-nowrap">
-							Decisions (
-							<SideNavigationCount count={decisions.length} isLoading={isLoading} error={error} label="decision" />)
-						</span>
-					</div>
-				</div>
-				{!isDecisionsCollapsed && (
-					<div className="space-y-1">
-						{isLoading ? (
-							<SideNavigationLoadingPhase className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400" />
-						) : error ? (
-							<p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">Decisions unavailable</p>
-						) : decisions.length === 0 ? (
-							<p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">No decisions</p>
-						) : (
-							decisions.map((decision) => (
-								<NavLink
-									key={decision.id}
-									to={`/decisions/${decision.id.replace(/^[a-zA-Z]+-/, "")}/${sanitizeUrlTitle(decision.title)}`}
-									className={({ isActive }) =>
-										`flex items-center space-x-3 px-3 py-2 text-sm rounded-lg transition-colors duration-200 ${isActive ? "bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium" : "text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100"}`
-									}
-								>
-									<span className="text-gray-400 dark:text-gray-500">
-										<Icons.DecisionPage />
-									</span>
-									<span className="truncate">{decision.title}</span>
-								</NavLink>
-							))
-						)}
-					</div>
-				)}
-			</section>
+							<span className="text-gray-400 dark:text-gray-500">
+								<Icons.DecisionPage />
+							</span>
+							<span className="truncate">{decision.title}</span>
+						</NavLink>
+					))}
+				</ContentSectionState>
+			</ContentNavigationSection>
 		</>
 	);
 });

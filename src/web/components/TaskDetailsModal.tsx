@@ -3,7 +3,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { isLocalEditableTask, type AcceptanceCriterion, type Milestone, type Task, type TaskComment } from "../../types";
 import { type TaskDetail, taskDependencyGraph, taskReadiness } from "../../core/task-detail";
 import Modal from "./Modal";
-import { apiClient, NetworkError, readDemotionFailureCause, readMovedFailureState } from "../lib/api";
 import { useTheme } from "../contexts/ThemeContext";
 import { resolveProjectValue } from "../../utils/project-config";
 import { resolveTaskTypeValue } from "../../utils/task-type-config";
@@ -11,15 +10,12 @@ import { buildTaskIdIndex, resolveTaskReference } from "../utils/task-id-links";
 import { findDirectSubtasks, findParentTask, summarizeSubtaskProgress } from "../../utils/task-subtasks.ts";
 import { isTerminalStatus } from "../../utils/terminal-status.ts";
 import { createUrlPath } from "../utils/urlHelpers";
-import {
-  buildDefinitionOfDonePayload,
-  type TaskUpdatePayload,
-} from "./task-details-form";
 import { hasCreateModeEntries, useTaskDetailFormState } from "../hooks/use-task-detail-form-state";
 import { useTaskDetailsModalLifecycle } from "../hooks/use-task-details-modal-lifecycle";
 import { useTaskDetailsModalShortcuts } from "../hooks/use-task-details-modal-shortcuts";
 import { resolveMilestoneSelection } from "../utils/milestone-aliases";
 import { useOptimisticTaskUpdates } from "../hooks/use-optimistic-task-updates";
+import { useTaskDetailsModalActions } from "../hooks/use-task-details-modal-actions";
 import { TaskDetailsModalActions } from "./TaskDetailsModalActions";
 import { useTaskMetadataOptions } from "../hooks/use-task-metadata-options";
 import { HierarchyChevron, HierarchyStatusBadge, TaskDetailsContent } from "./TaskDetailsContent";
@@ -56,8 +52,6 @@ type Mode = "preview" | "edit" | "create";
 const EMPTY_STATUSES: string[] = [];
 const EMPTY_TASKS: Task[] = [];
 
-const containsCommentDelimiterLine = (value: string): boolean => /^\s*---\s*$/m.test(value.replace(/\r\n/g, "\n"));
-
 export const TaskDetailsModal: React.FC<Props> = ({
   task,
   isOpen,
@@ -86,20 +80,13 @@ export const TaskDetailsModal: React.FC<Props> = ({
   // Promoting a draft replaces it with a new task ID, which the Drafts page does through its own
   // Promote action, so the popup shows the draft status without turning the field into a second one.
   const isOpenDraft = (task?.status ?? "").trim().toLowerCase() === "draft";
-  const demotionIdentity = [isOpen ? "open" : "closed", task?.id, task?.source, task?.branch, isOpenDraft ? "draft" : "task"].join("\0");
-  const demotionIdentityRef = useRef(demotionIdentity);
-  demotionIdentityRef.current = demotionIdentity;
-  const [mode, setMode] = useState<Mode>(isCreateMode ? "create" : "preview");
+	const [mode, setMode] = useState<Mode>(isCreateMode ? "create" : "preview");
   const modeRef = useRef(mode);
   const previousTaskId = useRef(task?.id ?? "");
   const previousIsOpen = useRef(isOpen);
-  const activeDemotionRequest = useRef<{ identity: string } | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [demoting, setDemoting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+	const [error, setError] = useState<string | null>(null);
 
-  const [commentSaving, setCommentSaving] = useState(false);
-  const [commentsChanged, setCommentsChanged] = useState(false);
+	const [commentsChanged, setCommentsChanged] = useState(false);
   const preserveEditModeAfterCommentRefresh = useRef(false);
   const defaultDefinitionOfDone = useMemo(
     () => (definitionOfDoneDefaults ?? []).map((text, index) => ({ index: index + 1, text, checked: false })),
@@ -192,32 +179,46 @@ export const TaskDetailsModal: React.FC<Props> = ({
     modeRef.current = mode;
   }, [mode]);
 
-  useEffect(
-    () => () => {
-      activeDemotionRequest.current = null;
-    },
-    [],
-  );
+	const isFinalStatus = isTerminalStatus(status, availableStatuses.length ? availableStatuses : DEFAULT_STATUSES);
+	const canDemote = Boolean(
+		task && !isDraftMode && !isOpenDraft && isLocalEditableTask(task) && task.source !== "completed" && !isFromOtherBranch,
+	);
+	const { saving, commentSaving, demoting, resetCommentSaving, save: handleSave, addComment: handleAddComment, complete: handleComplete, demote: handleDemote } = useTaskDetailsModalActions({
+		task: task as Task | undefined,
+		isOpen,
+		isCreateMode,
+		isFromOtherBranch,
+		canDemote,
+		fields: { title, description, plan, notes, finalSummary, criteria, definitionOfDone, status, assignee, labels, priority, taskType, project, dependencies, milestone, dueDate, commentBody, commentAuthor },
+		createModeAssignee,
+		definitionOfDoneDefaults,
+		onSubmit,
+		onSaved,
+		onClose,
+		onDependencyCleanup,
+		setMode,
+		setError,
+		setDisplayComments,
+		setCommentBody,
+		setCommentAuthor,
+		setCommentsChanged,
+		preserveEditModeAfterCommentRefresh,
+	});
 
-  useEffect(() => {
-    activeDemotionRequest.current = null;
-    setDemoting(false);
-  }, [demotionIdentity]);
-
-  useTaskDetailsModalLifecycle({
-    task,
-    isOpen,
-    isCreateMode,
-    modeRef,
-    previousTaskId,
-    previousIsOpen,
-    preserveEditModeAfterCommentRefresh,
-    syncForm,
-    setCommentSaving,
-    setCommentsChanged,
-    setMode,
-    setError,
-  });
+	useTaskDetailsModalLifecycle({
+		task,
+		isOpen,
+		isCreateMode,
+		modeRef,
+		previousTaskId,
+		previousIsOpen,
+		preserveEditModeAfterCommentRefresh,
+		syncForm,
+		setCommentSaving: resetCommentSaving,
+		setCommentsChanged,
+		setMode,
+		setError,
+	});
 
   const refreshAfterCommentChange = useCallback(() => {
     if (!commentsChanged) return;
@@ -264,80 +265,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
     }
   };
 
-  const handleSave = async () => {
-    if (demoting) return;
-    setSaving(true);
-    setError(null);
-
-    // Validation for create mode
-    if (isCreateMode && !title.trim()) {
-      setError("Title is required");
-      setSaving(false);
-      return;
-    }
-
-    try {
-      const taskData: TaskUpdatePayload = {
-        title: title.trim(),
-        description,
-        implementationPlan: plan,
-        implementationNotes: notes,
-        finalSummary,
-        acceptanceCriteriaItems: criteria,
-        status,
-        // Create starts with the configured defaultAssignee in the field, so what the field
-        // holds is what the user meant: empty is an explicit "unassigned". Only a project
-        // without a default has nothing to remove, so there a blank field still omits the
-        // field. On edit an explicit empty list clears the assignees.
-        ...(isCreateMode && assignee.length === 0 && createModeAssignee.length === 0 ? {} : { assignee }),
-        labels,
-        priority: priority === "" ? undefined : priority,
-        dependencies,
-        milestone: milestone.trim().length > 0 ? milestone.trim() : undefined,
-        dueDate: dueDate.trim().length > 0 ? dueDate.trim() : isCreateMode ? undefined : null,
-      };
-
-      // Like type, project is only sent from the create form. On edit the sidebar select
-      // persists immediately through handleInlineMetaUpdate, so including it here would
-      // re-send a value the form never showed -- clearing a stale project when none are
-      // configured, or failing the whole save when the stored value is no longer valid.
-      if (isCreateMode) {
-        taskData.type = taskType;
-        taskData.project = project.trim().length > 0 ? project.trim() : undefined;
-      }
-
-      if (isCreateMode && onSubmit) {
-        Object.assign(taskData, buildDefinitionOfDonePayload({ task, definitionOfDone, definitionOfDoneDefaults, isCreateMode }));
-        // Create new task
-        await onSubmit({ ...taskData, dueDate: taskData.dueDate ?? undefined } as Partial<Task>);
-        // Only close if successful (no error thrown)
-        onClose();
-      } else if (task) {
-        Object.assign(taskData, buildDefinitionOfDonePayload({ task, definitionOfDone, definitionOfDoneDefaults, isCreateMode }));
-        // Update existing task
-        await apiClient.updateTask(task.id, taskData);
-        setMode("preview");
-        if (onSaved) await onSaved();
-        setCommentsChanged(false);
-      }
-    } catch (err) {
-      // Extract and display the error message from API response
-      let errorMessage = 'Failed to save task';
-
-      if (err instanceof Error) {
-        errorMessage = err.message;
-      } else if (typeof err === 'object' && err !== null && 'error' in err) {
-        errorMessage = String((err as any).error);
-      } else if (typeof err === 'string') {
-        errorMessage = err;
-      }
-
-      setError(errorMessage);
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const { update: handleInlineMetaUpdate, toggleCriterion: handleToggleCriterion, toggleDefinitionOfDone: handleToggleDefinitionOfDone, updateType: handleTaskTypeChange, typeError: typeUpdateError, typeUpdating: isTypeUpdating } = useOptimisticTaskUpdates({
     task: task as Task | undefined,
     disabled: demoting || isFromOtherBranch,
@@ -347,126 +274,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
     setError,
   });
 
-  const handleAddComment = async () => {
-    if (demoting) return;
-    if (!task || isFromOtherBranch) return;
-    const body = commentBody.trim();
-    if (!body) return;
-    const author = commentAuthor.trim();
-    if (containsCommentDelimiterLine(body)) {
-      setError("Comment body cannot contain standalone '---' delimiter lines.");
-      return;
-    }
-    if (author && containsCommentDelimiterLine(author)) {
-      setError("Comment author cannot contain standalone '---' delimiter lines.");
-      return;
-    }
-    setCommentSaving(true);
-    setError(null);
-    preserveEditModeAfterCommentRefresh.current = true;
-    try {
-      const updatedTask = await apiClient.updateTask(task.id, {
-        commentsAppend: [body],
-        ...(author.length > 0 && { commentAuthor: author }),
-      });
-      setDisplayComments(updatedTask.comments ?? []);
-      setCommentsChanged(true);
-      setCommentBody("");
-      setCommentAuthor("");
-    } catch (err) {
-      preserveEditModeAfterCommentRefresh.current = false;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCommentSaving(false);
-    }
-  };
-
-  // labels handled via ChipInput; no textarea parsing
-
-	const handleComplete = async () => {
-		if (demoting) return;
-		if (!task) return;
-		if (!window.confirm("Move this task off the board to completed storage? Its record and dependency links will be preserved.")) return;
-		try {
-			await apiClient.completeTask(task.id);
-			if (onSaved) await onSaved();
-			onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-		}
-	};
-
-	const handleDemote = async () => {
-		if (!task || !canDemote || activeDemotionRequest.current !== null) return;
-		if (!window.confirm(`Demote "${task.title}" to draft? It will be moved to the drafts folder.`)) return;
-
-		const request = { identity: demotionIdentity };
-		activeDemotionRequest.current = request;
-		const isCurrentRequest = () =>
-			activeDemotionRequest.current === request && demotionIdentityRef.current === request.identity;
-		const finishWithRefreshWarning = async (message: string) => {
-			window.dispatchEvent(new window.Event("drafts-updated"));
-			try {
-				if (onSaved) await onSaved();
-			} catch (refreshError) {
-				console.error("Task was demoted, but refreshing the Web UI failed", refreshError);
-			}
-			if (!isCurrentRequest()) return;
-			try {
-				window.alert(message);
-			} catch {
-				setError(message);
-			}
-			onClose();
-		};
-		setDemoting(true);
-		setError(null);
-		try {
-			const { cleanedTaskIds } = await apiClient.demoteTask(task.id);
-			if (!isCurrentRequest()) return;
-			onDependencyCleanup?.(task.id, cleanedTaskIds);
-			try {
-				window.dispatchEvent(new window.Event("drafts-updated"));
-				if (onSaved) await onSaved();
-			} catch {
-				await finishWithRefreshWarning(
-					"The task was moved to drafts, but refreshing the view failed. Close this dialog and verify the draft before retrying.",
-				);
-				return;
-			}
-			if (!isCurrentRequest()) return;
-			onClose();
-		} catch (err) {
-			if (!isCurrentRequest()) return;
-			const demotionFailureState = readMovedFailureState(err, "demotionState");
-			if (demotionFailureState) {
-				const demotionFailureCause = readDemotionFailureCause(err);
-				const message =
-					demotionFailureState === "moved"
-						? demotionFailureCause === "cleanup"
-							? "The task was moved to drafts, but removing references from dependent tasks failed. Some dependent tasks may still reference it. The view was refreshed; check those tasks before retrying."
-							: demotionFailureCause === "commit"
-								? "The task was moved to drafts, but recording the Git commit failed. The view was refreshed; verify the draft before retrying."
-								: "The task was moved to drafts, but a later step failed. The view was refreshed; verify the draft and dependent tasks before retrying."
-						: "The demotion encountered a filesystem failure and may have left both task and draft copies. The view was refreshed; inspect them before retrying.";
-				await finishWithRefreshWarning(message);
-				return;
-			}
-			if (err instanceof NetworkError) {
-				await finishWithRefreshWarning(
-					"The demotion request may have succeeded, but its response was lost. Check the task and drafts views before retrying.",
-				);
-				return;
-			}
-			setError(err instanceof Error ? err.message : String(err));
-		} finally {
-			if (isCurrentRequest()) {
-				activeDemotionRequest.current = null;
-				setDemoting(false);
-			}
-		}
-	};
-
   const handleArchive = async () => {
     if (demoting) return;
     if (!task || !onArchive) return;
@@ -474,10 +281,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
     await onArchive();
   };
 
-	const isFinalStatus = isTerminalStatus(status, availableStatuses.length ? availableStatuses : DEFAULT_STATUSES);
-	const canDemote = Boolean(
-		task && !isDraftMode && !isOpenDraft && isLocalEditableTask(task) && task.source !== "completed" && !isFromOtherBranch,
-	);
   const displayId = task?.id ?? "";
 
   useTaskDetailsModalShortcuts({

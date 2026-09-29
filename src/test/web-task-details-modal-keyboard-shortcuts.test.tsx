@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { Task } from "../types/index.ts";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
@@ -61,7 +62,7 @@ const setupDom = () => {
 const mountModal = async (
 	modalTask: Task = task,
 	isOpen = true,
-	props: { availableStatuses?: string[]; onArchive?: () => void } = {},
+	props: { availableStatuses?: string[]; onArchive?: () => void; onClose?: () => void; onSaved?: () => void } = {},
 ): Promise<HTMLElement> => {
 	setupDom();
 	const container = document.getElementById("root");
@@ -206,6 +207,140 @@ describe("Web task popup keyboard shortcuts", () => {
 			expect(event.defaultPrevented).toBe(true);
 			expect(completedTaskIds).toEqual(["BACK-558"]);
 		} finally {
+			apiClient.completeTask = originalCompleteTask;
+		}
+	});
+
+	it("does not close the replacement task after completion refreshes it", async () => {
+		const originalCompleteTask = apiClient.completeTask.bind(apiClient);
+		let releaseSaved: (() => void) | undefined;
+		let markSaved: (() => void) | undefined;
+		const savedStarted = new Promise<void>((resolve) => {
+			markSaved = resolve;
+		});
+		const savedRelease = new Promise<void>((resolve) => {
+			releaseSaved = resolve;
+		});
+		let closeCalls = 0;
+		const replacement = { ...task, id: "BACK-559", title: "Replacement task", status: "Done" };
+		apiClient.completeTask = async () => {};
+		try {
+			const container = await mountModal({ ...task, status: "Done" }, true, {
+				onClose: () => closeCalls++,
+				onSaved: async () => {
+					flushSync(() => {
+						activeRoot?.render(<ThemeProvider><TaskDetailsModal task={replacement} isOpen onClose={() => closeCalls++} /></ThemeProvider>);
+					});
+					markSaved?.();
+					await savedRelease;
+				},
+			});
+			window.confirm = () => true;
+			await click(findButton(container, "Move to completed") as HTMLButtonElement);
+			await savedStarted;
+			expect(container.textContent).toContain("BACK-559 — Replacement task");
+			releaseSaved?.();
+			await act(async () => {
+				await savedRelease;
+			});
+
+			expect(closeCalls).toBe(0);
+		} finally {
+			releaseSaved?.();
+			apiClient.completeTask = originalCompleteTask;
+		}
+	});
+
+	it("ignores a deferred save after closing and reopening the same task", async () => {
+		const originalUpdateTask = apiClient.updateTask.bind(apiClient);
+		let releaseUpdate: (() => void) | undefined;
+		let markStarted: (() => void) | undefined;
+		const updateStarted = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const updateRelease = new Promise<void>((resolve) => {
+			releaseUpdate = resolve;
+		});
+		let savedCalls = 0;
+		apiClient.updateTask = async () => {
+			markStarted?.();
+			await updateRelease;
+			return task;
+		};
+		try {
+			const container = await mountModal(task, true, { onSaved: () => savedCalls++ });
+			await click(findButton(container, "Edit") as HTMLButtonElement);
+			const title = Array.from(container.querySelectorAll("input")).find((input) => input.value === task.title);
+			expect(title).toBeTruthy();
+			await act(async () => {
+				const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+				setValue?.call(title, "Pending title");
+				title?.dispatchEvent(new window.Event("input", { bubbles: true }));
+				await Promise.resolve();
+			});
+			await click(findButton(container, "Save") as HTMLButtonElement);
+			await updateStarted;
+
+			await act(async () => {
+				flushSync(() => {
+					activeRoot?.render(<ThemeProvider><TaskDetailsModal task={task} isOpen={false} onClose={() => {}} /></ThemeProvider>);
+				});
+				flushSync(() => {
+					activeRoot?.render(<ThemeProvider><TaskDetailsModal task={task} isOpen onClose={() => {}} /></ThemeProvider>);
+				});
+				await Promise.resolve();
+			});
+			await click(findButton(container, "Edit") as HTMLButtonElement);
+			expect(findButton(container, "Save")).toBeTruthy();
+
+			releaseUpdate?.();
+			await act(async () => {
+				await updateRelease;
+			});
+
+			expect(savedCalls).toBe(0);
+			expect(findButton(container, "Save")).toBeTruthy();
+		} finally {
+			releaseUpdate?.();
+			apiClient.updateTask = originalUpdateTask;
+		}
+	});
+
+	it("ignores a deferred completion response after unmount", async () => {
+		const originalCompleteTask = apiClient.completeTask.bind(apiClient);
+		let release: (() => void) | undefined;
+		let started: (() => void) | undefined;
+		const requestStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const requestRelease = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let savedCalls = 0;
+		let closeCalls = 0;
+		apiClient.completeTask = async () => {
+			started?.();
+			await requestRelease;
+		};
+		try {
+			const container = await mountModal({ ...task, status: "Done" }, true, {
+				onClose: () => closeCalls++,
+				onSaved: () => savedCalls++,
+			});
+			window.confirm = () => true;
+			await click(findButton(container, "Move to completed") as HTMLButtonElement);
+			await requestStarted;
+			act(() => activeRoot?.unmount());
+			activeRoot = null;
+			release?.();
+			await act(async () => {
+				await requestRelease;
+			});
+
+			expect(savedCalls).toBe(0);
+			expect(closeCalls).toBe(0);
+		} finally {
+			release?.();
 			apiClient.completeTask = originalCompleteTask;
 		}
 	});
