@@ -47,7 +47,6 @@ import {
 	type FilterHeader,
 	type FilterState,
 } from "./components/filter-header.ts";
-import { openMultiSelectFilterPopup, openSingleSelectFilterPopup } from "./components/filter-popup.ts";
 import { type BoundaryNavigationKey, createGenericList, type GenericList } from "./components/generic-list.ts";
 import { openHelpPopup } from "./components/help-popup.ts";
 import { formatFooterContent, getTaskListFooterContent } from "./footer-content.ts";
@@ -55,6 +54,7 @@ import { formatHeading } from "./heading.ts";
 import { createLoadingScreen } from "./loading.ts";
 import { formatProjectBadge } from "./project.ts";
 import { formatStatusWithIcon, getStatusColor, getStatusIcon, wrapStatusColor } from "./status-icon.ts";
+import { openTaskFilterPicker, taskFilterHeaderControls, taskFilterOptions } from "./task-filter-wiring.ts";
 import {
 	completeTaskFromTui,
 	formatTaskArchivedMessage,
@@ -489,106 +489,39 @@ export async function viewTaskEnhanced(
 		filterPopupOpen = true;
 
 		try {
-			if (filterId === "type") {
-				const nextTypes = await openMultiSelectFilterPopup({
-					screen,
-					title: "Task Type Filter",
-					items: configuredTaskTypes,
-					selectedItems: taskTypeFilter,
-				});
-				if (nextTypes !== null) {
-					taskTypeFilter = nextTypes;
-					filterHeader.setFilters({ taskTypes: nextTypes });
-					applyFilters();
-					notifyFilterChange();
-				}
-				return;
-			}
-
-			if (filterId === "project") {
-				const nextProjects = await openMultiSelectFilterPopup({
-					screen,
-					title: "Project Filter",
-					items: configuredProjects,
-					selectedItems: projectFilter,
-				});
-				if (nextProjects !== null) {
-					projectFilter = nextProjects;
-					filterHeader.setFilters({ projects: nextProjects });
-					applyFilters();
-					notifyFilterChange();
-				}
-				return;
-			}
-
-			if (filterId === "labels") {
-				const nextLabels = await openMultiSelectFilterPopup({
-					screen,
-					title: "Label Filter",
-					items: [...availableLabels].sort((a, b) => a.localeCompare(b)),
-					selectedItems: labelFilter,
-				});
-				if (nextLabels !== null) {
-					labelFilter = nextLabels;
-					labelMatch = "any";
-					filterHeader.setFilters({ labels: nextLabels });
-					applyFilters();
-					notifyFilterChange();
-				}
-				return;
-			}
-
-			if (filterId === "status") {
-				const nextStatuses = await openMultiSelectFilterPopup({
-					screen,
-					title: "Status Filter",
-					items: statuses,
-					selectedItems: statusFilter,
-				});
-				if (nextStatuses !== null) {
-					statusFilter = nextStatuses;
-					filterHeader.setFilters({ status: nextStatuses });
-					applyFilters();
-					notifyFilterChange();
-				}
-				return;
-			}
-
-			if (filterId === "priority") {
-				const selected = await openSingleSelectFilterPopup({
-					screen,
-					title: "Priority Filter",
-					selectedValue: priorityFilter,
-					choices: [
-						{ label: "All", value: "" },
-						...priorityOptions.map((priority) => ({ label: priority.label, value: priority.value })),
-					],
-				});
-				if (selected !== null) {
-					priorityFilter = selected;
-					filterHeader.setFilters({ priority: selected });
-					applyFilters();
-					notifyFilterChange();
-				}
-				return;
-			}
-
-			const selected = await openSingleSelectFilterPopup({
+			const nextFilters = await openTaskFilterPicker({
 				screen,
-				title: "Milestone Filter",
-				selectedValue: milestoneFilter,
-				choices: [
-					{ label: "All", value: "" },
-					{ label: NO_MILESTONE_FILTER_LABEL, value: NO_MILESTONE_FILTER_VALUE },
-					...availableMilestoneTitles.map((milestone) => ({ label: milestone, value: milestone })),
-				],
+				filterId,
+				filters: {
+					search: searchQuery,
+					status: statusFilter,
+					taskTypes: taskTypeFilter,
+					projects: projectFilter,
+					priority: priorityFilter,
+					labels: labelFilter,
+					milestone: milestoneFilter,
+				},
+				statuses,
+				taskTypes: configuredTaskTypes,
+				projects: configuredProjects,
+				priorityOptions,
+				labels: availableLabels,
+				milestones: availableMilestoneTitles,
 			});
-			if (selected !== null) {
-				milestoneFilter = selected;
-				filterHeader.setFilters({ milestone: selected });
+			if (nextFilters !== null) {
+				searchQuery = nextFilters.search;
+				statusFilter = nextFilters.status;
+				taskTypeFilter = nextFilters.taskTypes;
+				projectFilter = nextFilters.projects;
+				priorityFilter = nextFilters.priority;
+				labelFilter = nextFilters.labels;
+				labelMatch = "any";
+				milestoneFilter = nextFilters.milestone;
+				filterHeader.setFilters(nextFilters);
 				applyFilters();
 				notifyFilterChange();
 			}
+			return;
 		} finally {
 			filterPopupOpen = false;
 			focusFilterControl(filterId);
@@ -601,15 +534,7 @@ export async function viewTaskEnhanced(
 		statuses,
 		availableLabels,
 		availableMilestones: availableMilestoneTitles,
-		visibleFilters: [
-			"search",
-			"status",
-			"type",
-			...(configuredProjects.length > 0 ? (["project"] as const) : []),
-			"priority",
-			"milestone",
-			"labels",
-		],
+		visibleFilters: taskFilterHeaderControls(configuredProjects),
 		initialFilters: {
 			search: searchQuery,
 			status: statusFilter,
@@ -814,16 +739,20 @@ export async function viewTaskEnhanced(
 		const nextFilteredTasks = applyTaskFilters(
 			allTasks,
 			{
-				query: searchQuery,
-				status: statusFilter.length > 0 ? [...statusFilter] : undefined,
+				...taskFilterOptions(
+					{
+						search: searchQuery,
+						status: statusFilter,
+						taskTypes: taskTypeFilter,
+						projects: projectFilter,
+						priority: priorityFilter,
+						labels: labelFilter,
+						milestone: milestoneFilter,
+					},
+					labelMatch,
+					resolveMilestoneLabel,
+				),
 				excludeStatus: excludeStatusFilter,
-				type: taskTypeFilter,
-				project: projectFilter,
-				priority: priorityFilter || undefined,
-				labels: labelFilter,
-				labelMatch,
-				milestone: milestoneFilter || undefined,
-				resolveMilestoneLabel,
 			},
 			taskSearchIndex,
 		);

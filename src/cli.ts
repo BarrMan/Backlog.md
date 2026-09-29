@@ -6,6 +6,7 @@ import { createInterface } from "node:readline/promises";
 import * as clack from "@clack/prompts";
 import { Command, type OptionValues } from "commander";
 import { runAdvancedConfigWizard } from "./commands/advanced-config-wizard.ts";
+import { registerAgentWorkspaceCommands } from "./commands/agent-workspace.ts";
 import { type CompletionInstallResult, installCompletion, registerCompletionCommand } from "./commands/completion.ts";
 import { configureAdvancedSettings } from "./commands/configure-advanced-settings.ts";
 import {
@@ -5921,6 +5922,12 @@ registerCompletionCommand(program);
 
 // Instructions command group
 registerInstructionsCommand(program);
+
+// Task-centered agent workspace command groups.
+registerAgentWorkspaceCommands(program, {
+	project: async () => new Core(await requireProjectRoot()),
+	root: async () => new Core(await requireRuntimeCwd()),
+});
 
 // MCP command group
 registerMcpCommand(program);

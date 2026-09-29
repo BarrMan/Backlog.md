@@ -70,6 +70,7 @@ export function serializeTask(task: Task): string {
 		...(task.project && { project: task.project }),
 		...(task.ordinal !== undefined && { ordinal: task.ordinal }),
 		...(task.onStatusChange && { onStatusChange: task.onStatusChange }),
+		...(task.agentConfiguration && { agentConfiguration: task.agentConfiguration }),
 	};
 
 	let contentBody = task.rawContent ?? "";

@@ -1,3 +1,5 @@
+import type { AgentConfiguration } from "../agent-workspace/types.ts";
+
 export type TaskStatus = string;
 
 /**
@@ -85,6 +87,7 @@ export interface Task {
 	source?: "local" | "remote" | "completed" | "local-branch";
 	/** Optional per-task callback command to run on status change (overrides global config) */
 	onStatusChange?: string;
+	agentConfiguration?: AgentConfiguration;
 }
 
 export interface MilestoneBucket {
@@ -182,6 +185,7 @@ export interface TaskUpdateInput {
 	checkDefinitionOfDone?: number[];
 	uncheckDefinitionOfDone?: number[];
 	rawContent?: string;
+	agentConfiguration?: AgentConfiguration | null;
 }
 
 export interface TaskListFilter {

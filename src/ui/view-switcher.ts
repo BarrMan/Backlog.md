@@ -6,7 +6,7 @@
 import type { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
 
-export type ViewType = "task-list" | "task-detail" | "kanban";
+export type ViewType = "task-list" | "task-detail" | "kanban" | "workspace";
 
 export interface ViewState {
 	type: ViewType;
@@ -223,6 +223,8 @@ export class ViewSwitcher {
 			case "kanban":
 				// Switch back to previous task view
 				return this.switchToTaskView();
+			case "workspace":
+				return this.state;
 			default:
 				return this.state;
 		}

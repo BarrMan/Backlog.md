@@ -2108,6 +2108,15 @@ export class Core {
 			}
 		}
 
+		if (input.agentConfiguration !== undefined) {
+			const next = input.agentConfiguration ?? undefined;
+			if (JSON.stringify(task.agentConfiguration) !== JSON.stringify(next)) {
+				if (next) task.agentConfiguration = structuredClone(next);
+				else delete task.agentConfiguration;
+				mutated = true;
+			}
+		}
+
 		if (input.assignee !== undefined) {
 			const sanitizedAssignee = normalizeStringList(input.assignee) ?? [];
 			if (!stringArraysEqual(sanitizedAssignee, task.assignee ?? [])) {

@@ -234,6 +234,7 @@ export function parseTask(content: string): Task {
 		project: frontmatter.project ? String(frontmatter.project) : undefined,
 		ordinal: frontmatter.ordinal !== undefined ? Number(frontmatter.ordinal) : undefined,
 		onStatusChange: frontmatter.onStatusChange ? String(frontmatter.onStatusChange) : undefined,
+		agentConfiguration: frontmatter.agentConfiguration as Task["agentConfiguration"],
 	};
 }
 

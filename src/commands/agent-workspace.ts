@@ -1,0 +1,309 @@
+import { readFile } from "node:fs/promises";
+import type { Command } from "commander";
+import {
+	initializeAgentConfiguration,
+	loadAgentConfiguration,
+	resolveAgentConfiguration,
+	updateAgentConfiguration,
+} from "../agent-workspace/config.ts";
+import { AgentSessionService } from "../agent-workspace/sessions.ts";
+import type { AgentConfigScope, AgentConfiguration, AgentPreset } from "../agent-workspace/types.ts";
+import { spawnSessionWorker } from "../agent-workspace/worker.ts";
+import type { Core } from "../core/backlog.ts";
+import { runUnifiedView } from "../ui/unified-view.ts";
+import { addHelpSchema, choiceType } from "./help-schema.ts";
+
+const SCOPES = ["root", "project", "card"] as const;
+const BOOTSTRAPS = ["opencode", "claude", "codex", "gemini", "antigravity", "prompt"] as const;
+
+function parseScope(value: string): AgentConfigScope {
+	if ((SCOPES as readonly string[]).includes(value)) return value as AgentConfigScope;
+	throw new Error(`Invalid configuration scope: ${value}. Valid scopes: ${SCOPES.join(", ")}`);
+}
+
+function parseEnv(values: string[] = []): Record<string, string> {
+	const entries = values.map((value) => {
+		const separator = value.indexOf("=");
+		if (separator <= 0) throw new Error(`Invalid environment value: ${value}. Use NAME=value.`);
+		return [value.slice(0, separator), value.slice(separator + 1)] as const;
+	});
+	return Object.fromEntries(entries);
+}
+
+function parseBoolean(value: string): boolean {
+	if (value === "true") return true;
+	if (value === "false") return false;
+	throw new Error("--worktree must be true or false.");
+}
+
+function print(value: unknown): void {
+	process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function taskIdForScope(scope: AgentConfigScope, taskId: string | undefined): string | undefined {
+	if (scope === "card" && !taskId) throw new Error("--task is required for card configuration.");
+	return taskId;
+}
+
+type PresetOptions = {
+	preset?: string;
+	command?: string;
+	env?: string[];
+	clearEnv?: boolean;
+	prepare?: string;
+	worktree?: string;
+	bootstrap?: string;
+};
+
+function applyPresetOptions(
+	configuration: AgentConfiguration,
+	presetName: string,
+	options: PresetOptions,
+): AgentConfiguration {
+	if (options.clearEnv && options.env?.length) throw new Error("Cannot combine --env with --clear-env.");
+	const current = configuration.presets[presetName];
+	if (!current) throw new Error(`Agent preset not found: ${presetName}. Use agent-config create to add it.`);
+	if (options.bootstrap && !(BOOTSTRAPS as readonly string[]).includes(options.bootstrap)) {
+		throw new Error(`Invalid bootstrap: ${options.bootstrap}. Valid values: ${BOOTSTRAPS.join(", ")}`);
+	}
+	const preset: AgentPreset = {
+		...current,
+		...(options.command !== undefined && { command: options.command }),
+		...(options.env && { env: parseEnv(options.env) }),
+		...(options.clearEnv && { env: {} }),
+		...(options.prepare !== undefined && { prepare: options.prepare }),
+		...(options.worktree !== undefined && { worktree: parseBoolean(options.worktree) }),
+		...(options.bootstrap && { bootstrap: options.bootstrap as AgentPreset["bootstrap"] }),
+	};
+	return { ...configuration, selectedPreset: presetName, presets: { ...configuration.presets, [presetName]: preset } };
+}
+
+type CoreFactory = {
+	project(): Promise<Core>;
+	root(): Promise<Core>;
+};
+
+export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFactory): void {
+	const coreForScope = (scope: AgentConfigScope) => (scope === "root" ? getCore.root() : getCore.project());
+	addHelpSchema(program.command("workspace"), {
+		reads: "Agent session state and configuration",
+		output: "Interactive task-centered agent Workspace",
+		examples: ["backlog workspace"],
+	})
+		.description("open the task-centered agent workspace")
+		.action(async () => runUnifiedView({ core: await getCore.project(), initialView: "workspace" }));
+
+	const sessions = addHelpSchema(program.command("agent-session"), {
+		reads: "Task session state, output, and handoff records",
+		optional: [{ name: "--help", type: "Boolean", description: "Show lifecycle command help" }],
+		output: "Session records as JSON; attach connects to the session terminal",
+		examples: ["backlog agent-session list BACK-123", "backlog agent-session start BACK-123 --preset opencode"],
+	})
+		.description("manage task agent sessions")
+		.showHelpAfterError();
+
+	sessions
+		.command("list <taskId>")
+		.description("list current and prior sessions for a task")
+		.action(async (taskId) => {
+			print(await new AgentSessionService(await getCore.project()).list(taskId));
+		});
+	sessions
+		.command("start <taskId>")
+		.description("start a task session")
+		.option("--preset <name>", "configured preset name")
+		.option("--predecessor <sessionId>", "session this one replaces")
+		.action(async (taskId, options) => {
+			print(
+				await new AgentSessionService(await getCore.project()).start(taskId, {
+					preset: options.preset,
+					predecessorId: options.predecessor,
+				}),
+			);
+		});
+	sessions
+		.command("stop <taskId>")
+		.description("stop the active or selected session")
+		.option("--session <sessionId>", "session ID")
+		.action(async (taskId, options) => {
+			await new AgentSessionService(await getCore.project()).stop(taskId, options.session);
+		});
+	sessions
+		.command("attach <taskId>")
+		.description("attach this terminal to a session")
+		.option("--session <sessionId>", "session ID")
+		.action(async (taskId, options) => {
+			await new AgentSessionService(await getCore.project()).attach(taskId, options.session);
+		});
+	sessions
+		.command("preview <taskId>")
+		.description("preview session terminal output")
+		.option("--session <sessionId>", "session ID")
+		.action(async (taskId, options) => {
+			print(await new AgentSessionService(await getCore.project()).preview(taskId, options.session));
+		});
+	sessions
+		.command("input <taskId> <input>")
+		.description("send terminal input to a session")
+		.option("--session <sessionId>", "session ID")
+		.action(async (taskId, input, options) => {
+			await new AgentSessionService(await getCore.project()).sendInput(taskId, input, options.session);
+		});
+	sessions
+		.command("handoff <taskId>")
+		.description("request a handoff from the active session")
+		.action(async (taskId) => print(await new AgentSessionService(await getCore.project()).requestHandoff(taskId)));
+	sessions
+		.command("handoff-complete <taskId>")
+		.description("record handoff content from a ready request")
+		.requiredOption("--request <id>", "handoff request ID")
+		.option("--content <text>", "handoff Markdown")
+		.option("--file <path>", "read handoff Markdown from a file")
+		.action(async (taskId, options) => {
+			if (Boolean(options.content) === Boolean(options.file))
+				throw new Error("Pass exactly one of --content or --file.");
+			const content = options.file ? await readFile(options.file, "utf8") : options.content;
+			const core = await getCore.project();
+			await new AgentSessionService(core).completeHandoff(taskId, options.request, content);
+			await spawnSessionWorker("handoff-continue", taskId, core.fs.rootDir);
+		});
+	sessions
+		.command("handoff-continue <taskId>")
+		.description("start the replacement session after a completed handoff")
+		.option("--worker", "run as a detached continuation worker")
+		.action(async (taskId, options) => {
+			if (options.worker) await Bun.sleep(250);
+			print(await new AgentSessionService(await getCore.project()).continueHandoff(taskId));
+		});
+	sessions
+		.command("handoff-dispatch <taskId>")
+		.description("deliver a pending handoff when the agent composer is empty")
+		.option("--worker", "wait in the background for an empty agent composer")
+		.action(async (taskId, options) => {
+			const service = new AgentSessionService(await getCore.project());
+			do {
+				const state = await service.list(taskId);
+				if (state.handoff?.status !== "requested" || state.handoff.dispatchedAt) return;
+				const session = state.sessions.find((item) => item.id === state.handoff?.sessionId);
+				if (session?.status !== "running") return;
+				const result = await service.dispatchHandoff(taskId);
+				if (result === "sent" || !options.worker) return;
+				await Bun.sleep(1000);
+			} while (options.worker);
+		});
+	sessions
+		.command("recover <taskId>")
+		.description("recover task session state")
+		.action(async (taskId) => {
+			await new AgentSessionService(await getCore.project()).recover(taskId);
+		});
+
+	const config = addHelpSchema(program.command("agent-config"), {
+		reads: "Scoped agent workspace configuration",
+		writes: "A selected preset in a complete scoped configuration",
+		optional: [
+			{ name: "--task", type: "Task ID", description: "Required for card scope" },
+			{ name: "--preset", type: "String", description: "Selected preset name" },
+			{ name: "--command", type: "String", description: "Agent command" },
+			{ name: "--env", type: "NAME=value", description: "Replace selected preset environment; repeatable" },
+			{ name: "--clear-env", type: "Boolean", description: "Clear selected preset environment" },
+			{ name: "--prepare", type: "String", description: "Preparation command" },
+			{ name: "--worktree", type: "true|false", description: "Create a task worktree" },
+			{ name: "--bootstrap", type: choiceType(BOOTSTRAPS), description: "How the initial prompt is delivered" },
+		],
+		output: "Resolved or scoped configuration as JSON",
+		examples: [
+			"backlog agent-config show",
+			"backlog agent-config init project",
+			"backlog agent-config create card --task BACK-123 --preset custom --command 'agent {prompt}'",
+			"backlog agent-config set card --task BACK-123 --preset custom --worktree true",
+		],
+	})
+		.description("inspect and selectively edit scoped agent configuration")
+		.showHelpAfterError();
+	config
+		.command("show [scope]")
+		.description("show resolved or exact scoped configuration")
+		.option("--task <taskId>", "task ID for card scope")
+		.action(async (scope, options) => {
+			if (!scope)
+				return print(
+					await resolveAgentConfiguration(await (options.task ? getCore.project() : getCore.root()), options.task),
+				);
+			const parsed = parseScope(scope);
+			print(await loadAgentConfiguration(await coreForScope(parsed), parsed, taskIdForScope(parsed, options.task)));
+		});
+	config
+		.command("init <scope>")
+		.description("copy the immediate parent configuration into an empty scope")
+		.option("--task <taskId>", "task ID for card scope")
+		.action(async (scope, options) => {
+			const parsed = parseScope(scope);
+			print(
+				await initializeAgentConfiguration(await coreForScope(parsed), parsed, taskIdForScope(parsed, options.task)),
+			);
+		});
+	const presetOptions = (command: Command, includePreset = true) => {
+		if (includePreset) command.option("--preset <name>", "preset to select or edit");
+		return command
+			.option("--command <command>", "agent command")
+			.option("--env <NAME=value>", "replace environment; repeatable", (value, previous: string[] = []) => [
+				...previous,
+				value,
+			])
+			.option("--clear-env", "clear environment")
+			.option("--prepare <command>", "preparation command")
+			.option("--worktree <true|false>", "whether this preset creates a worktree")
+			.option("--bootstrap <kind>", `one of: ${BOOTSTRAPS.join(", ")}`)
+			.option("--task <taskId>", "task ID for card scope");
+	};
+	presetOptions(config.command("set <scope>").description("select or selectively update one preset")).action(
+		async (scope, options: PresetOptions & { task?: string }) => {
+			const parsed = parseScope(scope);
+			const taskId = taskIdForScope(parsed, options.task);
+			const core = await coreForScope(parsed);
+			const next = await updateAgentConfiguration(
+				core,
+				parsed,
+				(editable) => applyPresetOptions(editable, options.preset ?? editable.selectedPreset, options),
+				taskId,
+			);
+			print(next);
+		},
+	);
+	presetOptions(
+		config.command("create <scope>").description("add a custom preset without removing existing presets"),
+		false,
+	)
+		.requiredOption("--preset <name>", "new preset name")
+		.action(async (scope, options: PresetOptions & { task?: string }) => {
+			if (options.command === undefined) throw new Error("--command is required when creating a custom preset.");
+			const parsed = parseScope(scope);
+			const taskId = taskIdForScope(parsed, options.task);
+			const core = await coreForScope(parsed);
+			const preset = options.preset as string;
+			const next = await updateAgentConfiguration(
+				core,
+				parsed,
+				(editable) => {
+					if (Object.hasOwn(editable.presets, preset))
+						throw new Error(`Agent preset already exists: ${preset}. Use agent-config set to edit it.`);
+					const base = editable.presets[editable.selectedPreset];
+					if (!base) throw new Error(`Selected preset is missing: ${editable.selectedPreset}`);
+					return applyPresetOptions(
+						{
+							...editable,
+							presets: {
+								...editable.presets,
+								[preset]: { ...base, command: options.command as string, bootstrap: "prompt" },
+							},
+						},
+						preset,
+						options,
+					);
+				},
+				taskId,
+			);
+			print(next);
+		});
+}

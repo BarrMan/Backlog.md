@@ -11,10 +11,11 @@ import { collectAvailableLabels } from "../utils/label-filter.ts";
 import { hasAnyPrefix } from "../utils/prefix-config.ts";
 import { applyTaskFilters, createTaskSearchIndex } from "../utils/task-search.ts";
 import { type TaskWatcherCallbacks, watchTasks } from "../utils/task-watcher.ts";
+import { createWorkspaceViewState, runAgentWorkspace } from "./agent-workspace.ts";
 import { renderBoardTui } from "./board.ts";
 import { createLoadingScreen } from "./loading.ts";
 import { buildTaskViewerMilestoneFilterModel, viewTaskEnhanced } from "./task-viewer-with-search.ts";
-import { keepTuiInputAlive } from "./tui.ts";
+import { createScreen, formatTuiTitle, keepTuiInputAlive } from "./tui.ts";
 import { type ViewState, ViewSwitcher, type ViewType } from "./view-switcher.ts";
 
 export interface UnifiedViewOptions {
@@ -270,11 +271,11 @@ export async function getDuplicateTaskStartupWarning(core: Core): Promise<string
 	return groups.length > 0 ? formatDuplicateTaskIdSummary(groups) : undefined;
 }
 
-type ViewResult = "switch" | "exit";
+type ViewResult = "switch" | "workspace" | "exit";
 
 export function getEmptyUnifiedViewMessage(initialView: ViewType, parentTaskId?: string): string | null {
 	if (parentTaskId) return `No child tasks found for parent task ${parentTaskId}.`;
-	return initialView === "kanban" ? null : "No tasks found.";
+	return initialView === "kanban" || initialView === "workspace" ? null : "No tasks found.";
 }
 
 export async function createTaskFromBoard(
@@ -293,6 +294,14 @@ export async function createTaskFromBoard(
  */
 export async function runUnifiedView(options: UnifiedViewOptions): Promise<void> {
 	const releaseTuiInput = keepTuiInputAlive();
+	let sharedScreen: ReturnType<typeof createScreen> | undefined;
+	let taskWatcher: ReturnType<typeof watchTasks> | undefined;
+	let configWatcher: ReturnType<typeof watchConfig> | undefined;
+	const stopWatchers = () => {
+		taskWatcher?.stop();
+		configWatcher?.stop();
+	};
+	process.once("exit", stopWatchers);
 	try {
 		const {
 			tasks: loadedTasks,
@@ -338,6 +347,7 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 		let isRunning = true;
 		let viewSwitcher: ViewSwitcher | null = null;
 		let currentView: ViewType = options.initialView;
+		const workspaceState = createWorkspaceViewState();
 		let selectedTask: Task | undefined = options.selectedTask;
 		let tasks = baseTasks;
 		let kanbanStatuses = loadedStatuses ?? [];
@@ -345,6 +355,12 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 		let taskListUpdater:
 			| ((nextTasks: Task[], nextStatuses: string[], nextLabels: string[], nextSelectedTask?: Task) => void)
 			| null = null;
+		const getSharedScreen = () => {
+			if (process.stdout.isTTY) {
+				sharedScreen ??= createScreen({ title: formatTuiTitle("Board", initialConfig?.projectName) });
+			}
+			return sharedScreen;
+		};
 
 		const getRenderableTasks = () => tasks.filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id));
 		const getBoardAvailableLabels = () => collectAvailableLabels(getRenderableTasks(), configuredLabels);
@@ -380,10 +396,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 			core: options.core,
 			initialState,
 		});
-		const watcher = watchTasks(options.core, taskUpdateCallbacks, baseTasks);
-		process.on("exit", () => watcher.stop());
+		taskWatcher = watchTasks(options.core, taskUpdateCallbacks, baseTasks);
 
-		const configWatcher = watchConfig(options.core, {
+		configWatcher = watchConfig(options.core, {
 			onConfigChanged: (config) => {
 				kanbanStatuses = config?.statuses ?? [];
 				configuredLabels = config?.labels ?? [];
@@ -392,9 +407,12 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 			},
 		});
 
-		process.on("exit", () => configWatcher.stop());
 		// Function to show task view
 		const showTaskView = async (): Promise<ViewResult> => {
+			// The task viewer owns a separate screen, so release the Board/Workspace screen
+			// before opening it rather than leaving two Blessed screens active at once.
+			sharedScreen?.destroy();
+			sharedScreen = undefined;
 			const availableTasks = tasks.filter((t) => t.id && t.id.trim() !== "" && hasAnyPrefix(t.id));
 
 			if (availableTasks.length === 0) {
@@ -464,14 +482,19 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 					},
 					onTabPress,
 				}).then(() => {
-					// If user wants to exit, do it immediately
-					if (result === "exit") {
-						process.exit(0);
-					}
 					taskListUpdater = null;
 					resolve(result);
 				});
 			});
+		};
+
+		const showWorkspaceView = async (): Promise<ViewResult> => {
+			const result = await runAgentWorkspace(options.core, {
+				screen: getSharedScreen(),
+				preserveScreen: true,
+				state: workspaceState,
+			});
+			return result === "board" ? "switch" : "exit";
 		};
 
 		// Function to show kanban view
@@ -492,6 +515,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 				const onTabPress = async () => {
 					result = "switch";
 				};
+				const onWorkspacePress = async () => {
+					result = "workspace";
+				};
 
 				renderBoardTui(kanbanTasks, statuses, layout, maxColumnWidth, {
 					core: options.core,
@@ -499,6 +525,7 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 						selectedTask = task;
 					},
 					onTabPress,
+					onWorkspacePress,
 					filters: createKanbanSharedFilters(currentFilters),
 					availableLabels: getBoardAvailableLabels(),
 					availableMilestones: getBoardAvailableMilestones(),
@@ -530,11 +557,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 					projects: config?.projects,
 					hideEmptyColumns: config?.hideEmptyColumns ?? false,
 					createTask: async (input) => createTaskFromBoard(options.core, input, taskUpdateCallbacks.onTaskAdded),
+					screen: getSharedScreen(),
+					preserveScreen: true,
 				}).then(() => {
-					// If user wants to exit, do it immediately
-					if (result === "exit") {
-						process.exit(0);
-					}
 					boardUpdater = null;
 					resolve(result);
 				});
@@ -553,6 +578,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 				case "kanban":
 					result = await showKanbanView();
 					break;
+				case "workspace":
+					result = await showWorkspaceView();
+					break;
 				default:
 					result = "exit";
 			}
@@ -562,17 +590,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 
 			// Handle the result
 			if (result === "switch") {
-				// User pressed Tab, switch to the next view
-				switch (currentView) {
-					case "task-list":
-					case "task-detail":
-						currentView = "kanban";
-						break;
-					case "kanban":
-						// Always go to task-list view when switching from board, keeping selected task highlighted
-						currentView = "task-list";
-						break;
-				}
+				currentView = currentView === "workspace" ? "kanban" : currentView === "kanban" ? "task-list" : "kanban";
+			} else if (result === "workspace") {
+				currentView = "workspace";
 			} else {
 				// User pressed q/Esc, exit the loop
 				isRunning = false;
@@ -582,6 +602,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 		console.error(error instanceof Error ? error.message : error);
 		process.exit(1);
 	} finally {
+		process.removeListener("exit", stopWatchers);
+		stopWatchers();
+		sharedScreen?.destroy();
 		releaseTuiInput();
 	}
 }

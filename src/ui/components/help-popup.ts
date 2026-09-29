@@ -12,6 +12,7 @@ type Shortcut = {
 // not Shift+T. The bound key is the lowercase letter.
 const BOARD_SHORTCUTS: Shortcut[] = [
 	{ key: "Tab", desc: "Switch View (Kanban/List)" },
+	{ key: "Shift+B", desc: "Open Workspace" },
 	{ key: "N", desc: "Create a task" },
 	{ key: "/", desc: "Search tasks" },
 	{ key: "T", desc: "Filter by Type" },

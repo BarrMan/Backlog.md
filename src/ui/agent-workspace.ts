@@ -1,0 +1,1174 @@
+import { box, list, scrollablebox, textarea } from "neo-neo-bblessed";
+import { getEditableAgentConfiguration, updateAgentConfiguration } from "../agent-workspace/config.ts";
+import { AgentSessionService } from "../agent-workspace/sessions.ts";
+import type {
+	AgentConfigScope,
+	AgentConfiguration,
+	AgentPreset,
+	AgentSession,
+	TaskSessions,
+} from "../agent-workspace/types.ts";
+import type { Core } from "../core/backlog.ts";
+import type { Task, TaskUpdateInput } from "../types/index.ts";
+import { collectAvailableLabels } from "../utils/label-filter.ts";
+import { getPriorityOptions } from "../utils/priority-config.ts";
+import { getProjectValues } from "../utils/project-config.ts";
+import { applyTaskFilters, createTaskSearchIndex } from "../utils/task-search.ts";
+import { getTaskTypeValues } from "../utils/task-type-config.ts";
+import {
+	buildWorkspaceEntries,
+	changedTaskFields,
+	createWorkspaceDraft,
+	type DraftField,
+	parseAcceptanceCriteria,
+	taskWithWorkspaceDraft,
+	terminalInput,
+	type WorkspaceDraft,
+	type WorkspaceEntry,
+} from "./agent-workspace-model.ts";
+import {
+	createFilterHeader,
+	type FilterControlId,
+	type FilterHeader,
+	type FilterState,
+} from "./components/filter-header.ts";
+import { openTaskComposer, type TaskComposerOptions } from "./components/task-composer.ts";
+import { formatFooterContent } from "./footer-content.ts";
+import { getStatusColor, wrapStatusColor } from "./status-icon.ts";
+import { openTaskFilterPicker, taskFilterHeaderControls, taskFilterOptions } from "./task-filter-wiring.ts";
+import {
+	buildTaskViewerMilestoneFilterModel,
+	formatTaskViewerListItem,
+	generateDetailContent,
+} from "./task-viewer-with-search.ts";
+import { addScrollKeys, createScreen, formatTuiTitle } from "./tui.ts";
+
+type Mode = "navigation" | "details" | "field" | "inline" | "history" | "config" | "composer";
+export type WorkspaceViewState = {
+	drafts: Map<string, WorkspaceDraft>;
+	scrolls: Map<string, { details: number; preview: number }>;
+	filters: FilterState;
+	collapsed: Set<string>;
+	selectedTaskId?: string;
+};
+
+export function createWorkspaceViewState(): WorkspaceViewState {
+	return {
+		drafts: new Map(),
+		scrolls: new Map(),
+		filters: { search: "", status: [], taskTypes: [], projects: [], priority: "", labels: [], milestone: "" },
+		collapsed: new Set(),
+	};
+}
+
+const FIELDS: Array<[DraftField, string]> = [
+	["title", "Title"],
+	["description", "Description"],
+	["acceptanceCriteria", "Acceptance criteria"],
+	["implementationPlan", "Plan"],
+	["implementationNotes", "Notes"],
+	["finalSummary", "Final summary"],
+];
+type ScrollBox = { getScroll(): number; setScroll(value: number): void; setLabel?(label: string): void };
+
+function sessionLabel(session?: AgentSession): string {
+	return session ? `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}` : "No active session";
+}
+function detailsText(
+	task: Task,
+	draft?: WorkspaceDraft,
+	session?: AgentSession,
+	handoff?: TaskSessions["handoff"],
+): string {
+	const { headerContent, bodyContent } = generateDetailContent(taskWithWorkspaceDraft(task, draft));
+	return [
+		...headerContent,
+		"",
+		`{bold}Session:{/bold} ${sessionLabel(session)}`,
+		handoff?.error ? `{bold}Handoff:{/bold} {yellow-fg}${handoff.error}{/}` : "",
+		"",
+		...bodyContent,
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+/** Interactive task workspace. It intentionally leaves agent sessions running on exit. */
+export async function runAgentWorkspace(
+	core: Core,
+	options: {
+		screen?: ReturnType<typeof createScreen>;
+		service?: AgentSessionService;
+		state?: WorkspaceViewState;
+		preserveScreen?: boolean;
+		taskComposer?: (options: TaskComposerOptions) => Promise<Task | null>;
+	} = {},
+): Promise<"board" | "exit"> {
+	if (!process.stdout.isTTY) {
+		console.log("Workspace requires an interactive terminal.");
+		return "exit";
+	}
+	const initialConfig = await core.filesystem.loadConfig();
+	const [milestones, archivedMilestones] = await Promise.all([
+		core.filesystem.listMilestones(),
+		core.filesystem.listArchivedMilestones(),
+	]);
+	const { availableMilestoneTitles, resolveMilestoneLabel } = buildTaskViewerMilestoneFilterModel(
+		milestones,
+		archivedMilestones,
+	);
+	const service = options.service ?? new AgentSessionService(core);
+	const state = options.state ?? createWorkspaceViewState();
+	return new Promise<"board" | "exit">((resolve) => {
+		const screen = options.screen ?? createScreen({ title: formatTuiTitle("Workspace", initialConfig?.projectName) });
+		const screenEvents = screen as typeof screen & {
+			removeListener(event: string, listener: (...args: never[]) => void): void;
+		};
+		let filterHeader: FilterHeader;
+		const tree = list({
+			parent: screen,
+			top: 0,
+			left: 0,
+			width: "28%",
+			bottom: 1,
+			border: "line",
+			label: " Tasks ",
+			keys: false,
+			mouse: true,
+			tags: true,
+			style: {
+				border: { fg: "gray" },
+				focus: { border: { fg: "yellow" } },
+				selected: { inverse: true, bold: true },
+			},
+		});
+		const details = scrollablebox({
+			parent: screen,
+			top: 0,
+			left: "28%",
+			width: "72%",
+			height: "54%",
+			border: "line",
+			label: " Details ",
+			tags: true,
+			scrollable: true,
+			alwaysScroll: true,
+			mouse: true,
+			keys: true,
+			vi: true,
+			wrap: true,
+			style: { border: { fg: "gray" }, focus: { border: { fg: "yellow" } } },
+		});
+		const preview = scrollablebox({
+			parent: screen,
+			top: 0,
+			left: "28%",
+			width: "72%",
+			bottom: 1,
+			border: "line",
+			label: " Live preview ",
+			scrollable: true,
+			alwaysScroll: true,
+			mouse: true,
+			keys: true,
+			vi: true,
+			style: { border: { fg: "gray" }, focus: { border: { fg: "yellow" } } },
+		});
+		const footer = box({
+			parent: screen,
+			bottom: 0,
+			left: 0,
+			width: "100%",
+			height: 1,
+			content: "",
+		});
+		const statusRow = box({ parent: screen, bottom: 1, left: 0, width: "100%", height: 1, content: "" }) as ReturnType<
+			typeof box
+		> & { hide(): void; show(): void };
+		statusRow.hide();
+		addScrollKeys(details, screen);
+		addScrollKeys(preview, screen);
+		let mode: Mode = "navigation";
+		let closed = false;
+		let busy = false;
+		let generation = 0;
+		let selected = 0;
+		let leftWidth = 28;
+		let split = 54;
+		let statuses = initialConfig?.statuses ?? ["To Do", "In Progress", "Done"];
+		const taskTypes = getTaskTypeValues(initialConfig);
+		const projects = getProjectValues(initialConfig);
+		const priorityOptions = getPriorityOptions(initialConfig);
+		let availableLabels = collectAvailableLabels([], initialConfig?.labels ?? []);
+		let filters = state.filters;
+		let filterFocused = false;
+		let filterPopupOpen = false;
+		let tasks: Task[] = [];
+		let entries: WorkspaceEntry[] = [];
+		let selectedTask: Task | undefined;
+		let taskSessions: TaskSessions | undefined;
+		let historySession: AgentSession | undefined;
+		let fieldEditor: { field: DraftField; widget: ReturnType<typeof textarea> } | undefined;
+		let inputQueue = Promise.resolve();
+		let attached = false;
+		let sessionAction = false;
+		let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+		let disposeConfig = () => {};
+		const { collapsed, drafts, scrolls } = state;
+		const active = () => taskSessions?.sessions.find((item) => item.id === taskSessions?.activeSessionId);
+		const focusedTask = () => {
+			const entry = entries[selected];
+			return entry?.kind === "task" ? entry.task : undefined;
+		};
+		let footerHeight = 1;
+		let notification = "";
+		const dispose = () => {
+			if (closed) return;
+			closed = true;
+			++generation;
+			clearInterval(poll);
+			clearNotification();
+			disposeConfig();
+			if (fieldEditor) {
+				(fieldEditor.widget as unknown as { cancel?: () => void }).cancel?.();
+				fieldEditor.widget.destroy();
+				fieldEditor = undefined;
+			}
+			filterHeader.destroy();
+			for (const widget of [tree, details, preview, footer, statusRow]) widget.destroy();
+			screenEvents.removeListener("mouse", onMouse);
+			screenEvents.removeListener("keypress", onKeypress);
+			screenEvents.removeListener("resize", onResize);
+			screenEvents.removeListener("destroy", onDestroy);
+		};
+		const close = (result: "board" | "exit") => {
+			dispose();
+			if (!options.preserveScreen) screen.destroy();
+			resolve(result);
+		};
+		const footerHelp = () => {
+			if (mode === "details") return " [E/Enter] Edit | [↑↓] Field | [S] History | [Esc] Tasks ";
+			if (mode === "history") return " [↑↓] Session | [Enter] Preview | [Esc] Details ";
+			if (mode === "field") return " [Ctrl+S] Save | [Esc] Details ";
+			if (mode === "inline") return " [Ctrl+Q] Tasks | [q] Input | [↑↓] Input ";
+			if (mode === "config") return " [Tab] Next | [Ctrl+S] Save | [Esc] Tasks ";
+			return " [↑↓] Task | [/] Search | [Space] Details | [Tab] Input | [Enter] Start/Attach | [N] New | [Shift+B] Board | [q] Close ";
+		};
+		const updateFooter = () => {
+			const formatted = formatFooterContent(footerHelp(), screen.width);
+			footerHeight = formatted.height;
+			(footer as unknown as { height: number }).height = footerHeight;
+			footer.setContent(formatted.content);
+			(statusRow as unknown as { bottom: number }).bottom = footerHeight;
+			(tree as unknown as { bottom: number }).bottom = footerHeight + (notification ? 1 : 0);
+			(preview as unknown as { bottom: number }).bottom = footerHeight + (notification ? 1 : 0);
+		};
+		const render = () => {
+			if (closed || attached) return;
+			layout();
+			screen.render();
+		};
+		const clearNotification = () => {
+			if (notificationTimer) clearTimeout(notificationTimer);
+			notificationTimer = undefined;
+			notification = "";
+			statusRow.setContent("");
+			statusRow.hide();
+		};
+		const tell = (message: string) => {
+			if (closed) return;
+			if (notificationTimer) clearTimeout(notificationTimer);
+			notification = message;
+			statusRow.setContent(` ${message} `);
+			statusRow.show();
+			notificationTimer = setTimeout(() => {
+				clearNotification();
+				render();
+			}, 3000);
+			render();
+		};
+		const run = (action: () => Promise<void>) => {
+			void action().catch((error) => tell(error instanceof Error ? error.message : String(error)));
+		};
+		const headerHeight = () => filterHeader.getHeight();
+		const detailsHeight = () =>
+			Math.max(
+				1,
+				Math.floor((Math.max(2, screen.height - headerHeight() - footerHeight - (notification ? 1 : 0)) * split) / 100),
+			);
+		const layout = () => {
+			updateFooter();
+			const right = 100 - leftWidth;
+			const top = headerHeight();
+			const detailHeight = detailsHeight();
+			(tree as unknown as { width: string }).width = `${leftWidth}%`;
+			(tree as unknown as { top: number }).top = top;
+			for (const panel of [details, preview]) {
+				(panel as unknown as { left: string; width: string }).left = `${leftWidth}%`;
+				(panel as unknown as { left: string; width: string }).width = `${right}%`;
+			}
+			(details as unknown as { top: number; height: number }).top = top;
+			(details as unknown as { top: number; height: number }).height = detailHeight;
+			(preview as unknown as { top: number }).top = top + detailHeight;
+		};
+		const resizeAgent = () => {
+			if (attached) return;
+			const task = selectedTask;
+			const session = active();
+			if (task && session)
+				run(() =>
+					service.resize(
+						task.id,
+						Math.max(1, Math.floor((screen.width * (100 - leftWidth)) / 100) - 2),
+						Math.max(1, screen.height - headerHeight() - detailsHeight() - footerHeight - (notification ? 1 : 0) - 2),
+						session.id,
+					),
+				);
+		};
+		const showDetails = () => {
+			if (selectedTask) {
+				details.setContent(detailsText(selectedTask, drafts.get(selectedTask.id), active(), taskSessions?.handoff));
+				render();
+			}
+		};
+		const showPreview = async (task = selectedTask, session = historySession ?? active(), token = generation) => {
+			if (!task || (mode === "history" && !session)) {
+				preview.setContent("No session selected.");
+				return;
+			}
+			if (!session) {
+				if (token === generation) {
+					preview.setContent("No active session. Press Enter to start or attach.");
+					render();
+				}
+				return;
+			}
+			const output = await service.preview(task.id, session.id);
+			if (!closed && token === generation && selectedTask?.id === task.id) {
+				preview.setContent(output || "Session has no output yet.");
+				render();
+			}
+		};
+		const leaveInline = () => {
+			if (mode !== "inline" || !selectedTask) return;
+			const task = selectedTask;
+			const session = active();
+			mode = "navigation";
+			if (session) run(() => service.resetSize(task.id, session.id));
+		};
+		const clearTaskSelection = (message: string) => {
+			if (selectedTask)
+				scrolls.set(selectedTask.id, {
+					details: (details as unknown as ScrollBox).getScroll(),
+					preview: (preview as unknown as ScrollBox).getScroll(),
+				});
+			if (fieldEditor) closeField();
+			leaveInline();
+			mode = "navigation";
+			++generation;
+			selectedTask = undefined;
+			state.selectedTaskId = undefined;
+			taskSessions = undefined;
+			historySession = undefined;
+			preview.setLabel?.(" Live preview ");
+			details.setContent(message);
+			preview.setContent("");
+			clearNotification();
+			tree.focus();
+		};
+		const select = async (index: number) => {
+			const entry = entries[index];
+			if (!entry) return;
+			if (entry.kind === "header") {
+				const changed = selected !== index || selectedTask !== undefined;
+				selected = index;
+				tree.select(index);
+				state.selectedTaskId = undefined;
+				if (changed) clearTaskSelection(` ${entry.status} `);
+				render();
+				return;
+			}
+			const unchanged = selectedTask?.id === entry.task.id;
+			if (!unchanged) {
+				clearTaskSelection("");
+				mode = "navigation";
+			}
+			selected = index;
+			tree.select(index);
+			selectedTask = entry.task;
+			state.selectedTaskId = entry.task.id;
+			if (!unchanged) {
+				historySession = undefined;
+				details.setContent(detailsText(entry.task, drafts.get(entry.task.id)));
+				preview.setContent("No active session. Press Enter to start or attach.");
+			}
+			preview.setLabel?.(" Live preview ");
+			const token = ++generation;
+			render();
+			const sessions = await service.list(entry.task.id);
+			if (closed || token !== generation || selectedTask?.id !== entry.task.id) return;
+			taskSessions = sessions;
+			if (mode !== "history") showDetails();
+			if (!unchanged) {
+				const saved = scrolls.get(entry.task.id);
+				(details as unknown as ScrollBox).setScroll(saved?.details ?? 0);
+				(preview as unknown as ScrollBox).setScroll(saved?.preview ?? 0);
+			}
+			if (mode !== "history") await showPreview(entry.task, active(), token);
+		};
+		const toggleGroup = async (index: number) => {
+			const entry = entries[index];
+			if (entry?.kind !== "header") {
+				return;
+			}
+			await select(index);
+			if (collapsed.has(entry.status)) collapsed.delete(entry.status);
+			else collapsed.add(entry.status);
+			await reload(false);
+		};
+		const reload = async (selectTask = true) => {
+			if (busy || closed) return;
+			busy = true;
+			try {
+				const previous = entries[selected];
+				const config = await core.filesystem.loadConfig();
+				if (closed) return;
+				statuses = config?.statuses ?? statuses;
+				tasks = await core.filesystem.listTasks();
+				if (closed) return;
+				availableLabels = collectAvailableLabels(tasks, initialConfig?.labels ?? []);
+				const filteredTasks = applyTaskFilters(
+					tasks,
+					taskFilterOptions(filters, "any", resolveMilestoneLabel),
+					createTaskSearchIndex(tasks),
+				);
+				entries = buildWorkspaceEntries(filteredTasks, statuses, "All", collapsed);
+				const rows = entries.map((entry) =>
+					entry.kind === "task"
+						? `  ${formatTaskViewerListItem(entry.task)}`
+						: `${entry.label.slice(0, 2)} ${wrapStatusColor(entry.status, getStatusColor(entry.status))}${entry.label.slice(2 + entry.status.length)}`,
+				);
+				const list = tree as typeof tree & { removeItem(index: number): void };
+				const node = screen as typeof screen & {
+					remove(this: typeof tree, item: (typeof list.items)[number]): void;
+				};
+				while (list.items.length > rows.length) {
+					const index = list.items.length - 1;
+					// List#remove only handles numeric indexes, so use Node#remove to detach the row.
+					node.remove.call(tree, list.items[index]);
+					list.removeItem(index);
+				}
+				tree.setItems(rows);
+				if (filteredTasks.length === 0) {
+					selected = -1;
+					clearTaskSelection("No tasks match this filter.");
+					render();
+					return;
+				}
+				const retained = entries.findIndex(
+					(entry) => entry.kind === "task" && entry.task.id === (state.selectedTaskId ?? selectedTask?.id),
+				);
+				const header =
+					previous?.kind === "header"
+						? entries.findIndex((entry) => entry.kind === "header" && entry.status === previous.status)
+						: -1;
+				const first = entries.findIndex((entry) => entry.kind === "task");
+				selected =
+					header >= 0 && !selectTask ? header : retained >= 0 ? retained : first >= 0 ? first : entries.length ? 0 : -1;
+				if (selected >= 0) {
+					await select(selected);
+					render();
+				} else {
+					clearTaskSelection("No tasks match this filter.");
+					render();
+				}
+			} finally {
+				busy = false;
+			}
+		};
+		const closeField = () => {
+			if (!fieldEditor || !selectedTask) return;
+			const { field, widget } = fieldEditor;
+			const draft = drafts.get(selectedTask.id) ?? createWorkspaceDraft(selectedTask);
+			draft.values[field] = widget.getValue();
+			const inputState = widget as unknown as { cpos?: { x: number; y: number }; getScroll?: () => number };
+			draft.cursor[field] = {
+				x: inputState.cpos?.x ?? 0,
+				y: inputState.cpos?.y ?? 0,
+				scroll: inputState.getScroll?.() ?? 0,
+			};
+			drafts.set(selectedTask.id, draft);
+			(widget as unknown as { cancel?: () => void }).cancel?.();
+			widget.destroy();
+			fieldEditor = undefined;
+			mode = "details";
+			details.focus();
+			showDetails();
+		};
+		const openField = (field: DraftField) => {
+			if (!selectedTask) return;
+			const task = selectedTask;
+			const draft = drafts.get(task.id) ?? createWorkspaceDraft(task);
+			drafts.set(task.id, draft);
+			mode = "field";
+			const widget = textarea({
+				parent: screen,
+				top: headerHeight(),
+				left: `${leftWidth}%`,
+				width: `${100 - leftWidth}%`,
+				height: detailsHeight(),
+				border: "line",
+				label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · Ctrl+S save · Esc details `,
+				keys: true,
+				mouse: true,
+				inputOnFocus: false,
+				scrollable: true,
+				value: draft.values[field],
+			});
+			fieldEditor = { field, widget };
+			const savedCursor = draft.cursor[field];
+			if (savedCursor) {
+				const inputState = widget as unknown as {
+					cpos?: { x: number; y: number };
+					setScroll?: (value: number) => void;
+				};
+				inputState.cpos = { x: savedCursor.x, y: savedCursor.y };
+				inputState.setScroll?.(savedCursor.scroll);
+			}
+			widget.focus();
+			widget.readInput();
+			widget.key(["C-s"], () => {
+				closeField();
+				run(async () => {
+					const current = await core.getTask(task.id);
+					if (!current) throw new Error("Task no longer exists.");
+					const changes = changedTaskFields(draft, current);
+					const { acceptanceCriteria, ...textChanges } = changes;
+					const input: TaskUpdateInput = textChanges;
+					if (acceptanceCriteria !== undefined) input.acceptanceCriteria = parseAcceptanceCriteria(acceptanceCriteria);
+					if (Object.keys(input).length) await core.updateTaskFromInput(task.id, input);
+					drafts.set(task.id, createWorkspaceDraft((await core.getTask(task.id)) ?? current));
+					await reload(false);
+					tell("Saved changed fields.");
+				});
+				return false;
+			});
+			widget.key(["escape"], () => {
+				closeField();
+				return false;
+			});
+			render();
+		};
+		const enterDetails = () => {
+			if (!focusedTask()) return;
+			mode = "details";
+			showDetails();
+			details.setLabel?.(" Details · E/Enter edit field · S history · Esc task list ");
+			details.focus();
+			tell(" E/Enter edit field  ↑↓ field  S history  Esc task list ");
+		};
+		let detailField = 0;
+		const showHistory = async () => {
+			if (!selectedTask || mode !== "details") return;
+			const current = await service.list(selectedTask.id);
+			taskSessions = current;
+			mode = "history";
+			historySession = current.sessions.at(-1);
+			preview.setLabel?.(" History · ↑↓ choose · Enter preview · Esc details ");
+			preview.setContent(
+				current.sessions
+					.map(
+						(item, index) =>
+							`${index === current.sessions.length - 1 ? ">" : " "} ${item.createdAt}  ${item.status}  ${item.id}`,
+					)
+					.join("\n") || "No session history.",
+			);
+			render();
+			preview.focus();
+		};
+		details.key(["escape"], () => {
+			if (mode !== "details") return;
+			mode = "navigation";
+			details.setLabel?.(" Details ");
+			tree.focus();
+			return false;
+		});
+		details.key(["s"], () => {
+			if (mode === "details") run(showHistory);
+			return false;
+		});
+		details.key(["up", "down"], (_character: unknown, key: unknown) => {
+			if (mode !== "details") return;
+			detailField = (detailField + ((key as { name?: string }).name === "up" ? FIELDS.length - 1 : 1)) % FIELDS.length;
+			tell(`${FIELDS[detailField]?.[1]} · Enter edits`);
+			return false;
+		});
+		details.key(["e", "enter"], () => {
+			if (mode === "details") openField(FIELDS[detailField]?.[0] ?? "description");
+			return false;
+		});
+		preview.key(["escape"], () => {
+			if (mode !== "history") return;
+			mode = "details";
+			historySession = undefined;
+			preview.setLabel?.(" Live preview ");
+			showDetails();
+			run(() => showPreview(selectedTask, active()));
+			details.focus();
+			return false;
+		});
+		preview.key(["up", "down"], (_character: unknown, key: unknown) => {
+			if (mode !== "history" || !taskSessions?.sessions.length) return;
+			const all = taskSessions.sessions;
+			const current = historySession ?? all[0];
+			if (!current) return false;
+			const index = Math.max(
+				0,
+				Math.min(all.length - 1, all.indexOf(current) + ((key as { name?: string }).name === "up" ? -1 : 1)),
+			);
+			historySession = all[index];
+			preview.setContent(
+				all
+					.map((item) => `${item.id === historySession?.id ? ">" : " "} ${item.createdAt}  ${item.status}  ${item.id}`)
+					.join("\n"),
+			);
+			render();
+			return false;
+		});
+		preview.key(["enter"], () => {
+			if (mode === "history" && selectedTask) run(() => showPreview(selectedTask, historySession));
+			return false;
+		});
+		const focusFilterControl = (filterId: FilterControlId) => {
+			if (filterId === "search") filterHeader.focusSearch();
+			if (filterId === "status") filterHeader.focusStatus();
+			if (filterId === "type") filterHeader.focusType();
+			if (filterId === "project") filterHeader.focusProject();
+			if (filterId === "priority") filterHeader.focusPriority();
+			if (filterId === "milestone") filterHeader.focusMilestone();
+			if (filterId === "labels") filterHeader.focusLabels();
+		};
+		const openFilter = async (filterId: Exclude<FilterControlId, "search">) => {
+			if (filterPopupOpen) return;
+			filterPopupOpen = true;
+			try {
+				const nextFilters = await openTaskFilterPicker({
+					screen,
+					filterId,
+					filters,
+					statuses,
+					taskTypes,
+					projects,
+					priorityOptions,
+					labels: availableLabels,
+					milestones: availableMilestoneTitles,
+				});
+				if (nextFilters !== null) {
+					filters = nextFilters;
+					state.filters = filters;
+					filterHeader.setFilters(nextFilters);
+					await reload();
+				}
+			} finally {
+				filterPopupOpen = false;
+				focusFilterControl(filterId);
+				render();
+			}
+		};
+		filterHeader = createFilterHeader({
+			parent: screen,
+			statuses,
+			availableLabels,
+			availableMilestones: availableMilestoneTitles,
+			visibleFilters: taskFilterHeaderControls(projects),
+			initialFilters: filters,
+			onFilterChange: (nextFilters) => {
+				filters = nextFilters;
+				state.filters = filters;
+				run(() => reload());
+			},
+			onFilterPickerOpen: (filterId) => {
+				run(() => openFilter(filterId));
+			},
+		});
+		filterHeader.setFocusChangeHandler((focus) => {
+			filterFocused = focus !== null;
+			if (focus !== null && mode === "inline" && selectedTask) {
+				const task = selectedTask;
+				const session = active();
+				mode = "navigation";
+				if (session) run(() => service.resetSize(task.id, session.id));
+			}
+		});
+		filterHeader.setExitRequestHandler(() => {
+			filterFocused = false;
+			filterHeader.setBorderColor("cyan");
+			tree.focus();
+		});
+		const openConfig = () => {
+			if (!selectedTask) return;
+			mode = "config";
+			const task = selectedTask;
+			let scope: AgentConfigScope = "card";
+			let selectedPreset = "";
+			let editable: AgentConfiguration | undefined;
+			let worktree = false;
+			let bootstrap: AgentPreset["bootstrap"] = "prompt";
+			const bootstraps: AgentPreset["bootstrap"][] = ["opencode", "claude", "codex", "gemini", "antigravity", "prompt"];
+			const scopeList = list({
+				parent: screen,
+				top: "8%",
+				left: "28%",
+				width: "20%",
+				height: 6,
+				border: "line",
+				label: " Scope ",
+				keys: true,
+				mouse: true,
+				items: ["root", "project", "card"],
+			});
+			const presetList = list({
+				parent: screen,
+				top: "8%",
+				left: "48%",
+				width: "24%",
+				height: 6,
+				border: "line",
+				label: " Preset ",
+				keys: true,
+				mouse: true,
+			});
+			const command = textarea({
+				parent: screen,
+				top: "25%",
+				left: "28%",
+				width: "44%",
+				height: 4,
+				border: "line",
+				label: " Command ",
+				keys: true,
+				inputOnFocus: false,
+			});
+			const environment = textarea({
+				parent: screen,
+				top: "38%",
+				left: "28%",
+				width: "44%",
+				height: 6,
+				border: "line",
+				label: " Environment (KEY=value) ",
+				keys: true,
+				inputOnFocus: false,
+			});
+			const prepare = textarea({
+				parent: screen,
+				top: "57%",
+				left: "28%",
+				width: "44%",
+				height: 6,
+				border: "line",
+				label: " Prepare ",
+				keys: true,
+				inputOnFocus: false,
+			});
+			const bootstrapList = list({
+				parent: screen,
+				top: "77%",
+				left: "28%",
+				width: "22%",
+				height: 4,
+				border: "line",
+				label: " Bootstrap ",
+				keys: true,
+				mouse: true,
+				items: bootstraps,
+			});
+			const worktreeBox = box({
+				parent: screen,
+				top: "77%",
+				left: "50%",
+				width: "22%",
+				height: 3,
+				border: "line",
+				label: " Worktree ",
+				mouse: true,
+			});
+			const widgets = [scopeList, presetList, command, environment, prepare, bootstrapList, worktreeBox];
+			let focusedWidget = 0;
+			const focusWidget = (index: number) => {
+				focusedWidget = (index + widgets.length) % widgets.length;
+				for (const widget of [command, environment, prepare]) (widget as unknown as { cancel?: () => void }).cancel?.();
+				const widget = widgets[focusedWidget];
+				widget?.focus();
+				(widget as unknown as { readInput?: () => void }).readInput?.();
+			};
+			const tabHandler = () => {
+				if (mode !== "config") return;
+				focusWidget(focusedWidget + 1);
+				return false;
+			};
+			const closeConfig = () => {
+				screen.unkey(["tab"], tabHandler);
+				screen.unkey(["C-s"], save);
+				for (const widget of widgets) widget.destroy();
+				disposeConfig = () => {};
+				mode = "navigation";
+				tree.focus();
+				render();
+			};
+			disposeConfig = closeConfig;
+			const showWorktree = () => worktreeBox.setContent(` ${worktree ? "[x]" : "[ ]"} Use a task worktree `);
+			const setPreset = () => {
+				if (!editable) return;
+				const preset = editable.presets[selectedPreset];
+				if (!preset) return;
+				command.setValue(preset.command);
+				environment.setValue(
+					Object.entries(preset.env)
+						.map(([key, value]) => `${key}=${value}`)
+						.join("\n"),
+				);
+				prepare.setValue(preset.prepare);
+				worktree = preset.worktree;
+				bootstrap = preset.bootstrap;
+				bootstrapList.select(bootstraps.indexOf(bootstrap));
+				showWorktree();
+			};
+			const load = async () => {
+				editable = await getEditableAgentConfiguration(core, scope, scope === "card" ? task.id : undefined);
+				selectedPreset = editable.selectedPreset;
+				scopeList.select(["root", "project", "card"].indexOf(scope));
+				presetList.setItems([...Object.keys(editable.presets), "+ New preset"]);
+				presetList.select(Object.keys(editable.presets).indexOf(selectedPreset));
+				setPreset();
+				render();
+			};
+			run(load);
+			focusWidget(0);
+			scopeList.key(["enter"], () => {
+				const next = ["root", "project", "card"][
+					(scopeList as unknown as { selected: number }).selected
+				] as AgentConfigScope;
+				if (next && next !== scope) {
+					scope = next;
+					run(load);
+				}
+				return false;
+			});
+			presetList.key(["enter"], () => {
+				const config = editable;
+				if (!config) return false;
+				const name = [...Object.keys(config.presets), "+ New preset"][
+					(presetList as unknown as { selected: number }).selected
+				];
+				if (name === "+ New preset") {
+					const prompt = textarea({
+						parent: screen,
+						top: "18%",
+						left: "28%",
+						width: "44%",
+						height: 3,
+						border: "line",
+						label: " New preset name · Enter confirms · Esc cancels ",
+						keys: true,
+						inputOnFocus: false,
+					});
+					prompt.focus();
+					prompt.readInput();
+					prompt.key(["enter"], () => {
+						const next = prompt.getValue().trim();
+						if (next && !config.presets[next]) {
+							config.presets[next] = {
+								command: "agent {prompt}",
+								env: {},
+								prepare: "",
+								worktree: false,
+								bootstrap: "prompt",
+							};
+							selectedPreset = next;
+							presetList.setItems([...Object.keys(config.presets), "+ New preset"]);
+							presetList.select(Object.keys(config.presets).indexOf(next));
+							setPreset();
+						}
+						prompt.destroy();
+						presetList.focus();
+						return false;
+					});
+					prompt.key(["escape"], () => {
+						prompt.destroy();
+						presetList.focus();
+						return false;
+					});
+				} else if (name) {
+					selectedPreset = name;
+					setPreset();
+				}
+				return false;
+			});
+			worktreeBox.key(["space"], () => {
+				worktree = !worktree;
+				showWorktree();
+				return false;
+			});
+			bootstrapList.key(["enter"], () => {
+				const value = bootstraps[(bootstrapList as unknown as { selected: number }).selected];
+				if (value) bootstrap = value as AgentPreset["bootstrap"];
+				return false;
+			});
+			worktreeBox.on("click", () => {
+				worktree = !worktree;
+				showWorktree();
+				render();
+			});
+			const save = () => {
+				if (mode !== "config") return;
+				run(async () => {
+					if (!editable) return;
+					const commandValue = command.getValue();
+					if (!commandValue.trim()) throw new Error("Command is required.");
+					const env: Record<string, string> = {};
+					for (const line of environment.getValue().split("\n")) {
+						if (!line.trim()) continue;
+						const index = line.indexOf("=");
+						const name = (index < 0 ? line : line.slice(0, index)).trim();
+						if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+							throw new Error(`Invalid environment variable name: ${name || "(empty)"}.`);
+						env[name] = index < 0 ? "" : line.slice(index + 1);
+					}
+					await updateAgentConfiguration(
+						core,
+						scope,
+						(config) => ({
+							...config,
+							selectedPreset,
+							presets: {
+								...config.presets,
+								[selectedPreset]: {
+									command: commandValue,
+									env,
+									prepare: prepare.getValue(),
+									worktree,
+									bootstrap,
+								},
+							},
+						}),
+						scope === "card" ? task.id : undefined,
+					);
+					closeConfig();
+					tell(`Saved ${scope} preset.`);
+				});
+				return false;
+			};
+			screen.key(["tab"], tabHandler);
+			screen.key(["C-s"], save);
+			for (const widget of widgets) widget.key(["C-s"], save);
+			for (const widget of widgets)
+				widget.key(["escape"], () => {
+					closeConfig();
+					return false;
+				});
+		};
+		const onMouse = (data: unknown) => {
+			if (attached || mode === "config" || mode === "composer") return;
+			const point = data as { x?: number; y?: number; action?: string; button?: string };
+			const position = tree.lpos as { xi: number; xl: number; yi: number; yl: number } | undefined;
+			if (!position || point.x === undefined || point.y === undefined) return;
+			if (point.x < position.xi || point.x > position.xl || point.y <= position.yi || point.y >= position.yl) return;
+			const state = tree as unknown as { childBase?: number; getScroll?: () => number };
+			const index = point.y - position.yi - 1 + (state.childBase ?? state.getScroll?.() ?? 0);
+			if (point.action !== "mousemove" && point.action !== "mousedown") return;
+			if (entries[index]?.kind === "header") {
+				if (point.action === "mousedown" && point.button === "left") run(() => toggleGroup(index));
+				else if (index !== selected) run(() => select(index));
+			}
+			if (entries[index]?.kind === "task" && index !== selected) run(() => select(index));
+		};
+		const attach = async (task: Task, session: AgentSession) => {
+			if (closed) return;
+			const mouseEnabled = (screen.program as unknown as { mouseEnabled?: boolean }).mouseEnabled === true;
+			attached = true;
+			screen.leave();
+			const resume = screen.program.pause?.();
+			try {
+				await service.attach(task.id, session.id);
+			} finally {
+				resume?.();
+				attached = false;
+				if (!closed) {
+					screen.enter();
+					if (mouseEnabled) screen.program.enableMouse();
+					render();
+					resizeAgent();
+				}
+			}
+		};
+		const onKeypress = (character: unknown, raw: unknown) => {
+			if (attached) return;
+			const ch = typeof character === "string" ? character : "";
+			const key = raw as { name?: string; full?: string; sequence?: string; ctrl?: boolean };
+			if (filterFocused || filterPopupOpen || mode === "composer") return;
+			if (mode === "inline" && selectedTask) {
+				if (key.full === "C-q") {
+					const task = selectedTask;
+					const session = active();
+					mode = "navigation";
+					tell("Task navigation.");
+					if (session) run(() => service.resetSize(task.id, session.id));
+					return;
+				}
+				const input = terminalInput(ch, key);
+				const task = selectedTask;
+				const session = active();
+				if (input && session) {
+					inputQueue = inputQueue
+						.then(() => service.sendInput(task.id, input, session.id))
+						.catch((error) => tell(error instanceof Error ? error.message : String(error)));
+				}
+				return;
+			}
+			if (mode === "field" || mode === "config" || mode === "details" || mode === "history") return;
+			if (key.name === "q" || key.full === "C-c") {
+				close("exit");
+				return;
+			}
+			if (key.full === "S-b") {
+				close("board");
+				return;
+			}
+			if (key.name === "up" || key.name === "down") {
+				const step = key.name === "up" ? -1 : 1;
+				const next = Math.max(0, Math.min(entries.length - 1, selected + step));
+				if (next !== selected) {
+					run(() => select(next));
+				}
+				return;
+			}
+			if (ch === "/" || key.sequence === "/") {
+				filterHeader.focusSearch();
+				return;
+			}
+			if (key.name === "[") {
+				leftWidth = Math.max(18, leftWidth - 2);
+				layout();
+				resizeAgent();
+				render();
+				return;
+			}
+			if (key.name === "]") {
+				leftWidth = Math.min(50, leftWidth + 2);
+				layout();
+				resizeAgent();
+				render();
+				return;
+			}
+			if (key.name === "{") {
+				split = Math.max(30, split - 2);
+				layout();
+				resizeAgent();
+				render();
+				return;
+			}
+			if (key.name === "}") {
+				split = Math.min(75, split + 2);
+				layout();
+				resizeAgent();
+				render();
+				return;
+			}
+			if (key.name === "space") {
+				enterDetails();
+				return;
+			}
+			if (key.name === "enter" && entries[selected]?.kind === "header") {
+				run(() => toggleGroup(selected));
+				return;
+			}
+			if (key.name === "tab") {
+				if (!focusedTask()) return;
+				if (active()) {
+					mode = "inline";
+					tell("Inline tmux input · Ctrl+Q returns");
+				} else tell("Start a session first.");
+				return;
+			}
+			if (key.name === "n") {
+				mode = "composer";
+				run(async () => {
+					try {
+						const created = await (options.taskComposer ?? openTaskComposer)({
+							screen,
+							statuses,
+							types: taskTypes,
+							priorities: priorityOptions.map((priority) => priority.value),
+							projects,
+							persist: async (input) => {
+								const config = await core.filesystem.loadConfig();
+								return (await core.createTaskFromInput(input, config?.autoCommit ?? false)).task;
+							},
+						});
+						if (created) {
+							state.selectedTaskId = created.id;
+							await reload();
+						}
+					} finally {
+						if (!closed) {
+							mode = "navigation";
+							tree.focus();
+							render();
+						}
+					}
+				});
+				return;
+			}
+			if (key.name === "h" && focusedTask()) {
+				const task = focusedTask();
+				if (!task) return;
+				run(async () => {
+					await service.requestHandoff(task.id);
+					await select(selected);
+				});
+				return;
+			}
+			if (key.name === "p" && focusedTask()) {
+				openConfig();
+				return;
+			}
+			if (key.name === "enter" && focusedTask()) {
+				const task = focusedTask();
+				if (!task || sessionAction) return;
+				sessionAction = true;
+				run(async () => {
+					try {
+						const session = active() ?? (await service.start(task.id));
+						if (!closed) await attach(task, session);
+						if (!closed && selectedTask?.id === task.id) await select(selected);
+					} finally {
+						attached = false;
+						sessionAction = false;
+					}
+				});
+			}
+		};
+		const onResize = () => {
+			if (attached) return;
+			filterHeader.rebuild();
+			layout();
+			resizeAgent();
+			render();
+		};
+		const poll = setInterval(() => {
+			if (!closed && !attached && mode !== "field" && mode !== "history" && mode !== "config" && mode !== "composer")
+				run(async () => {
+					if (selectedTask) await service.recover(selectedTask.id);
+					await reload(false);
+				});
+		}, 2000);
+		const onDestroy = () => dispose();
+		screen.on("mouse", onMouse);
+		screen.on("keypress", onKeypress);
+		screen.on("resize", onResize);
+		screen.on("destroy", onDestroy);
+		layout();
+		run(() => reload());
+	});
+}

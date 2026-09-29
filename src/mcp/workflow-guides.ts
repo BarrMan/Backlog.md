@@ -1,4 +1,5 @@
 import {
+	CLI_AGENT_WORKSPACE_GUIDE,
 	CLI_INIT_REQUIRED_GUIDE,
 	CLI_TASK_CREATION_GUIDE,
 	CLI_TASK_EXECUTION_GUIDE,
@@ -14,7 +15,7 @@ import {
 } from "../guidelines/mcp/index.ts";
 
 export const WORKFLOW_GUIDE_KEYS = ["overview", "task-creation", "task-execution", "task-finalization"] as const;
-export const INSTRUCTION_GUIDE_KEYS = [...WORKFLOW_GUIDE_KEYS, "init-required"] as const;
+export const INSTRUCTION_GUIDE_KEYS = [...WORKFLOW_GUIDE_KEYS, "init-required", "agent-workspace"] as const;
 
 export type WorkflowGuideKey = (typeof WORKFLOW_GUIDE_KEYS)[number];
 export type InstructionGuideKey = (typeof INSTRUCTION_GUIDE_KEYS)[number];
@@ -86,6 +87,14 @@ export const INSTRUCTION_GUIDES: WorkflowGuideDefinition[] = [
 		description: "How to initialize Backlog.md in this directory",
 		mimeType: "text/markdown",
 		resourceText: CLI_INIT_REQUIRED_GUIDE,
+	},
+	{
+		key: "agent-workspace",
+		uri: "backlog://agent-workspace",
+		name: "Agent Workspace Guide",
+		description: "How to operate agent sessions, handoffs, configuration, and worktrees",
+		mimeType: "text/markdown",
+		resourceText: CLI_AGENT_WORKSPACE_GUIDE,
 	},
 ];
 

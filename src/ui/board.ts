@@ -292,6 +292,7 @@ export async function renderBoardTui(
 		viewSwitcher?: import("./view-switcher.ts").ViewSwitcher;
 		onTaskSelect?: (task: Task) => void;
 		onTabPress?: () => Promise<void>;
+		onWorkspacePress?: () => Promise<void>;
 		subscribeUpdates?: (update: (nextTasks: Task[], nextStatuses: string[]) => void) => void;
 		filters?: {
 			searchQuery: string;
@@ -328,6 +329,8 @@ export async function renderBoardTui(
 		projectName?: string;
 		createTask?: (input: TaskCreateInput) => Promise<Task>;
 		screen?: ScreenInterface;
+		/** Leave a supplied screen alive after releasing Board-owned resources. */
+		preserveScreen?: boolean;
 		taskComposer?: (options: TaskComposerOptions) => Promise<Task | null>;
 	},
 ): Promise<void> {
@@ -356,6 +359,12 @@ export async function renderBoardTui(
 
 	await new Promise<void>((resolve) => {
 		const screen = options?.screen ?? createScreen({ title: formatTuiTitle("Board", options?.projectName) });
+		const ownsScreen = options?.screen === undefined || !options.preserveScreen;
+		const keyBindings: Array<{ keys: string[]; handler: (...args: unknown[]) => unknown }> = [];
+		const bindKey = (keys: string[], handler: (...args: unknown[]) => unknown) => {
+			screen.key(keys, handler);
+			keyBindings.push({ keys, handler });
+		};
 		const container = box({
 			parent: screen,
 			width: "100%",
@@ -1120,7 +1129,18 @@ export async function renderBoardTui(
 				// process exit before the write the user confirmed has persisted.
 				if (pendingMoveWrite) await pendingMoveWrite;
 				clearFooterTimer();
-				screen.destroy();
+				closeOpenPopup();
+				filterHeader?.destroy();
+				footerBox.destroy();
+				container.destroy();
+				for (const { keys, handler } of keyBindings) {
+					screen.unkey(keys, handler);
+				}
+				(screen as unknown as { removeListener(event: string, listener: () => void): void }).removeListener(
+					"resize",
+					onResize,
+				);
+				if (ownsScreen) screen.destroy();
 				await beforeResolve?.();
 				resolve();
 			})();
@@ -1210,11 +1230,12 @@ export async function renderBoardTui(
 
 		options?.subscribeUpdates?.(updateBoard);
 
-		screen.on("resize", () => {
+		const onResize = () => {
 			filterHeader?.rebuild();
 			syncBoardAreaLayout();
 			renderView();
-		});
+		};
+		screen.on("resize", onResize);
 
 		// Helper to get target column size (excluding the moving task if it's currently there)
 		const getTargetColumnSize = (status: string): number => {
@@ -1229,14 +1250,14 @@ export async function renderBoardTui(
 			return columnData.tasks.length;
 		};
 
-		screen.key(["/", "C-f"], () => {
+		bindKey(["/", "C-f"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			pendingSearchWrap = null;
 			focusFilterControl("search");
 			updateFooter();
 		});
 
-		screen.key(["n", "N", "S-n"], async () => {
+		bindKey(["n", "N", "S-n"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp || currentFocus === "filters") return;
 			taskCreationOpen = true;
 			let task: Task | null = null;
@@ -1287,12 +1308,12 @@ export async function renderBoardTui(
 			renderView(outcome.focusTaskId);
 		});
 
-		screen.key(["p", "P"], () => {
+		bindKey(["p", "P"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("priority");
 		});
 
-		screen.key(["t", "T"], () => {
+		bindKey(["t", "T"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("type");
 		});
@@ -1301,23 +1322,23 @@ export async function renderBoardTui(
 			// "v"/"V", not "g"/"G": kept consistent with the task-list view's project filter
 			// shortcut, which had to move off "g"/"G" to avoid colliding with that view's
 			// detail-pane scroll-to-top/bottom keys.
-			screen.key(["v", "V"], () => {
+			bindKey(["v", "V"], () => {
 				if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 				void openFilterPicker("project");
 			});
 		}
 
-		screen.key(["f", "F"], () => {
+		bindKey(["f", "F"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("labels");
 		});
 
-		screen.key(["i", "I"], () => {
+		bindKey(["i", "I"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("milestone");
 		});
 
-		screen.key(["left", "h"], () => {
+		bindKey(["left", "h"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (moveOp) {
 				if (movePending) return;
@@ -1338,7 +1359,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		screen.key(["right", "l"], () => {
+		bindKey(["right", "l"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (moveOp) {
 				if (movePending) return;
@@ -1403,10 +1424,10 @@ export async function renderBoardTui(
 			screen.render();
 		};
 
-		screen.key(["up"], () => moveBoardSelection("up", "arrow"));
-		screen.key(["k"], () => moveBoardSelection("up", "vim"));
-		screen.key(["down"], () => moveBoardSelection("down", "arrow"));
-		screen.key(["j"], () => moveBoardSelection("down", "vim"));
+		bindKey(["up"], () => moveBoardSelection("up", "arrow"));
+		bindKey(["k"], () => moveBoardSelection("up", "vim"));
+		bindKey(["down"], () => moveBoardSelection("down", "arrow"));
+		bindKey(["j"], () => moveBoardSelection("down", "vim"));
 
 		const lanePageAmount = () => {
 			const column = columns[currentCol];
@@ -1418,7 +1439,7 @@ export async function renderBoardTui(
 		const isBoardLaneNavigationBlocked = () =>
 			popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || Boolean(moveOp);
 
-		screen.key(["pageup", "C-u"], () => {
+		bindKey(["pageup", "C-u"], () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -1428,7 +1449,7 @@ export async function renderBoardTui(
 			screen.render();
 		});
 
-		screen.key(["pagedown", "C-d"], () => {
+		bindKey(["pagedown", "C-d"], () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -1440,7 +1461,7 @@ export async function renderBoardTui(
 			screen.render();
 		});
 
-		screen.key(["home"], () => {
+		bindKey(["home"], () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column || column.tasks.length === 0) return;
@@ -1448,7 +1469,7 @@ export async function renderBoardTui(
 			screen.render();
 		});
 
-		screen.key(["end"], () => {
+		bindKey(["end"], () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column || column.tasks.length === 0) return;
@@ -1659,7 +1680,7 @@ export async function renderBoardTui(
 			await syncOpenPopup();
 		};
 
-		screen.key(["enter"], async () => {
+		bindKey(["enter"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 
 			// In move mode, Enter confirms the move
@@ -1677,7 +1698,7 @@ export async function renderBoardTui(
 			await openTaskPopup(task);
 		});
 
-		screen.key(["e", "E", "S-e"], async () => {
+		bindKey(["e", "E", "S-e"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -1934,8 +1955,8 @@ export async function renderBoardTui(
 			renderView();
 		};
 
-		screen.key(["S-up"], () => walkRecruitHighlight("up"));
-		screen.key(["S-down"], () => walkRecruitHighlight("down"));
+		bindKey(["S-up"], () => walkRecruitHighlight("up"));
+		bindKey(["S-down"], () => walkRecruitHighlight("down"));
 
 		/**
 		 * M toggles a task in or out of the move set. It acts on the recruitment highlight
@@ -1994,7 +2015,7 @@ export async function renderBoardTui(
 			renderView();
 		};
 
-		screen.key(["m"], async () => {
+		bindKey(["m"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (!moveOp) {
 				enterMoveMode();
@@ -2004,7 +2025,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		screen.key(["M", "S-m"], () => {
+		bindKey(["M", "S-m"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (!moveOp) {
 				enterMoveMode();
@@ -2013,7 +2034,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		screen.key(["tab"], async () => {
+		bindKey(["tab"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			const column = columns[currentCol];
 			if (column) {
@@ -2035,12 +2056,17 @@ export async function renderBoardTui(
 			}
 		});
 
-		screen.key(["?"], async () => {
+		bindKey(["S-b"], async () => {
+			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
+			if (options?.onWorkspacePress) await closeBoard(options.onWorkspacePress);
+		});
+
+		bindKey(["?"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			await runWithModalGuard(() => openHelpPopup(screen, "board", { hasProjects: configuredProjects.length > 0 }));
 		});
 
-		screen.key(["y", "Y"], async () => {
+		bindKey(["y", "Y"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -2056,7 +2082,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		screen.key(["c", "C"], async () => {
+		bindKey(["c", "C"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -2099,7 +2125,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		screen.key(["a", "A"], async () => {
+		bindKey(["a", "A"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -2168,7 +2194,7 @@ export async function renderBoardTui(
 
 		// Shift+H writes the shared hideEmptyColumns setting, so the board, the browser
 		// board and `backlog config` all read the same preference.
-		screen.key(["S-h"], () => {
+		bindKey(["S-h"], () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
 			// Ignore toggles while a write is in flight: overlapping load/save
 			// cycles would write back stale config snapshots (lost updates).
@@ -2181,12 +2207,12 @@ export async function renderBoardTui(
 				});
 		});
 
-		screen.key(["q", "C-c"], async () => {
+		bindKey(["q", "C-c"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen) return;
 			await closeBoard();
 		});
 
-		screen.key(["escape"], async () => {
+		bindKey(["escape"], async () => {
 			if (popupOpen || filterPopupOpen || modalOpen) return;
 			if (currentFocus === "filters") {
 				focusColumn(currentCol);
