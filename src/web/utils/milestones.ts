@@ -4,15 +4,10 @@
  */
 export {
 	buildMilestoneBuckets,
-	buildMilestoneSummary,
 	collectArchivedMilestoneKeys,
 	collectMilestoneIds,
 	getMilestoneLabel,
 	isDoneStatus,
 	milestoneKey,
-	normalizeMilestoneName,
 	validateMilestoneName,
 } from "../../core/milestones.ts";
-
-// Re-export types from core types
-export type { MilestoneBucket, MilestoneSummary } from "../../types/index.ts";

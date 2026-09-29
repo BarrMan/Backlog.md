@@ -461,7 +461,12 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			await $`bun ${CLI_PATH} task edit task-13 -a ${""} --plain`.cwd(TEST_DIR).quiet();
+			const process = Bun.spawn(["bun", CLI_PATH, "task", "edit", "task-13", "-a", "", "--plain"], {
+				cwd: TEST_DIR,
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			expect(await process.exited).toBe(0);
 			expect((await core.filesystem.loadTask("task-13"))?.assignee).toEqual([]);
 		});
 

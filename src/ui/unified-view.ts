@@ -69,14 +69,14 @@ export interface UnifiedViewLoadResult {
 	readinessTasks?: Task[];
 }
 
-export type UnifiedTaskUpdate = { type: "upsert"; task: Task } | { type: "remove"; taskId: string };
+type UnifiedTaskUpdate = { type: "upsert"; task: Task } | { type: "remove"; taskId: string };
 
 export interface UnifiedTaskState {
 	tasks: Task[];
 	selectedTask?: Task;
 }
 
-export function applyUnifiedTaskUpdate(state: UnifiedTaskState, update: UnifiedTaskUpdate): UnifiedTaskState {
+function applyUnifiedTaskUpdate(state: UnifiedTaskState, update: UnifiedTaskUpdate): UnifiedTaskState {
 	if (update.type === "upsert") {
 		const index = state.tasks.findIndex((task) => task.id === update.task.id);
 		const tasks = [...state.tasks];

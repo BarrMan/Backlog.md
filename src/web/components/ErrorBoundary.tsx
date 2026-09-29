@@ -40,7 +40,7 @@ const DefaultErrorFallback: React.FC<{ error?: Error; resetError: () => void }> 
 	</div>
 );
 
-export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
 	constructor(props: ErrorBoundaryProps) {
 		super(props);
 		this.state = { hasError: false };

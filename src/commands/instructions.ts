@@ -28,7 +28,7 @@ function commandLine(command: string, description: string): string {
 	return `  ${quoteCommand(command).padEnd(42)} ${description}`;
 }
 
-export function formatInstructionGuideIndex(): string {
+function formatInstructionGuideIndex(): string {
 	const lines: string[] = [
 		"Backlog.md instructions",
 		"",
@@ -48,7 +48,7 @@ export function formatInstructionGuideIndex(): string {
 	return lines.join("\n");
 }
 
-export function formatInstructionGuideMarkdown(markdown: string): string {
+function formatInstructionGuideMarkdown(markdown: string): string {
 	const rendered = renderConfiguredTaskIds(markdown);
 	return rendered.endsWith("\n") ? rendered : `${rendered}\n`;
 }

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -91,7 +91,7 @@ describe("CLI doc search command", () => {
 
 	it("rejects missing or invalid query and limit inputs", async () => {
 		const missingQuery = await $`bun ${cliPath} doc search`.cwd(TEST_DIR).nothrow().quiet();
-		const emptyQuery = await $`bun ${cliPath} doc search ${""}`.cwd(TEST_DIR).nothrow().quiet();
+		const emptyQuery = await runTestCli(["doc", "search", ""], { cwd: TEST_DIR });
 		const longQuery = await $`bun ${cliPath} doc search ${"a".repeat(201)}`.cwd(TEST_DIR).nothrow().quiet();
 		const zeroLimit = await $`bun ${cliPath} doc search architecture --limit 0`.cwd(TEST_DIR).nothrow().quiet();
 		const highLimit = await $`bun ${cliPath} doc search architecture --limit 101`.cwd(TEST_DIR).nothrow().quiet();

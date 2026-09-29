@@ -58,6 +58,11 @@ interface ChecklistSectionDefinition {
 	endMarker: string;
 }
 
+interface ChecklistManager {
+	parseAllCriteria(content: string): AcceptanceCriterion[];
+	updateContent(content: string, criteria: AcceptanceCriterion[]): string;
+}
+
 const ACCEPTANCE_CRITERIA_DEFINITION: ChecklistSectionDefinition = {
 	sectionHeader: ACCEPTANCE_CRITERIA_SECTION_HEADER,
 	title: ACCEPTANCE_CRITERIA_TITLE,
@@ -426,7 +431,7 @@ function findSectionEndIndex(content: string, title: string): number | undefined
 	}
 	const sentinelRanges = resolveKnownSentinelRanges(tokenizeKnownSentinels(content));
 	if (normalizedTitle.toLowerCase() === COMMENTS_TITLE.toLowerCase()) {
-		const sentinelMatch = findMatchOutsideRanges(commentsSentinelRegex(), content, sentinelRanges);
+		const sentinelMatch = findCommentsSentinel(content, sentinelRanges);
 		if (sentinelMatch) {
 			return sentinelMatch.index + sentinelMatch[0].length;
 		}
@@ -471,7 +476,7 @@ function findSectionStartIndex(content: string, title: string): number | undefin
 	}
 	const sentinelRanges = resolveKnownSentinelRanges(tokenizeKnownSentinels(content));
 	if (normalizedTitle.toLowerCase() === COMMENTS_TITLE.toLowerCase()) {
-		const sentinelMatch = findMatchOutsideRanges(commentsSentinelRegex(), content, sentinelRanges);
+		const sentinelMatch = findCommentsSentinel(content, sentinelRanges);
 		if (sentinelMatch) {
 			return sentinelMatch.index;
 		}
@@ -488,6 +493,10 @@ function findSectionStartIndex(content: string, title: string): number | undefin
 			: legacySectionRegex(normalizedTitle, "i");
 	const legacyMatch = findMatchOutsideRanges(legacyRegex, content, sentinelRanges);
 	return legacyMatch?.index;
+}
+
+function findCommentsSentinel(content: string, maskedRanges: TextRange[]) {
+	return findMatchOutsideRanges(commentsSentinelRegex(), content, maskedRanges);
 }
 
 interface SentinelBlock {
@@ -881,28 +890,6 @@ export function getStructuredSections(content: string): StructuredSectionValues 
 	};
 }
 
-function parseChecklist(content: string, definition: ChecklistSectionDefinition): AcceptanceCriterion[] {
-	const src = content.replace(/\r\n/g, "\n");
-	const resolution = resolveChecklistSentinels(src, definition);
-	if (resolution.targetState === "ambiguous") return [];
-	const ranges = findChecklistSectionRanges(src, definition, resolution);
-	const range = ranges.find((candidate) => candidate.marked) ?? ranges.find((candidate) => !candidate.marked);
-	if (!range) return [];
-	if (!range.marked) return parseChecklistBody(range.body, false, range.maskedRanges);
-
-	const criteria: AcceptanceCriterion[] = [];
-	for (const match of range.body.matchAll(/^- \[([ x])\] #(\d+) (.+)$/gm)) {
-		const start = match.index ?? 0;
-		if (isIndexWithinRanges(start, range.maskedRanges)) continue;
-		criteria.push({
-			checked: match[1] === "x",
-			text: String(match[3] ?? ""),
-			index: Number.parseInt(String(match[2]), 10),
-		});
-	}
-	return criteria;
-}
-
 function composeChecklistBody(
 	criteria: AcceptanceCriterion[],
 	existingBody?: string,
@@ -1053,6 +1040,10 @@ function parseAllChecklistItems(content: string, definition: ChecklistSectionDef
 	return marked.length > 0 ? marked : legacy;
 }
 
+function parseAndReindexChecklistItems(content: string, definition: ChecklistSectionDefinition): AcceptanceCriterion[] {
+	return parseAllChecklistItems(content, definition).map((criterion, index) => ({ ...criterion, index: index + 1 }));
+}
+
 export function assertValidChecklistMarks(content: string, family: "AC" | "DOD"): void {
 	const definition = family === "AC" ? ACCEPTANCE_CRITERIA_DEFINITION : DEFINITION_OF_DONE_DEFINITION;
 	const src = content.replace(/\r\n/g, "\n");
@@ -1097,6 +1088,48 @@ function migrateChecklistToStableFormat(content: string, definition: ChecklistSe
 	if (resolution.targetState !== "none") return content;
 	const criteria = parseAllChecklistItems(src, definition);
 	return criteria.length > 0 ? updateChecklistContent(content, criteria, definition) : content;
+}
+
+function addChecklistCriteria(content: string, newCriteria: string[], manager: ChecklistManager): string {
+	const criteria = manager.parseAllCriteria(content);
+	let nextIndex = criteria.length > 0 ? Math.max(...criteria.map((criterion) => criterion.index)) + 1 : 1;
+	for (const text of newCriteria) {
+		criteria.push({ checked: false, text: text.trim(), index: nextIndex++ });
+	}
+	return manager.updateContent(content, criteria);
+}
+
+function removeChecklistCriterion(
+	content: string,
+	index: number,
+	family: "AC" | "DOD",
+	itemLabel: string,
+	manager: ChecklistManager,
+): string {
+	assertValidChecklistMarks(content, family);
+	const criteria = manager.parseAllCriteria(content);
+	const filtered = criteria.filter((criterion) => criterion.index !== index);
+	if (filtered.length === criteria.length) throw new Error(`${itemLabel} #${index} not found`);
+	return manager.updateContent(
+		content,
+		filtered.map((criterion, itemIndex) => ({ ...criterion, index: itemIndex + 1 })),
+	);
+}
+
+function checkChecklistCriterion(
+	content: string,
+	index: number,
+	checked: boolean,
+	family: "AC" | "DOD",
+	itemLabel: string,
+	manager: ChecklistManager,
+): string {
+	assertValidChecklistMarks(content, family);
+	const criteria = manager.parseAllCriteria(content);
+	const criterion = criteria.find((item) => item.index === index);
+	if (!criterion) throw new Error(`${itemLabel} #${index} not found`);
+	criterion.checked = checked;
+	return manager.updateContent(content, criteria);
 }
 
 function normalizeCommentMetadata(value: string | undefined): string | undefined {
@@ -1351,12 +1384,6 @@ function updateCommentsContent(content: string, comments: TaskComment[]): string
 
 /* biome-ignore lint/complexity/noStaticOnlyClass: Utility methods grouped for clarity */
 export class CommentsManager {
-	static readonly BEGIN_MARKER = COMMENTS_BEGIN_MARKER;
-	static readonly END_MARKER = COMMENTS_END_MARKER;
-	static readonly COMMENT_BEGIN_MARKER = COMMENT_BEGIN_MARKER;
-	static readonly COMMENT_END_MARKER = COMMENT_END_MARKER;
-	static readonly SECTION_HEADER = COMMENTS_SECTION_HEADER;
-
 	static parseAllComments(content: string): TaskComment[] {
 		return parseComments(content);
 	}
@@ -1368,14 +1395,6 @@ export class CommentsManager {
 
 /* biome-ignore lint/complexity/noStaticOnlyClass: Utility methods grouped for clarity */
 export class AcceptanceCriteriaManager {
-	static readonly BEGIN_MARKER = ACCEPTANCE_CRITERIA_BEGIN_MARKER;
-	static readonly END_MARKER = ACCEPTANCE_CRITERIA_END_MARKER;
-	static readonly SECTION_HEADER = ACCEPTANCE_CRITERIA_SECTION_HEADER;
-
-	static parseAcceptanceCriteria(content: string): AcceptanceCriterion[] {
-		return parseChecklist(content, ACCEPTANCE_CRITERIA_DEFINITION);
-	}
-
 	static formatAcceptanceCriteria(criteria: AcceptanceCriterion[], existingBody?: string): string {
 		return formatChecklistSection(criteria, ACCEPTANCE_CRITERIA_DEFINITION, existingBody);
 	}
@@ -1385,41 +1404,22 @@ export class AcceptanceCriteriaManager {
 	}
 
 	static parseAllCriteria(content: string): AcceptanceCriterion[] {
-		const list = parseAllChecklistItems(content, ACCEPTANCE_CRITERIA_DEFINITION);
-		return list.map((c, i) => ({ ...c, index: i + 1 }));
+		return parseAndReindexChecklistItems(content, ACCEPTANCE_CRITERIA_DEFINITION);
 	}
 
 	static addCriteria(content: string, newCriteria: string[]): string {
-		const existing = AcceptanceCriteriaManager.parseAllCriteria(content);
-		let nextIndex = existing.length > 0 ? Math.max(...existing.map((c) => c.index)) + 1 : 1;
-		for (const text of newCriteria) {
-			existing.push({ checked: false, text: text.trim(), index: nextIndex++ });
-		}
-		return AcceptanceCriteriaManager.updateContent(content, existing);
+		return addChecklistCriteria(content, newCriteria, AcceptanceCriteriaManager);
 	}
 
 	static removeCriterionByIndex(content: string, index: number): string {
-		assertValidChecklistMarks(content, "AC");
-		const criteria = AcceptanceCriteriaManager.parseAllCriteria(content);
-		const filtered = criteria.filter((c) => c.index !== index);
-		if (filtered.length === criteria.length) {
-			throw new Error(`Acceptance criterion #${index} not found`);
-		}
-		const renumbered = filtered.map((c, i) => ({ ...c, index: i + 1 }));
-		return AcceptanceCriteriaManager.updateContent(content, renumbered);
+		return removeChecklistCriterion(content, index, "AC", "Acceptance criterion", AcceptanceCriteriaManager);
 	}
 
 	static checkCriterionByIndex(content: string, index: number, checked: boolean): string {
-		assertValidChecklistMarks(content, "AC");
-		const criteria = AcceptanceCriteriaManager.parseAllCriteria(content);
-		const criterion = criteria.find((c) => c.index === index);
-		if (!criterion) {
-			throw new Error(`Acceptance criterion #${index} not found`);
-		}
-		criterion.checked = checked;
-		return AcceptanceCriteriaManager.updateContent(content, criteria);
+		return checkChecklistCriterion(content, index, checked, "AC", "Acceptance criterion", AcceptanceCriteriaManager);
 	}
 
+	// fallow-ignore-next-line unused-class-member -- exercised through parameterized manager cases in acceptance-criteria-manager.test.ts
 	static migrateToStableFormat(content: string): string {
 		return migrateChecklistToStableFormat(content, ACCEPTANCE_CRITERIA_DEFINITION);
 	}
@@ -1427,56 +1427,24 @@ export class AcceptanceCriteriaManager {
 
 /* biome-ignore lint/complexity/noStaticOnlyClass: Utility methods grouped for clarity */
 export class DefinitionOfDoneManager {
-	static readonly BEGIN_MARKER = DEFINITION_OF_DONE_BEGIN_MARKER;
-	static readonly END_MARKER = DEFINITION_OF_DONE_END_MARKER;
-	static readonly SECTION_HEADER = DEFINITION_OF_DONE_SECTION_HEADER;
-
-	static parseDefinitionOfDone(content: string): AcceptanceCriterion[] {
-		return parseChecklist(content, DEFINITION_OF_DONE_DEFINITION);
-	}
-
-	static formatDefinitionOfDone(criteria: AcceptanceCriterion[], existingBody?: string): string {
-		return formatChecklistSection(criteria, DEFINITION_OF_DONE_DEFINITION, existingBody);
-	}
-
 	static updateContent(content: string, criteria: AcceptanceCriterion[]): string {
 		return updateChecklistContent(content, criteria, DEFINITION_OF_DONE_DEFINITION);
 	}
 
 	static parseAllCriteria(content: string): AcceptanceCriterion[] {
-		const list = parseAllChecklistItems(content, DEFINITION_OF_DONE_DEFINITION);
-		return list.map((c, i) => ({ ...c, index: i + 1 }));
+		return parseAndReindexChecklistItems(content, DEFINITION_OF_DONE_DEFINITION);
 	}
 
 	static addCriteria(content: string, newCriteria: string[]): string {
-		const existing = DefinitionOfDoneManager.parseAllCriteria(content);
-		let nextIndex = existing.length > 0 ? Math.max(...existing.map((c) => c.index)) + 1 : 1;
-		for (const text of newCriteria) {
-			existing.push({ checked: false, text: text.trim(), index: nextIndex++ });
-		}
-		return DefinitionOfDoneManager.updateContent(content, existing);
+		return addChecklistCriteria(content, newCriteria, DefinitionOfDoneManager);
 	}
 
 	static removeCriterionByIndex(content: string, index: number): string {
-		assertValidChecklistMarks(content, "DOD");
-		const criteria = DefinitionOfDoneManager.parseAllCriteria(content);
-		const filtered = criteria.filter((c) => c.index !== index);
-		if (filtered.length === criteria.length) {
-			throw new Error(`Definition of Done item #${index} not found`);
-		}
-		const renumbered = filtered.map((c, i) => ({ ...c, index: i + 1 }));
-		return DefinitionOfDoneManager.updateContent(content, renumbered);
+		return removeChecklistCriterion(content, index, "DOD", "Definition of Done item", DefinitionOfDoneManager);
 	}
 
 	static checkCriterionByIndex(content: string, index: number, checked: boolean): string {
-		assertValidChecklistMarks(content, "DOD");
-		const criteria = DefinitionOfDoneManager.parseAllCriteria(content);
-		const criterion = criteria.find((c) => c.index === index);
-		if (!criterion) {
-			throw new Error(`Definition of Done item #${index} not found`);
-		}
-		criterion.checked = checked;
-		return DefinitionOfDoneManager.updateContent(content, criteria);
+		return checkChecklistCriterion(content, index, checked, "DOD", "Definition of Done item", DefinitionOfDoneManager);
 	}
 
 	static migrateToStableFormat(content: string): string {

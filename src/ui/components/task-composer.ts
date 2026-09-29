@@ -6,6 +6,7 @@ import { normalizeDueDate } from "../../utils/due-date.ts";
 import { getPriorityOptions } from "../../utils/priority-config.ts";
 import { getProjectValues } from "../../utils/project-config.ts";
 import { getTaskTypeValues } from "../../utils/task-type-config.ts";
+import { formatKeymap, keymapKeys } from "../keymap.ts";
 import {
 	createPopupChrome,
 	createScrollableViewport,
@@ -260,12 +261,12 @@ export function getTaskComposerLayout(
 function getTaskComposerHelpText(screenWidth: number, compact: boolean): string {
 	// Each variant has to fit the popup width it is shown at, so drop hints as the screen narrows.
 	if (screenWidth < 60) {
-		return " {cyan-fg}[↑↓←→/Tab]{/} Nav | {cyan-fg}[Enter]{/} Choose";
+		return ` {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}${formatKeymap("shared", "previous")}${formatKeymap("shared", "next")}/${formatKeymap("shared", "tab")}]{/} Nav | {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Choose`;
 	}
 	if (compact) {
-		return " {cyan-fg}[↑↓←→/Tab]{/} Nav | {cyan-fg}[Enter]{/} Choose | {cyan-fg}[Esc]{/} Cancel";
+		return ` {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}${formatKeymap("shared", "previous")}${formatKeymap("shared", "next")}/${formatKeymap("shared", "tab")}]{/} Nav | {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Choose | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel`;
 	}
-	return " {cyan-fg}[↑↓/←→/Tab]{/} Navigate | {cyan-fg}[Enter/Space]{/} Choose | {cyan-fg}[Esc]{/} Cancel";
+	return ` {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}/${formatKeymap("shared", "previous")}${formatKeymap("shared", "next")}/${formatKeymap("shared", "tab")}]{/} Navigate | {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Choose | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel`;
 }
 
 type TaskComposerField =
@@ -278,6 +279,83 @@ type TaskComposerField =
 	| "project"
 	| "create"
 	| "cancel";
+
+type TaskComposerNavigationDirection = "up" | "down" | "left" | "right";
+type TaskComposerNavigation = Partial<Record<TaskComposerNavigationDirection, TaskComposerField>>;
+type TaskComposerNavigationPolicy = Partial<Record<TaskComposerField, TaskComposerNavigation>>;
+
+/** Focus transitions for the selector/action controls in each rendered layout. */
+const TASK_COMPOSER_NAVIGATION: Record<"standard" | "compact" | "compactStacked", TaskComposerNavigationPolicy> = {
+	standard: {
+		status: { up: "dueDate", down: "create", right: "type" },
+		type: { up: "dueDate", down: "create", left: "status", right: "priority" },
+		priority: { up: "dueDate", down: "cancel", left: "type" },
+		create: { up: "status", right: "cancel" },
+		cancel: { up: "priority", left: "create" },
+	},
+	compact: {
+		status: { up: "dueDate", down: "type" },
+		type: { up: "status", down: "create", right: "priority" },
+		priority: { up: "status", down: "cancel", left: "type" },
+		create: { up: "type", right: "cancel" },
+		cancel: { up: "priority", left: "create" },
+	},
+	compactStacked: {
+		status: { up: "dueDate", down: "type" },
+		type: { up: "status", down: "priority" },
+		priority: { up: "type", down: "create", left: "type" },
+		create: { up: "priority", right: "cancel" },
+		cancel: { up: "priority", left: "create" },
+	},
+};
+
+/** Project occupies the row between selectors and actions when it is configured. */
+const TASK_COMPOSER_PROJECT_NAVIGATION: Record<
+	"standard" | "compact" | "compactStacked",
+	TaskComposerNavigationPolicy
+> = {
+	standard: {
+		status: { down: "project" },
+		type: { down: "project" },
+		priority: { down: "project" },
+		project: { up: "priority", down: "create" },
+		create: { up: "project" },
+		cancel: { up: "project" },
+	},
+	compact: {
+		type: { down: "project" },
+		priority: { down: "project" },
+		project: { up: "priority", down: "create" },
+		create: { up: "project" },
+		cancel: { up: "project" },
+	},
+	compactStacked: {
+		priority: { down: "project" },
+		project: { up: "priority", down: "create" },
+		create: { up: "project" },
+		cancel: { up: "project" },
+	},
+};
+
+function taskComposerNavigationMode(layout: Pick<TaskComposerLayout, "compact" | "stackSelectors">) {
+	if (!layout.compact) return "standard" as const;
+	return layout.stackSelectors ? ("compactStacked" as const) : ("compact" as const);
+}
+
+/** Return the focus target for a selector/action arrow key, or retain the current field at an edge. */
+export function getTaskComposerNavigationTarget(
+	field: TaskComposerField,
+	direction: TaskComposerNavigationDirection,
+	layout: Pick<TaskComposerLayout, "compact" | "stackSelectors">,
+	hasProjects: boolean,
+): TaskComposerField {
+	const mode = taskComposerNavigationMode(layout);
+	return (
+		(hasProjects ? TASK_COMPOSER_PROJECT_NAVIGATION[mode][field]?.[direction] : undefined) ??
+		TASK_COMPOSER_NAVIGATION[mode][field]?.[direction] ??
+		field
+	);
+}
 
 function uniqueChoices(values: readonly string[], excludedValue?: string): string[] {
 	const choices: string[] = [];
@@ -292,7 +370,7 @@ function uniqueChoices(values: readonly string[], excludedValue?: string): strin
 	return choices;
 }
 
-export function getTaskComposerWorkflowStatuses(statuses: readonly string[]): string[] {
+function getTaskComposerWorkflowStatuses(statuses: readonly string[]): string[] {
 	const configured = uniqueChoices(statuses, DRAFT_STATUS);
 	return configured.length > 0 ? configured : ["To Do"];
 }
@@ -684,50 +762,8 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			options.screen.render();
 		};
 
-		const navigate = (direction: "up" | "down" | "left" | "right") => {
-			let next = activeField;
-			if (layout.compact) {
-				if (activeField === "status" && direction === "up") next = "dueDate";
-				if (activeField === "status" && direction === "down") next = "type";
-				if (activeField === "type" && direction === "up") next = "status";
-				if (activeField === "type" && direction === "down") next = layout.stackSelectors ? "priority" : "create";
-				if (activeField === "type" && direction === "right" && !layout.stackSelectors) next = "priority";
-				if (activeField === "priority" && direction === "up") next = layout.stackSelectors ? "type" : "status";
-				if (activeField === "priority" && direction === "down") next = layout.stackSelectors ? "create" : "cancel";
-				if (activeField === "priority" && direction === "left") next = "type";
-				if (activeField === "create" && direction === "up") next = layout.stackSelectors ? "priority" : "type";
-				if (activeField === "cancel" && direction === "up") next = "priority";
-			} else {
-				if (["status", "type", "priority"].includes(activeField)) {
-					if (direction === "up") next = "dueDate";
-					if (direction === "down") next = activeField === "priority" ? "cancel" : "create";
-				}
-				if (activeField === "create" && direction === "up") next = "status";
-				if (activeField === "cancel" && direction === "up") next = "priority";
-			}
-			if (activeField === "status" && direction === "left") next = "status";
-			if (activeField === "status" && direction === "right" && !layout.compact) next = "type";
-			if (activeField === "type" && direction === "left" && !layout.compact) next = "status";
-			if (activeField === "type" && direction === "right" && !layout.compact) next = "priority";
-			if (activeField === "priority" && direction === "left" && !layout.compact) next = "type";
-			if (activeField === "create" && direction === "right") next = "cancel";
-			if (activeField === "cancel" && direction === "left") next = "create";
-			// Project always sits on its own row below type/priority, so it takes over as the
-			// boundary between the selectors and the action buttons whenever it is present.
-			if (hasProjects) {
-				// In the stacked compact layout Type sits on its own row above Priority, so Down
-				// from Type must still reach Priority. Every other layout puts Status, Type, and
-				// Priority on one row, so Down from any of them drops to the Project row.
-				if (activeField === "status" && direction === "down" && !layout.compact) next = "project";
-				if (activeField === "type" && direction === "down" && !(layout.compact && layout.stackSelectors))
-					next = "project";
-				if (activeField === "priority" && direction === "down") next = "project";
-				if (activeField === "project" && direction === "up") next = "priority";
-				if (activeField === "project" && direction === "down") next = "create";
-				if (activeField === "project" && (direction === "left" || direction === "right")) next = "project";
-				if (activeField === "create" && direction === "up") next = "project";
-				if (activeField === "cancel" && direction === "up") next = "project";
-			}
+		const navigate = (direction: TaskComposerNavigationDirection) => {
+			const next = getTaskComposerNavigationTarget(activeField, direction, layout, hasProjects);
 			if (next !== activeField) focusField(next);
 		};
 
@@ -752,9 +788,9 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 					removeListener(event: string, listener: (...args: unknown[]) => void): void;
 				}
 			).removeListener("resize", onResize);
-			popup.unkey(["escape"], escapeHandler);
+			popup.unkey(keymapKeys("shared", "escape"), escapeHandler);
 			for (const widget of Object.values(widgets)) {
-				widget.unkey(["escape"], escapeHandler);
+				widget.unkey(keymapKeys("shared", "escape"), escapeHandler);
 			}
 			cancelInputIfReading(titleInput);
 			cancelInputIfReading(descriptionInput);
@@ -825,14 +861,14 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			cancel();
 			return false;
 		};
-		popup.key(["escape"], escapeHandler);
+		popup.key(keymapKeys("shared", "escape"), escapeHandler);
 		for (const widget of Object.values(widgets)) {
-			widget.key(["escape"], escapeHandler);
-			widget.key(["tab"], () => {
+			widget.key(keymapKeys("shared", "escape"), escapeHandler);
+			widget.key(keymapKeys("shared", "tab"), () => {
 				moveFocus(1);
 				return false;
 			});
-			widget.key(["S-tab"], () => {
+			widget.key(keymapKeys("shared", "previousTab"), () => {
 				moveFocus(-1);
 				return false;
 			});
@@ -925,38 +961,38 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 				controller.error = "";
 				errorBox.setContent("");
 			});
-			input.key(["backspace"], () => {
+			input.key(keymapKeys("shared", "backspace"), () => {
 				deleteText(input, "char");
 				return false;
 			});
-			input.key(["delete"], () => {
+			input.key(keymapKeys("shared", "delete"), () => {
 				deleteText(input, "forward");
 				return false;
 			});
-			input.key(["C-w"], () => {
+			input.key(keymapKeys("shared", "deleteWord"), () => {
 				deleteText(input, "word");
 				return false;
 			});
 		}
-		titleInput.key(["down"], () => {
+		titleInput.key(keymapKeys("shared", "down"), () => {
 			focusField("description");
 			return false;
 		});
 		titleInput.on("submit", () => focusField("description"));
-		descriptionInput.key(["up"], () => {
+		descriptionInput.key(keymapKeys("shared", "up"), () => {
 			const cursor = cursorBeforeKey;
 			if (cursor && cursor.y <= -(cursor.lines - 1)) focusField("title");
 			return false;
 		});
-		descriptionInput.key(["down"], () => {
+		descriptionInput.key(keymapKeys("shared", "down"), () => {
 			if (cursorBeforeKey?.y === 0) focusField("dueDate");
 			return false;
 		});
-		dueDateInput.key(["up"], () => {
+		dueDateInput.key(keymapKeys("shared", "up"), () => {
 			focusField("description");
 			return false;
 		});
-		dueDateInput.key(["down"], () => {
+		dueDateInput.key(keymapKeys("shared", "down"), () => {
 			focusField("status");
 			return false;
 		});
@@ -964,7 +1000,7 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 
 		for (const field of selectorFields) {
 			const widget = widgets[field];
-			widget.key(["enter", "space"], () => {
+			widget.key(keymapKeys("shared", "activate"), () => {
 				void openPicker(field);
 				return false;
 			});
@@ -987,19 +1023,20 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 		for (const field of navFields) {
 			const widget = widgets[field];
 			for (const direction of ["up", "down", "left", "right"] as const) {
-				widget.key([direction], () => {
+				const action = direction === "left" ? "previous" : direction === "right" ? "next" : direction;
+				widget.key(keymapKeys("shared", action), () => {
 					navigate(direction);
 					return false;
 				});
 			}
 		}
 
-		createAction.key(["enter", "space"], () => {
+		createAction.key(keymapKeys("shared", "activate"), () => {
 			void submit();
 			return false;
 		});
 		createAction.on("click", () => void submit());
-		cancelAction.key(["enter", "space"], () => {
+		cancelAction.key(keymapKeys("shared", "activate"), () => {
 			cancel();
 			return false;
 		});

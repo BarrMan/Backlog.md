@@ -322,30 +322,9 @@ export class ViewSwitcher {
 	}
 
 	/**
-	 * Pre-load kanban data
-	 */
-	preloadKanban(): void {
-		this.backgroundLoader.startLoading();
-	}
-
-	/**
 	 * Get kanban data - delegates to background loader
 	 */
 	async getKanbanData(): Promise<{ tasks: Task[]; statuses: string[] }> {
 		return await this.backgroundLoader.getKanbanData();
-	}
-
-	/**
-	 * Set progress callback for loading updates
-	 */
-	setProgressCallback(callback: (message: string) => void): void {
-		this.backgroundLoader.setProgressCallback(callback);
-	}
-
-	/**
-	 * Clean up resources and cancel any ongoing operations
-	 */
-	cleanup(): void {
-		this.backgroundLoader.cancelLoading();
 	}
 }

@@ -8,7 +8,7 @@ import type { JsonSchema } from "../validation/validators.ts";
 /**
  * Builds the accepted task status values used by MCP schemas and public CLI help.
  */
-export function getStatusFieldEnumValues(config: Pick<BacklogConfig, "statuses">): string[] {
+function getStatusFieldEnumValues(config: Pick<BacklogConfig, "statuses">): string[] {
 	const configuredStatuses =
 		config.statuses && config.statuses.length > 0 ? [...config.statuses] : [...DEFAULT_STATUSES];
 	const normalizedStatuses = configuredStatuses.map((status) => status.trim());
@@ -19,7 +19,7 @@ export function getStatusFieldEnumValues(config: Pick<BacklogConfig, "statuses">
 /**
  * Generates a status field schema with dynamic enum values sourced from config.
  */
-export function generateStatusFieldSchema(config: BacklogConfig): JsonSchema {
+function generateStatusFieldSchema(config: BacklogConfig): JsonSchema {
 	const configuredStatuses =
 		config.statuses && config.statuses.length > 0 ? [...config.statuses] : [...DEFAULT_STATUSES];
 	const normalizedStatuses = configuredStatuses.map((status) => status.trim());

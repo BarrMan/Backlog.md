@@ -1,5 +1,4 @@
 import { basename, join } from "node:path";
-import { type Core, createRuntimeCore } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
 import { AmbiguousIdError } from "./entity-id.ts";
 import { buildFilenameIdRegex, buildGlobPattern, escapeRegex, extractAnyPrefix, normalizeId } from "./prefix-config.ts";
@@ -78,11 +77,10 @@ export function extractTaskIdFromFilename(filename: string): string | null {
  * Get the file path for a task by ID.
  * For numeric-only IDs, automatically detects the prefix from existing files.
  */
-export async function getTaskPath(taskId: string, core?: Core | TaskPathContext): Promise<string | null> {
-	const coreInstance = core || (await createRuntimeCore());
-	const activeMatches = await findMatchingTaskPaths(coreInstance.filesystem.tasksDir, taskId);
-	const completedMatches = coreInstance.filesystem.completedDir
-		? await findMatchingTaskPaths(coreInstance.filesystem.completedDir, taskId)
+export async function getTaskPath(taskId: string, context: TaskPathContext): Promise<string | null> {
+	const activeMatches = await findMatchingTaskPaths(context.filesystem.tasksDir, taskId);
+	const completedMatches = context.filesystem.completedDir
+		? await findMatchingTaskPaths(context.filesystem.completedDir, taskId)
 		: [];
 	const allMatches = [...activeMatches, ...completedMatches];
 	if (allMatches.length > 1) {
@@ -151,7 +149,7 @@ export function extractDraftIdFromFilename(filename: string): string | null {
  * "DRAFT-01", and "draft-1" collapse together; "draft-1.1" and "draft-1.01" collapse together.
  * Every consumer that groups, matches, or compares draft identities must go through this.
  */
-export function draftIdentityKey(id: string): string {
+function draftIdentityKey(id: string): string {
 	const trimmed = id.trim().toLowerCase();
 	const match = trimmed.match(new RegExp(`^(?:${escapeRegex(DEFAULT_DRAFT_PREFIX)}-)?(\\d+(?:\\.\\d+)*)$`));
 	if (!match?.[1]) return trimmed;
@@ -192,15 +190,15 @@ function draftIdsEqual(left: string, right: string): boolean {
  * Get the filename (without directory) for a task by ID.
  * For numeric-only IDs, automatically detects the prefix from existing files.
  */
-export async function getTaskFilename(taskId: string, core?: Core | TaskPathContext): Promise<string | null> {
-	const path = await getTaskPath(taskId, core);
+export async function getTaskFilename(taskId: string, context: TaskPathContext): Promise<string | null> {
+	const path = await getTaskPath(taskId, context);
 	return path ? basename(path) : null;
 }
 
 /**
  * Check if a task file exists
  */
-export async function taskFileExists(taskId: string, core?: Core | TaskPathContext): Promise<boolean> {
-	const path = await getTaskPath(taskId, core);
+export async function taskFileExists(taskId: string, context: TaskPathContext): Promise<boolean> {
+	const path = await getTaskPath(taskId, context);
 	return path !== null;
 }

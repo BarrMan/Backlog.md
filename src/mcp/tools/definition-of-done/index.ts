@@ -34,4 +34,3 @@ export function registerDefinitionOfDoneTools(server: McpServer): void {
 }
 
 export type { DefinitionOfDoneDefaultsUpsertArgs } from "./handlers.ts";
-export { definitionOfDoneDefaultsGetSchema, definitionOfDoneDefaultsUpsertSchema } from "./schemas.ts";

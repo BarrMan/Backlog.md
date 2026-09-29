@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useMatch, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
 import BoardPage from './components/BoardPage';
 import DocumentationDetail from './components/DocumentationDetail';
@@ -27,216 +27,26 @@ import {
 	type TaskSearchResult,
 } from '../types';
 import { formatDependencyCleanupMessage } from '../utils/dependency-graph';
-import { ApiError, apiClient, readMovedFailureState } from './lib/api';
-import type { TaskDetail } from '../core/task-detail';
+import { apiClient, readMovedFailureState } from './lib/api';
 import type { DuplicateRepairPlan } from '../core/duplicate-task-repair';
-import { isValidTaskId } from '../utils/task-id';
 import { useHealthCheckContext } from './contexts/HealthCheckContext';
 import { getWebVersion } from './utils/version';
 import { collectArchivedMilestoneKeys, collectMilestoneIds, milestoneKey } from './utils/milestones';
+import { buildMilestoneAliasMap, canonicalizeMilestone } from './utils/milestone-aliases';
 import { getProjectValues } from '../utils/project-config';
 import { getTaskTypeValues } from '../utils/task-type-config';
 import { createUrlPath } from './utils/urlHelpers';
 import { filterKanbanTasks } from './utils/kanban-tasks';
 import { reconcileById } from './utils/reconcile';
-import { parseBrowserLoadingState } from '../utils/browser-loading-state';
-
-type TaskRouteNavigationState = {
-  taskModalFrom?: string;
-  taskRouteError?: string;
-};
-
-const getTaskRouteNavigationState = (value: unknown): TaskRouteNavigationState => {
-  if (!value || typeof value !== 'object') {
-    return {};
-  }
-  return value as TaskRouteNavigationState;
-};
-
-const buildMilestoneAliasMap = (milestones: Milestone[], archivedMilestones: Milestone[]): Map<string, string> => {
-  const aliasMap = new Map<string, string>();
-  const collectIdAliasKeys = (value: string): string[] => {
-    const normalized = value.trim();
-    const normalizedKey = normalized.toLowerCase();
-    if (!normalizedKey) return [];
-    const keys = new Set<string>([normalizedKey]);
-    if (/^\d+$/.test(normalized)) {
-      const numericAlias = String(Number.parseInt(normalized, 10));
-      keys.add(numericAlias);
-      keys.add(`m-${numericAlias}`);
-      return Array.from(keys);
-    }
-    const idMatch = normalized.match(/^m-(\d+)$/i);
-    if (idMatch?.[1]) {
-      const numericAlias = String(Number.parseInt(idMatch[1], 10));
-      keys.add(`m-${numericAlias}`);
-      keys.add(numericAlias);
-    }
-    return Array.from(keys);
-  };
-  const reservedIdKeys = new Set<string>();
-  for (const milestone of [...milestones, ...archivedMilestones]) {
-    for (const key of collectIdAliasKeys(milestone.id)) {
-      reservedIdKeys.add(key);
-    }
-  }
-  const setAlias = (aliasKey: string, id: string, allowOverwrite: boolean) => {
-    const existing = aliasMap.get(aliasKey);
-    if (!existing) {
-      aliasMap.set(aliasKey, id);
-      return;
-    }
-    if (!allowOverwrite) {
-      return;
-    }
-    const existingKey = existing.toLowerCase();
-    const nextKey = id.toLowerCase();
-    const preferredRawId = /^\d+$/.test(aliasKey) ? `m-${aliasKey}` : /^m-\d+$/.test(aliasKey) ? aliasKey : null;
-    if (preferredRawId) {
-      const existingIsPreferred = existingKey === preferredRawId;
-      const nextIsPreferred = nextKey === preferredRawId;
-      if (existingIsPreferred && !nextIsPreferred) {
-        return;
-      }
-      if (nextIsPreferred && !existingIsPreferred) {
-        aliasMap.set(aliasKey, id);
-      }
-      return;
-    }
-    aliasMap.set(aliasKey, id);
-  };
-  const addIdAliases = (id: string, allowOverwrite = true) => {
-    const idKey = id.toLowerCase();
-    setAlias(idKey, id, allowOverwrite);
-    const idMatch = id.match(/^m-(\d+)$/i);
-    if (!idMatch?.[1]) return;
-    const numericAlias = String(Number.parseInt(idMatch[1], 10));
-    const canonicalId = `m-${numericAlias}`;
-    setAlias(canonicalId, id, allowOverwrite);
-    setAlias(numericAlias, id, allowOverwrite);
-  };
-  const activeTitleCounts = new Map<string, number>();
-  for (const milestone of milestones) {
-    const title = milestone.title.trim();
-    if (!title) continue;
-    const titleKey = title.toLowerCase();
-    activeTitleCounts.set(titleKey, (activeTitleCounts.get(titleKey) ?? 0) + 1);
-  }
-  const activeTitleKeys = new Set(activeTitleCounts.keys());
-
-  for (const milestone of milestones) {
-    const id = milestone.id.trim();
-    const title = milestone.title.trim();
-    if (!id) continue;
-    addIdAliases(id);
-    if (title && !reservedIdKeys.has(title.toLowerCase()) && activeTitleCounts.get(title.toLowerCase()) === 1) {
-      const titleKey = title.toLowerCase();
-      if (!aliasMap.has(titleKey)) {
-        aliasMap.set(titleKey, id);
-      }
-    }
-  }
-
-  const archivedTitleCounts = new Map<string, number>();
-  for (const milestone of archivedMilestones) {
-    const title = milestone.title.trim();
-    if (!title) continue;
-    const titleKey = title.toLowerCase();
-    if (activeTitleKeys.has(titleKey)) continue;
-    archivedTitleCounts.set(titleKey, (archivedTitleCounts.get(titleKey) ?? 0) + 1);
-  }
-  for (const milestone of archivedMilestones) {
-    const id = milestone.id.trim();
-    const title = milestone.title.trim();
-    if (!id) continue;
-    addIdAliases(id, false);
-    const titleKey = title.toLowerCase();
-    if (
-      title &&
-      !activeTitleKeys.has(titleKey) &&
-      !reservedIdKeys.has(titleKey) &&
-      archivedTitleCounts.get(titleKey) === 1
-    ) {
-      if (!aliasMap.has(titleKey)) {
-        aliasMap.set(titleKey, id);
-      }
-    }
-  }
-  return aliasMap;
-};
-
-const canonicalizeMilestone = (value: string | null | undefined, aliasMap?: Map<string, string>): string => {
-  const normalized = (value ?? '').trim();
-  if (!normalized) return '';
-  const direct = aliasMap?.get(milestoneKey(normalized));
-  if (direct) {
-    return direct;
-  }
-  const idMatch = normalized.match(/^m-(\d+)$/i);
-  if (idMatch?.[1]) {
-    const numericAlias = String(Number.parseInt(idMatch[1], 10));
-    return aliasMap?.get(`m-${numericAlias}`) ?? aliasMap?.get(numericAlias) ?? normalized;
-  }
-  if (/^\d+$/.test(normalized)) {
-    const numericAlias = String(Number.parseInt(normalized, 10));
-    return aliasMap?.get(`m-${numericAlias}`) ?? aliasMap?.get(numericAlias) ?? normalized;
-  }
-  return normalized;
-};
-
-/**
- * What the task modal is showing, as one value.
- *
- * A detail entry carries the session it was opened in, the record it is open on, and whatever has
- * been read for it. Every entry path - a clicked task, a routed task, a draft, a graph link -
- * starts a new session before any read begins, and a detail response may change the modal only
- * while its session and id are still the ones on screen. There is no ticket to take, nothing to
- * reconcile against the task list, and a response belonging to a modal the reader has left cannot
- * land on the one they are looking at.
- */
-type TaskModalState =
-  | { kind: 'closed' }
-  | { kind: 'create'; isDraft: boolean }
-  | {
-      kind: 'detail';
-      session: number;
-      id: string;
-      isDraft: boolean;
-      /** Opened by the task route, so a failed first read reports back through it. */
-      fromRoute: boolean;
-      value: Task | TaskDetail | null;
-    };
+import { type TaskRouteNavigationState, useTaskRouteDetail } from './hooks/useTaskRouteDetail';
+import { useAppDataWebSocket } from './hooks/useAppDataWebSocket';
 
 function AppContent() {
-  const [modal, setModal] = useState<TaskModalState>({ kind: 'closed' });
-  // Each entry into the modal takes the next session number, so a response can name the modal it
-  // was read for.
-  const modalSessionRef = useRef(0);
-  const modalRef = useRef<TaskModalState>(modal);
-  modalRef.current = modal;
-  // Advanced by every completed data refresh, whether or not the records visibly changed.
-  const [dataVersion, setDataVersion] = useState(0);
-
-  const openDetailModal = useCallback(
-    (id: string, options: { isDraft?: boolean; fromRoute?: boolean; record?: Task | TaskDetail } = {}) => {
-      modalSessionRef.current += 1;
-      setModal({
-        kind: 'detail',
-        session: modalSessionRef.current,
-        id,
-        isDraft: options.isDraft ?? false,
-        fromRoute: options.fromRoute ?? false,
-        value: options.record ?? null,
-      });
-    },
-    [],
-  );
+	// Advanced by every completed data refresh, whether or not the records visibly changed.
+	const [dataVersion, setDataVersion] = useState(0);
 
   // What the rest of the app reads. A detail modal is on screen once it has a record to show: a
   // routed task therefore appears when its first read lands, exactly as it did before.
-  const editingTask = modal.kind === 'detail' ? modal.value : null;
-  const showModal = modal.kind === 'create' || (modal.kind === 'detail' && modal.value !== null);
-  const isDraftMode = modal.kind === 'closed' ? false : modal.isDraft;
   const [statuses, setStatuses] = useState<string[]>([]);
   const [availableLabels, setAvailableLabels] = useState<string[]>([]);
   const [projectName, setProjectName] = useState<string>('');
@@ -285,21 +95,13 @@ function AppContent() {
   const loadErrorRef = useRef<Error | null>(null);
   const duplicateRepairPlanRef = useRef<DuplicateRepairPlan | null>(null);
   const protocolOnlyLoadingRef = useRef(false);
-  const location = useLocation();
-  const navigate = useNavigate();
-  const tasksRouteWithTitle = useMatch('/tasks/:id/:title');
-  const tasksRoute = useMatch('/tasks/:id');
-  const boardRouteWithTitle = useMatch('/board/:id/:title');
-  const boardRoute = useMatch('/board/:id');
-  const taskRouteAlertRef = useRef<HTMLDivElement | null>(null);
-  const routeTaskId =
-    tasksRouteWithTitle?.params.id ??
-    tasksRoute?.params.id ??
-    boardRouteWithTitle?.params.id ??
-    boardRoute?.params.id;
-  const routeBasePath = tasksRouteWithTitle || tasksRoute ? '/tasks' : boardRouteWithTitle || boardRoute ? '/board' : null;
-  const routeNavigationState = getTaskRouteNavigationState(location.state);
-  const taskRouteError = routeNavigationState.taskRouteError;
+	const routeDetail = useTaskRouteDetail(isInitialized, dataVersion);
+	const { modal, setModal, openDetailModal, closeModal: handleCloseModal, location, navigate, routeBasePath, routeTaskId, routeState: routeNavigationState } = routeDetail;
+	const editingTask = modal.kind === 'detail' ? modal.value : null;
+	const showModal = modal.kind === 'create' || (modal.kind === 'detail' && modal.value !== null);
+	const isDraftMode = modal.kind === 'closed' ? false : modal.isDraft;
+	const taskRouteAlertRef = useRef<HTMLDivElement | null>(null);
+	const taskRouteError = routeNavigationState.taskRouteError;
 
   // Set version data attribute on body
   React.useEffect(() => {
@@ -537,10 +339,6 @@ function AppContent() {
     [openDetailModal],
   );
 
-  const clearTaskModal = useCallback(() => {
-    setModal({ kind: 'closed' });
-  }, []);
-
   const handleEditTask = useCallback((task: Task) => {
     const basePath =
       location.pathname.startsWith('/board')
@@ -575,47 +373,7 @@ function AppContent() {
     routeTaskId,
   ]);
 
-  const handleCloseModal = () => {
-    clearTaskModal();
-    if (routeBasePath && routeTaskId) {
-      if (routeNavigationState.taskModalFrom) {
-        navigate(-1);
-      } else {
-        navigate(`${routeBasePath}${location.search}`, { replace: true });
-      }
-    }
-  };
-
-  // The task route says which task is open; the reader below is what reads it. Opening the session
-  // here rather than after a response is what stops an older task's read from answering for this
-  // one: from this moment the modal names a different session.
-  useEffect(() => {
-    const current = modalRef.current;
-    if (!routeTaskId || !routeBasePath || isInitialized !== true) {
-      if (!routeTaskId && current.kind === 'detail' && current.fromRoute) {
-        clearTaskModal();
-      }
-      return;
-    }
-
-    if (!isValidTaskId(routeTaskId)) {
-      clearTaskModal();
-      navigate(`${routeBasePath}${location.search}`, {
-        replace: true,
-        state: { taskRouteError: `"${routeTaskId}" is not a valid task ID.` } satisfies TaskRouteNavigationState,
-      });
-      return;
-    }
-
-    // Re-running for an unrelated reason (a filter in the query string, say) must not restart the
-    // task the route already opened.
-    if (current.kind === 'detail' && current.fromRoute && current.id === routeTaskId) {
-      return;
-    }
-    openDetailModal(routeTaskId, { fromRoute: true });
-  }, [clearTaskModal, isInitialized, location.search, navigate, openDetailModal, routeBasePath, routeTaskId]);
-
-  useEffect(() => {
+	useEffect(() => {
     if (taskRouteError) {
       taskRouteAlertRef.current?.focus();
     }
@@ -731,122 +489,7 @@ function AppContent() {
 		setTasks(next);
 	}, []);
 
-  /**
-   * A detail read that could not be shown. A session that has nothing on screen yet cannot stay
-   * open, and one opened from a link says why on the way back. A later read failing leaves what is
-   * already on screen alone: the last successful read is better than an empty modal.
-   */
-  const reportDetailReadFailure = useCallback(
-    (taskId: string, error: unknown, fromRoute: boolean) => {
-      clearTaskModal();
-      if (!fromRoute || !routeBasePath) return;
-      const message =
-        error instanceof ApiError && error.status === 409
-          ? `Task "${taskId}" is ambiguous. Repair duplicate task IDs before opening this link.`
-          : error instanceof ApiError && error.status === 400
-            ? `"${taskId}" is not a valid task ID.`
-            : error instanceof ApiError && error.status === 404
-              ? `Task "${taskId}" was not found.`
-              : `Task "${taskId}" could not be opened. Try again.`;
-      navigate(`${routeBasePath}${location.search}`, {
-        replace: true,
-        state: { taskRouteError: message } satisfies TaskRouteNavigationState,
-      });
-    },
-    [clearTaskModal, location.search, navigate, routeBasePath],
-  );
-  const reportDetailReadFailureRef = useRef(reportDetailReadFailure);
-  useEffect(() => {
-    reportDetailReadFailureRef.current = reportDetailReadFailure;
-  }, [reportDetailReadFailure]);
-
-  /**
-   * The one rule for detail reads: the modal shows the read for (session, task id, refresh
-   * generation), and a response may change it only while that key is still what the modal is
-   * waiting for. Each entry path opens a session before any read starts, every refresh generation
-   * reads once, and React's cleanup retires the read a newer key replaced.
-   *
-   * Navigating to another task, closing the modal, a refresh arriving, a task opened from a page
-   * without a task route, and a draft opened from its own list are the same event under that rule,
-   * so none of them can answer for another. Nothing here consults the task list, which is why a
-   * draft - never part of that corpus - refreshes like everything else, and why a dependency
-   * completing somewhere the browser cannot see still reaches the modal: the refresh generation
-   * advances, and the detail read is authoritative about what changed.
-   */
-  const detailSession = modal.kind === 'detail' ? modal.session : null;
-  const detailId = modal.kind === 'detail' ? modal.id : null;
-  useEffect(() => {
-    if (detailSession === null || detailId === null) return;
-    let active = true;
-    void apiClient
-      .fetchTask(detailId)
-      .then(detail => {
-        if (!active) return;
-        setModal(current =>
-          current.kind === 'detail' && current.session === detailSession && current.id === detailId
-            ? { ...current, value: detail }
-            : current,
-        );
-      })
-      .catch(error => {
-        if (!active) return;
-        const current = modalRef.current;
-        if (current.kind !== 'detail' || current.session !== detailSession || current.id !== detailId) return;
-        if (current.value !== null) return;
-        reportDetailReadFailureRef.current(detailId, error, current.fromRoute);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [detailSession, detailId, dataVersion]);
-
-  useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}`);
-	let disposed = false;
-    ws.onmessage = (event) => {
-	  const loadingState = parseBrowserLoadingState(event.data);
-	  if (loadingState?.type === 'loading') {
-		if (pendingDataRequestRef.current === null) protocolOnlyLoadingRef.current = true;
-		// Once content is on screen it stays interactive; the header indexing
-		// indicator (driven by loadingMessage) is the only loading signal. A new
-		// loading attempt always clears a stale terminal error, so a passive
-		// client shows its cached content instead of the obsolete failure.
-		if (!hasLoadedDataRef.current) setIsLoading(true);
-		applyLoadError(null);
-		setLoadingMessage(loadingState.message);
-	  } else if (loadingState?.type === 'loaded') {
-		const shouldRefresh = protocolOnlyLoadingRef.current && pendingDataRequestRef.current === null;
-		protocolOnlyLoadingRef.current = false;
-		setLoadingMessage(null);
-		// Indexing can surface cross-branch data (including duplicate findings)
-		// that an incremental reconcile would miss, so reload everything.
-		if (shouldRefresh) void fullRefreshData();
-	  } else if (loadingState?.type === 'error') {
-		protocolOnlyLoadingRef.current = false;
-		setIsLoading(false);
-		setLoadingMessage(null);
-		applyLoadError(new Error(loadingState.message));
-      } else if (event.data === "tasks-updated") {
-        void refreshData();
-      } else if (event.data === "milestones-updated") {
-        void refreshMilestoneData();
-      } else if (event.data === "config-updated") {
-        // Reload statuses when config changes
-        loadAllData();
-      }
-    };
-	ws.onclose = () => {
-		if (disposed || !protocolOnlyLoadingRef.current || pendingDataRequestRef.current !== null) return;
-		protocolOnlyLoadingRef.current = false;
-		void fullRefreshData();
-	};
-	return () => {
-		disposed = true;
-		ws.close();
-	};
-  }, [refreshData, refreshMilestoneData, fullRefreshData, loadAllData, applyLoadError]);
+	useAppDataWebSocket({ refreshData, refreshMilestoneData, fullRefreshData, loadAllData, applyLoadError, setIsLoading, setLoadingMessage, hasLoadedDataRef, pendingDataRequestRef, protocolOnlyLoadingRef });
 
   const handleSubmitTask = async (taskData: Partial<Task>) => {
     // Don't catch errors here - let TaskDetailsModal handle them
@@ -1046,7 +689,7 @@ function AppContent() {
             <Route path="decisions" element={<DecisionDetail decisions={decisions} onRefreshData={refreshData} dateFormat={config?.dateFormat} />} />
             <Route path="decisions/:id" element={<DecisionDetail decisions={decisions} onRefreshData={refreshData} dateFormat={config?.dateFormat} />} />
             <Route path="decisions/:id/:title" element={<DecisionDetail decisions={decisions} onRefreshData={refreshData} dateFormat={config?.dateFormat} />} />
-            <Route path="statistics" element={<Statistics tasks={tasks} isLoading={isLoading} onEditTask={handleEditTask} projectName={projectName} dateFormat={config?.dateFormat} />} />
+            <Route path="statistics" element={<Statistics isLoading={isLoading} onEditTask={handleEditTask} projectName={projectName} dateFormat={config?.dateFormat} />} />
             <Route path="settings" element={<Settings />} />
           </Route>
       </Routes>

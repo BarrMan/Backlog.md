@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 const CLI_PATH = getTestCliPath();
@@ -77,32 +77,29 @@ describe("CLI dependency options", () => {
 	it("rejects empty dependency values on task create and draft create without creating anything", async () => {
 		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
 
-		const emptyDependsOn = await $`bun ${CLI_PATH} task create "Empty depends-on" --depends-on ""`
-			.cwd(testDir)
-			.quiet()
-			.nothrow();
+		const emptyDependsOn = await runTestCli(["task", "create", "Empty depends-on", "--depends-on", ""], {
+			cwd: testDir,
+		});
 		expect(emptyDependsOn.exitCode).toBe(1);
 		// Create has nothing to clear, so the empty value stays an error here even though task edit clears.
 		expect(emptyDependsOn.stderr.toString()).toContain(
 			"Cannot use an empty value with --depends-on or --dep. Omit the flag to leave task dependencies unset.",
 		);
 
-		const emptyDep = await $`bun ${CLI_PATH} task create "Empty dep" --dep ""`.cwd(testDir).quiet().nothrow();
+		const emptyDep = await runTestCli(["task", "create", "Empty dep", "--dep", ""], { cwd: testDir });
 		expect(emptyDep.exitCode).toBe(1);
 		expect(emptyDep.stderr.toString()).toContain("Cannot use an empty value with --depends-on or --dep");
 
-		const emptyAlongsideValue =
-			await $`bun ${CLI_PATH} task create "Empty alongside value" --depends-on "" --dep TASK-1`
-				.cwd(testDir)
-				.quiet()
-				.nothrow();
+		const emptyAlongsideValue = await runTestCli(
+			["task", "create", "Empty alongside value", "--depends-on", "", "--dep", "TASK-1"],
+			{ cwd: testDir },
+		);
 		expect(emptyAlongsideValue.exitCode).toBe(1);
 		expect(emptyAlongsideValue.stderr.toString()).toContain("Cannot use an empty value with --depends-on or --dep");
 
-		const emptyDraftDep = await $`bun ${CLI_PATH} task create "Empty draft dep" --draft --dep ""`
-			.cwd(testDir)
-			.quiet()
-			.nothrow();
+		const emptyDraftDep = await runTestCli(["task", "create", "Empty draft dep", "--draft", "--dep", ""], {
+			cwd: testDir,
+		});
 		expect(emptyDraftDep.exitCode).toBe(1);
 		expect(emptyDraftDep.stderr.toString()).toContain("Cannot use an empty value with --depends-on or --dep");
 
@@ -136,12 +133,14 @@ describe("CLI dependency options", () => {
 		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
 		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
-		const emptyDependsOn = await $`bun ${CLI_PATH} task edit 2 --depends-on ${""} --plain`.cwd(testDir).quiet();
+		const emptyDependsOn = await runTestCli(["task", "edit", "2", "--depends-on", "", "--plain"], {
+			cwd: testDir,
+		});
 		expect(emptyDependsOn.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual([]);
 
 		await $`bun ${CLI_PATH} task edit 2 --depends-on TASK-1`.cwd(testDir).quiet();
-		const emptyDep = await $`bun ${CLI_PATH} task edit 2 --dep ${""} --plain`.cwd(testDir).quiet();
+		const emptyDep = await runTestCli(["task", "edit", "2", "--dep", "", "--plain"], { cwd: testDir });
 		expect(emptyDep.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual([]);
 	});
@@ -150,7 +149,9 @@ describe("CLI dependency options", () => {
 		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
 		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
-		const result = await $`bun ${CLI_PATH} task edit 2 --clear-deps --dep ${""} --plain`.cwd(testDir).quiet().nothrow();
+		const result = await runTestCli(["task", "edit", "2", "--clear-deps", "--dep", "", "--plain"], {
+			cwd: testDir,
+		});
 
 		expect(result.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual([]);
@@ -162,7 +163,9 @@ describe("CLI dependency options", () => {
 		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
 		await $`bun ${CLI_PATH} task create "Dependent task"`.cwd(testDir).quiet();
 
-		const result = await $`bun ${CLI_PATH} task edit 2 --depends-on ${""} --dep TASK-1 --plain`.cwd(testDir).quiet();
+		const result = await runTestCli(["task", "edit", "2", "--depends-on", "", "--dep", "TASK-1", "--plain"], {
+			cwd: testDir,
+		});
 
 		expect(result.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1"]);

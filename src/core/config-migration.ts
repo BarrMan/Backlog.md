@@ -1,3 +1,4 @@
+import { DEFAULT_INIT_CONFIG, DEFAULT_MIGRATION_CONFIG, DEFAULT_STATUSES } from "../constants/index.ts";
 import type { BacklogConfig } from "../types/index.ts";
 
 /**
@@ -5,20 +6,20 @@ import type { BacklogConfig } from "../types/index.ts";
  */
 export function migrateConfig(config: Partial<BacklogConfig>): BacklogConfig {
 	const defaultConfig: BacklogConfig = {
-		projectName: "Untitled Project",
-		defaultEditor: "",
-		defaultStatus: "",
-		statuses: ["To Do", "In Progress", "Done"],
-		labels: [],
-		dateFormat: "YYYY-MM-DD",
-		maxColumnWidth: 80,
-		autoOpenBrowser: true,
-		defaultPort: 6420,
-		remoteOperations: true,
-		autoCommit: false,
-		bypassGitHooks: false,
-		checkActiveBranches: true,
-		activeBranchDays: 30,
+		projectName: DEFAULT_MIGRATION_CONFIG.projectName,
+		defaultEditor: DEFAULT_MIGRATION_CONFIG.defaultEditor,
+		defaultStatus: DEFAULT_MIGRATION_CONFIG.defaultStatus,
+		statuses: [...DEFAULT_STATUSES],
+		labels: [...DEFAULT_MIGRATION_CONFIG.labels],
+		dateFormat: DEFAULT_MIGRATION_CONFIG.dateFormat,
+		maxColumnWidth: DEFAULT_MIGRATION_CONFIG.maxColumnWidth,
+		autoOpenBrowser: DEFAULT_INIT_CONFIG.autoOpenBrowser,
+		defaultPort: DEFAULT_INIT_CONFIG.defaultPort,
+		remoteOperations: DEFAULT_INIT_CONFIG.remoteOperations,
+		autoCommit: DEFAULT_INIT_CONFIG.autoCommit,
+		bypassGitHooks: DEFAULT_INIT_CONFIG.bypassGitHooks,
+		checkActiveBranches: DEFAULT_INIT_CONFIG.checkActiveBranches,
+		activeBranchDays: DEFAULT_INIT_CONFIG.activeBranchDays,
 	};
 
 	// Merge provided config with defaults, ensuring all fields exist

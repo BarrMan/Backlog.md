@@ -30,215 +30,155 @@ function toAcceptanceCriteriaEntries(values: string[] | undefined) {
 	return trimmed.map((text, index) => ({ text, checked: false, index: index + 1 }));
 }
 
-export function buildTaskUpdateInput(args: TaskEditArgs): TaskUpdateInput {
-	const updateInput: TaskUpdateInput = {};
+function normalizeChecklistAdditions(values: string[]): { text: string; checked: false }[] {
+	return values
+		.map((text) => String(text).trim())
+		.filter((text) => text.length > 0)
+		.map((text) => ({ text, checked: false }));
+}
 
-	if (typeof args.title === "string") {
-		updateInput.title = args.title;
+function assignStringFields(updateInput: TaskUpdateInput, args: TaskEditArgs): void {
+	for (const field of ["title", "description", "status", "priority", "type", "project"] as const) {
+		const value = args[field];
+		if (typeof value === "string") updateInput[field] = value;
 	}
+}
 
-	if (args.dueDate === null) {
-		updateInput.dueDate = null;
-	} else if (typeof args.dueDate === "string") {
-		updateInput.dueDate = args.dueDate.trim().length > 0 ? args.dueDate : null;
+function assignClearableValue(
+	updateInput: TaskUpdateInput,
+	field: "dueDate" | "milestone",
+	value: string | null | undefined,
+): void {
+	if (value === null) updateInput[field] = null;
+	else if (typeof value === "string") updateInput[field] = value.trim().length > 0 ? value : null;
+}
+
+function assignSanitizedList(
+	updateInput: TaskUpdateInput,
+	field:
+		| "labels"
+		| "addLabels"
+		| "removeLabels"
+		| "assignee"
+		| "dependencies"
+		| "references"
+		| "addReferences"
+		| "removeReferences"
+		| "documentation"
+		| "addDocumentation"
+		| "removeDocumentation"
+		| "modifiedFiles",
+	values: string[] | undefined,
+	clearable = false,
+): void {
+	const sanitized = clearable ? sanitizeClearableStringArray(values) : sanitizeStringArray(values);
+	if (sanitized) updateInput[field] = sanitized;
+}
+
+function assignChecklistMutations(
+	updateInput: TaskUpdateInput,
+	args: TaskEditArgs,
+	additionField: "acceptanceCriteriaAdd" | "definitionOfDoneAdd",
+	outputField: "addAcceptanceCriteria" | "addDefinitionOfDone",
+	mutations: ReadonlyArray<
+		readonly [
+			(
+				| "acceptanceCriteriaRemove"
+				| "definitionOfDoneRemove"
+				| "acceptanceCriteriaCheck"
+				| "definitionOfDoneCheck"
+				| "acceptanceCriteriaUncheck"
+				| "definitionOfDoneUncheck"
+			),
+			(
+				| "removeAcceptanceCriteria"
+				| "removeDefinitionOfDone"
+				| "checkAcceptanceCriteria"
+				| "checkDefinitionOfDone"
+				| "uncheckAcceptanceCriteria"
+				| "uncheckDefinitionOfDone"
+			),
+		]
+	>,
+): void {
+	const additions = args[additionField];
+	if (Array.isArray(additions) && additions.length > 0) {
+		const normalized = normalizeChecklistAdditions(additions);
+		if (normalized.length > 0) updateInput[outputField] = normalized;
 	}
-
-	if (typeof args.description === "string") {
-		updateInput.description = args.description;
-	}
-
-	if (typeof args.status === "string") {
-		updateInput.status = args.status;
-	}
-
-	if (typeof args.priority === "string") {
-		updateInput.priority = args.priority;
-	}
-
-	if (typeof args.type === "string") {
-		updateInput.type = args.type;
-	}
-
-	if (typeof args.project === "string") {
-		updateInput.project = args.project;
-	}
-
-	if (args.milestone === null) {
-		updateInput.milestone = null;
-	} else if (typeof args.milestone === "string") {
-		const trimmed = args.milestone.trim();
-		updateInput.milestone = trimmed.length > 0 ? trimmed : null;
-	}
-
-	if (typeof args.ordinal === "number") {
-		updateInput.ordinal = args.ordinal;
-	}
-
-	if (args.labels !== undefined) {
-		const labels = normalizeStringList(args.labels);
-		if (labels) {
-			updateInput.labels = labels;
-		} else if (args.labels.length === 0) {
-			updateInput.labels = [];
+	for (const [inputField, outputField] of mutations) {
+		const values = args[inputField] as number[] | undefined;
+		if (Array.isArray(values) && values.length > 0) {
+			updateInput[outputField] = [...values];
 		}
 	}
+}
 
-	const addLabels = normalizeStringList(args.addLabels);
-	if (addLabels) {
-		updateInput.addLabels = addLabels;
-	}
+function assignTaskLists(updateInput: TaskUpdateInput, args: TaskEditArgs): void {
+	if (typeof args.ordinal === "number") updateInput.ordinal = args.ordinal;
+	const labels = normalizeStringList(args.labels);
+	if (labels) updateInput.labels = labels;
+	else if (args.labels?.length === 0) updateInput.labels = [];
+	assignSanitizedList(updateInput, "addLabels", args.addLabels);
+	assignSanitizedList(updateInput, "removeLabels", args.removeLabels);
+	assignSanitizedList(updateInput, "assignee", args.assignee, true);
+	assignSanitizedList(updateInput, "dependencies", args.dependencies, true);
+	assignSanitizedList(updateInput, "references", args.references, true);
+	assignSanitizedList(updateInput, "addReferences", args.addReferences);
+	assignSanitizedList(updateInput, "removeReferences", args.removeReferences);
+	assignSanitizedList(updateInput, "documentation", args.documentation, true);
+	assignSanitizedList(updateInput, "addDocumentation", args.addDocumentation);
+	assignSanitizedList(updateInput, "removeDocumentation", args.removeDocumentation);
+	assignSanitizedList(updateInput, "modifiedFiles", args.modifiedFiles);
+}
 
-	const removeLabels = normalizeStringList(args.removeLabels);
-	if (removeLabels) {
-		updateInput.removeLabels = removeLabels;
-	}
-
-	const assignee = sanitizeClearableStringArray(args.assignee);
-	if (assignee) {
-		updateInput.assignee = assignee;
-	}
-
-	const dependencies = sanitizeClearableStringArray(args.dependencies);
-	if (dependencies) {
-		updateInput.dependencies = dependencies;
-	}
-
-	const references = sanitizeClearableStringArray(args.references);
-	if (references) {
-		updateInput.references = references;
-	}
-
-	const addReferences = sanitizeStringArray(args.addReferences);
-	if (addReferences) {
-		updateInput.addReferences = addReferences;
-	}
-
-	const removeReferences = sanitizeStringArray(args.removeReferences);
-	if (removeReferences) {
-		updateInput.removeReferences = removeReferences;
-	}
-
-	const documentation = sanitizeClearableStringArray(args.documentation);
-	if (documentation) {
-		updateInput.documentation = documentation;
-	}
-
-	const addDocumentation = sanitizeStringArray(args.addDocumentation);
-	if (addDocumentation) {
-		updateInput.addDocumentation = addDocumentation;
-	}
-
-	const removeDocumentation = sanitizeStringArray(args.removeDocumentation);
-	if (removeDocumentation) {
-		updateInput.removeDocumentation = removeDocumentation;
-	}
-
-	const modifiedFiles = sanitizeStringArray(args.modifiedFiles);
-	if (modifiedFiles) {
-		updateInput.modifiedFiles = modifiedFiles;
-	}
-
+function assignTaskSections(updateInput: TaskUpdateInput, args: TaskEditArgs): void {
 	const planSet = args.planSet ?? args.implementationPlan;
-	if (typeof planSet === "string") {
-		updateInput.implementationPlan = planSet;
-	}
-
+	if (typeof planSet === "string") updateInput.implementationPlan = planSet;
 	const planAppends = sanitizeAppend(args.planAppend);
-	if (planAppends) {
-		updateInput.appendImplementationPlan = planAppends;
-	}
-
-	if (args.planClear) {
-		updateInput.clearImplementationPlan = true;
-	}
-
+	if (planAppends) updateInput.appendImplementationPlan = planAppends;
+	if (args.planClear) updateInput.clearImplementationPlan = true;
 	const notesSet = args.notesSet ?? args.implementationNotes;
-	if (typeof notesSet === "string") {
-		updateInput.implementationNotes = notesSet;
-	}
-
+	if (typeof notesSet === "string") updateInput.implementationNotes = notesSet;
 	const notesAppends = sanitizeAppend(args.notesAppend);
-	if (notesAppends) {
-		updateInput.appendImplementationNotes = notesAppends;
-	}
-
-	if (args.notesClear) {
-		updateInput.clearImplementationNotes = true;
-	}
-
+	if (notesAppends) updateInput.appendImplementationNotes = notesAppends;
+	if (args.notesClear) updateInput.clearImplementationNotes = true;
 	const commentsAppends = sanitizeAppend(args.commentsAppend);
 	if (commentsAppends) {
 		const author =
 			typeof args.commentAuthor === "string" && args.commentAuthor.trim().length > 0
 				? args.commentAuthor.trim()
 				: undefined;
-		updateInput.appendComments = commentsAppends.map((body) => ({
-			body,
-			...(author && { author }),
-		}));
+		updateInput.appendComments = commentsAppends.map((body) => ({ body, ...(author && { author }) }));
 	}
-
-	if (typeof args.finalSummary === "string") {
-		updateInput.finalSummary = args.finalSummary;
-	}
-
+	if (typeof args.finalSummary === "string") updateInput.finalSummary = args.finalSummary;
 	const finalSummaryAppends = sanitizeAppend(args.finalSummaryAppend);
-	if (finalSummaryAppends) {
-		updateInput.appendFinalSummary = finalSummaryAppends;
-	}
-
-	if (args.finalSummaryClear) {
-		updateInput.clearFinalSummary = true;
-	}
-
+	if (finalSummaryAppends) updateInput.appendFinalSummary = finalSummaryAppends;
+	if (args.finalSummaryClear) updateInput.clearFinalSummary = true;
 	const criteriaSet = toAcceptanceCriteriaEntries(args.acceptanceCriteriaSet);
-	if (criteriaSet) {
-		updateInput.acceptanceCriteria = criteriaSet;
-	}
+	if (criteriaSet) updateInput.acceptanceCriteria = criteriaSet;
+}
 
-	if (Array.isArray(args.acceptanceCriteriaAdd) && args.acceptanceCriteriaAdd.length > 0) {
-		const additions = args.acceptanceCriteriaAdd
-			.map((text) => String(text).trim())
-			.filter((text) => text.length > 0)
-			.map((text) => ({ text, checked: false }));
-		if (additions.length > 0) {
-			updateInput.addAcceptanceCriteria = additions;
-		}
-	}
+export function buildTaskUpdateInput(args: TaskEditArgs): TaskUpdateInput {
+	const updateInput: TaskUpdateInput = {};
 
-	if (Array.isArray(args.acceptanceCriteriaRemove) && args.acceptanceCriteriaRemove.length > 0) {
-		updateInput.removeAcceptanceCriteria = [...args.acceptanceCriteriaRemove];
-	}
+	assignStringFields(updateInput, args);
+	assignClearableValue(updateInput, "dueDate", args.dueDate);
+	assignClearableValue(updateInput, "milestone", args.milestone);
 
-	if (Array.isArray(args.acceptanceCriteriaCheck) && args.acceptanceCriteriaCheck.length > 0) {
-		updateInput.checkAcceptanceCriteria = [...args.acceptanceCriteriaCheck];
-	}
+	assignTaskLists(updateInput, args);
+	assignTaskSections(updateInput, args);
 
-	if (Array.isArray(args.acceptanceCriteriaUncheck) && args.acceptanceCriteriaUncheck.length > 0) {
-		updateInput.uncheckAcceptanceCriteria = [...args.acceptanceCriteriaUncheck];
-	}
-
-	if (Array.isArray(args.definitionOfDoneAdd) && args.definitionOfDoneAdd.length > 0) {
-		const additions = args.definitionOfDoneAdd
-			.map((text) => String(text).trim())
-			.filter((text) => text.length > 0)
-			.map((text) => ({ text, checked: false }));
-		if (additions.length > 0) {
-			updateInput.addDefinitionOfDone = additions;
-		}
-	}
-
-	if (Array.isArray(args.definitionOfDoneRemove) && args.definitionOfDoneRemove.length > 0) {
-		updateInput.removeDefinitionOfDone = [...args.definitionOfDoneRemove];
-	}
-
-	if (Array.isArray(args.definitionOfDoneCheck) && args.definitionOfDoneCheck.length > 0) {
-		updateInput.checkDefinitionOfDone = [...args.definitionOfDoneCheck];
-	}
-
-	if (Array.isArray(args.definitionOfDoneUncheck) && args.definitionOfDoneUncheck.length > 0) {
-		updateInput.uncheckDefinitionOfDone = [...args.definitionOfDoneUncheck];
-	}
+	assignChecklistMutations(updateInput, args, "acceptanceCriteriaAdd", "addAcceptanceCriteria", [
+		["acceptanceCriteriaRemove", "removeAcceptanceCriteria"],
+		["acceptanceCriteriaCheck", "checkAcceptanceCriteria"],
+		["acceptanceCriteriaUncheck", "uncheckAcceptanceCriteria"],
+	]);
+	assignChecklistMutations(updateInput, args, "definitionOfDoneAdd", "addDefinitionOfDone", [
+		["definitionOfDoneRemove", "removeDefinitionOfDone"],
+		["definitionOfDoneCheck", "checkDefinitionOfDone"],
+		["definitionOfDoneUncheck", "uncheckDefinitionOfDone"],
+	]);
 
 	return updateInput;
 }

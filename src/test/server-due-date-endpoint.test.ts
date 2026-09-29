@@ -146,6 +146,20 @@ describe("BacklogServer due date endpoints", () => {
 		expect(invalidUpdateType.status).toBe(400);
 	});
 
+	it("rejects a numeric title that aliases an existing milestone ID", async () => {
+		const filesystem = (server as unknown as { core: { filesystem: { listMilestones: () => Promise<Milestone[]> } } })
+			.core.filesystem;
+		const listMilestones = filesystem.listMilestones;
+		filesystem.listMilestones = async () => [{ id: "M-01", title: "First release", description: "", rawContent: "" }];
+		try {
+			const duplicate = await handlers.handleCreateMilestone(jsonRequest("/api/milestones", "POST", { title: "1" }));
+			expect(duplicate.status).toBe(400);
+			expect(await duplicate.json()).toEqual({ error: "A milestone with this title or ID already exists" });
+		} finally {
+			filesystem.listMilestones = listMilestones;
+		}
+	});
+
 	it("keeps unexpected milestone creation failures as internal errors", async () => {
 		const filesystem = (
 			server as unknown as {

@@ -11,7 +11,7 @@
 import { DEFAULT_DIRECTORIES } from "../constants/index.ts";
 import type { GitBranchTip, GitOperations } from "../git/operations.ts";
 import { parseTask } from "../markdown/parser.ts";
-import type { BacklogConfig, Task } from "../types/index.ts";
+import type { BacklogConfig, Task, TaskDirectoryType } from "../types/index.ts";
 import { extractAnyPrefix } from "../utils/prefix-config.ts";
 import {
 	canonicalTaskId,
@@ -19,7 +19,6 @@ import {
 	normalizeTaskId,
 	normalizeTaskIdentity,
 } from "../utils/task-path.ts";
-import type { TaskDirectoryType } from "./cross-branch-tasks.ts";
 import { normalizeTaskLifecyclePath } from "./task-identity-index.ts";
 
 /** Default prefix for tasks */
@@ -56,10 +55,10 @@ function extractConfiguredTaskId(filePath: string, prefix: string): string | nul
 }
 
 const STATE_DIRECTORIES: Array<{ path: string; type: TaskDirectoryType }> = [
-	{ path: "tasks", type: "task" },
-	{ path: "drafts", type: "draft" },
-	{ path: "archive/tasks", type: "archived" },
-	{ path: "completed", type: "completed" },
+	{ path: DEFAULT_DIRECTORIES.TASKS, type: "task" },
+	{ path: DEFAULT_DIRECTORIES.DRAFTS, type: "draft" },
+	{ path: DEFAULT_DIRECTORIES.ARCHIVE_TASKS, type: "archived" },
+	{ path: DEFAULT_DIRECTORIES.COMPLETED, type: "completed" },
 ];
 
 function getTaskTypeFromPath(path: string, backlogDir: string): TaskDirectoryType | null {

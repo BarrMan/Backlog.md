@@ -1,5 +1,27 @@
+import { DEFAULT_DONE_STATUS } from "../constants/index.ts";
 import type { Task } from "../types/index.ts";
 import { getPriorityValues, normalizePriorityValue } from "../utils/priority-config.ts";
+import { MILLISECONDS_PER_DAY } from "../utils/time.ts";
+
+const RECENT_ACTIVITY_DAYS = 7;
+const STALE_TASK_DAYS = 30;
+const HEALTH_TASK_LIMIT = 5;
+
+function taskAgeInDays(task: Task, now: Date): number | null {
+	if (!task.createdDate) return null;
+	const created = new Date(task.createdDate);
+	const end = task.status === DEFAULT_DONE_STATUS && task.updatedDate ? new Date(task.updatedDate) : now;
+	return Math.floor((end.getTime() - created.getTime()) / MILLISECONDS_PER_DAY);
+}
+
+function hasBlockingDependency(task: Task, tasksById: Map<string, Task>): boolean {
+	return Boolean(
+		task.dependencies?.some((dependencyId) => {
+			const dependency = tasksById.get(dependencyId);
+			return dependency?.status !== DEFAULT_DONE_STATUS;
+		}),
+	);
+}
 
 export interface TaskStatistics {
 	statusCounts: Map<string, number>;
@@ -45,8 +67,8 @@ export function getTaskStatistics(
 	let completedTasks = 0;
 	let noPriorityCount = 0;
 	const now = new Date();
-	const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-	const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+	const recentActivityCutoff = new Date(now.getTime() - RECENT_ACTIVITY_DAYS * MILLISECONDS_PER_DAY);
+	const staleTaskCutoff = new Date(now.getTime() - STALE_TASK_DAYS * MILLISECONDS_PER_DAY);
 
 	const recentlyCreated: Task[] = [];
 	const recentlyUpdated: Task[] = [];
@@ -54,6 +76,7 @@ export function getTaskStatistics(
 	const blockedTasks: Task[] = [];
 	let totalAge = 0;
 	let taskCount = 0;
+	const tasksById = new Map(tasks.map((task) => [task.id, task]));
 
 	// Process each task
 	for (const task of tasks) {
@@ -67,7 +90,7 @@ export function getTaskStatistics(
 		statusCounts.set(task.status, currentCount + 1);
 
 		// Count completed tasks
-		if (task.status === "Done") {
+		if (task.status === DEFAULT_DONE_STATUS) {
 			completedTasks++;
 		}
 
@@ -82,52 +105,37 @@ export function getTaskStatistics(
 
 		// Track recent activity
 		if (task.createdDate) {
-			const createdDate = new Date(task.createdDate);
-			if (createdDate >= oneWeekAgo) {
+			if (new Date(task.createdDate) >= recentActivityCutoff) {
 				recentlyCreated.push(task);
 			}
-
-			// Calculate task age
-			// For completed tasks, use the time from creation to completion
-			// For active tasks, use the time from creation to now
-			let ageInDays: number;
-			if (task.status === "Done" && task.updatedDate) {
-				const updatedDate = new Date(task.updatedDate);
-				ageInDays = Math.floor((updatedDate.getTime() - createdDate.getTime()) / (24 * 60 * 60 * 1000));
-			} else {
-				ageInDays = Math.floor((now.getTime() - createdDate.getTime()) / (24 * 60 * 60 * 1000));
+			const ageInDays = taskAgeInDays(task, now);
+			if (ageInDays !== null) {
+				totalAge += ageInDays;
+				taskCount++;
 			}
-			totalAge += ageInDays;
-			taskCount++;
 		}
 
 		if (task.updatedDate) {
 			const updatedDate = new Date(task.updatedDate);
-			if (updatedDate >= oneWeekAgo) {
+			if (updatedDate >= recentActivityCutoff) {
 				recentlyUpdated.push(task);
 			}
 		}
 
 		// Identify stale tasks (not updated in 30 days and not done)
-		if (task.status !== "Done") {
+		if (task.status !== DEFAULT_DONE_STATUS) {
 			const lastDate = task.updatedDate || task.createdDate;
 			if (lastDate) {
 				const date = new Date(lastDate);
-				if (date < oneMonthAgo) {
+				if (date < staleTaskCutoff) {
 					staleTasks.push(task);
 				}
 			}
 		}
 
 		// Identify blocked tasks (has dependencies that are not done)
-		if (task.dependencies && task.dependencies.length > 0 && task.status !== "Done") {
-			// Check if any dependency is not done
-			const hasBlockingDependency = task.dependencies.some((depId) => {
-				const dep = tasks.find((t) => t.id === depId);
-				return dep && dep.status !== "Done";
-			});
-
-			if (hasBlockingDependency) {
+		if (task.dependencies?.length && task.status !== DEFAULT_DONE_STATUS) {
+			if (hasBlockingDependency(task, tasksById)) {
 				blockedTasks.push(task);
 			}
 		}
@@ -162,13 +170,13 @@ export function getTaskStatistics(
 		completionPercentage,
 		draftCount: drafts.length,
 		recentActivity: {
-			created: recentlyCreated.slice(0, 5), // Top 5 most recent
-			updated: recentlyUpdated.slice(0, 5), // Top 5 most recent
+			created: recentlyCreated.slice(0, HEALTH_TASK_LIMIT),
+			updated: recentlyUpdated.slice(0, HEALTH_TASK_LIMIT),
 		},
 		projectHealth: {
 			averageTaskAge,
-			staleTasks: staleTasks.slice(0, 5), // Top 5 stale tasks
-			blockedTasks: blockedTasks.slice(0, 5), // Top 5 blocked tasks
+			staleTasks: staleTasks.slice(0, HEALTH_TASK_LIMIT),
+			blockedTasks: blockedTasks.slice(0, HEALTH_TASK_LIMIT),
 		},
 	};
 }

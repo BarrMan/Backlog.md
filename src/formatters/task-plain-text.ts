@@ -33,11 +33,11 @@ export function buildAcceptanceCriteriaItems(task: Task): ChecklistItem[] {
 	return buildChecklistItems(task.acceptanceCriteriaItems);
 }
 
-export function buildDefinitionOfDoneItems(task: Task): ChecklistItem[] {
+export function formatDefinitionOfDoneChecklist(task: Task): ChecklistItem[] {
 	return buildChecklistItems(task.definitionOfDoneItems);
 }
 
-export function formatAcceptanceCriteriaLines(items: ChecklistItem[]): string[] {
+function formatAcceptanceCriteriaLines(items: ChecklistItem[]): string[] {
 	if (items.length === 0) return [];
 	return items.map((item) => {
 		const prefix = item.checked ? "- [x]" : "- [ ]";
@@ -82,6 +82,45 @@ function formatDependencyGraphBlock(task: TaskDetail): string[] {
 	return ["", "Dependency Graph:", "-".repeat(50), ...graphLines];
 }
 
+function pushTaskMetadata(lines: string[], task: TaskDetail): void {
+	const priorityLabel = formatPriority(task.priority);
+	if (priorityLabel) lines.push(`Priority: ${priorityLabel}`);
+	if (task.type) lines.push(`Type: ${task.type}`);
+	if (task.project) lines.push(`Project: ${task.project}`);
+	if (task.ordinal !== undefined) lines.push(`Ordinal: ${task.ordinal}`);
+	const assigneeText = formatAssignees(task.assignee);
+	if (assigneeText) lines.push(`Assignee: ${assigneeText}`);
+	if (task.reporter) lines.push(`Reporter: ${task.reporter.startsWith("@") ? task.reporter : `@${task.reporter}`}`);
+	lines.push(`Created: ${formatDateForDisplay(task.createdDate, plainDateDisplayOptions)}`);
+	if (task.updatedDate) lines.push(`Updated: ${formatDateForDisplay(task.updatedDate, plainDateDisplayOptions)}`);
+	if (task.dueDate) lines.push(`Due: ${formatDateForDisplay(task.dueDate)}`);
+	if (task.labels?.length) lines.push(`Labels: ${task.labels.join(", ")}`);
+	if (task.milestone) lines.push(`Milestone: ${task.milestone}`);
+	if (task.parentTaskId) {
+		lines.push(
+			`Parent: ${task.parentTaskTitle ? `${task.parentTaskId} - ${task.parentTaskTitle}` : task.parentTaskId}`,
+		);
+	}
+	const summaries = task.subtaskSummaries ?? [];
+	const subtaskCount = summaries.length > 0 ? summaries.length : (task.subtasks?.length ?? 0);
+	if (subtaskCount > 0) {
+		const subtaskLines = formatSubtaskLines(summaries);
+		if (subtaskLines.length > 0) lines.push(`Subtasks (${subtaskCount}):`, ...subtaskLines);
+		else lines.push(`Subtasks: ${subtaskCount}`);
+	}
+	if (task.references?.length) lines.push(`References: ${task.references.join(", ")}`);
+	if (task.documentation?.length) lines.push(`Documentation: ${task.documentation.join(", ")}`);
+}
+
+function pushSection(lines: string[], title: string, content: string, trailingBlank = true): void {
+	lines.push(title, "-".repeat(50), transformCodePathsPlain(content));
+	if (trailingBlank) lines.push("");
+}
+
+function pushChecklistSection(lines: string[], title: string, items: ChecklistItem[], emptyMessage: string): void {
+	lines.push(title, "-".repeat(50), ...(items.length > 0 ? formatAcceptanceCriteriaLines(items) : [emptyMessage]), "");
+}
+
 export function formatTaskPlainText(task: TaskDetail, options: TaskPlainTextOptions = {}): string {
 	const lines: string[] = [];
 	const filePath = options.filePathOverride ?? task.filePath;
@@ -96,116 +135,35 @@ export function formatTaskPlainText(task: TaskDetail, options: TaskPlainTextOpti
 	lines.push("");
 	lines.push(`Status: ${formatStatusWithIcon(task.status)}`);
 
-	const priorityLabel = formatPriority(task.priority);
-	if (priorityLabel) {
-		lines.push(`Priority: ${priorityLabel}`);
-	}
-	if (task.type) {
-		lines.push(`Type: ${task.type}`);
-	}
-	if (task.project) {
-		lines.push(`Project: ${task.project}`);
-	}
-	if (task.ordinal !== undefined) {
-		lines.push(`Ordinal: ${task.ordinal}`);
-	}
-
-	const assigneeText = formatAssignees(task.assignee);
-	if (assigneeText) {
-		lines.push(`Assignee: ${assigneeText}`);
-	}
-
-	if (task.reporter) {
-		const reporter = task.reporter.startsWith("@") ? task.reporter : `@${task.reporter}`;
-		lines.push(`Reporter: ${reporter}`);
-	}
-
-	lines.push(`Created: ${formatDateForDisplay(task.createdDate, plainDateDisplayOptions)}`);
-	if (task.updatedDate) {
-		lines.push(`Updated: ${formatDateForDisplay(task.updatedDate, plainDateDisplayOptions)}`);
-	}
-	if (task.dueDate) {
-		// A due date is a plain day: no time to mark UTC, and no timezone meaning to explain.
-		lines.push(`Due: ${formatDateForDisplay(task.dueDate)}`);
-	}
-
-	if (task.labels?.length) {
-		lines.push(`Labels: ${task.labels.join(", ")}`);
-	}
-
-	if (task.milestone) {
-		lines.push(`Milestone: ${task.milestone}`);
-	}
-
-	if (task.parentTaskId) {
-		const parentLabel = task.parentTaskTitle ? `${task.parentTaskId} - ${task.parentTaskTitle}` : task.parentTaskId;
-		lines.push(`Parent: ${parentLabel}`);
-	}
-
-	const subtaskSummaries = task.subtaskSummaries ?? [];
-	const subtaskCount = subtaskSummaries.length > 0 ? subtaskSummaries.length : (task.subtasks?.length ?? 0);
-	if (subtaskCount > 0) {
-		const subtaskLines = formatSubtaskLines(subtaskSummaries);
-		if (subtaskLines.length > 0) {
-			lines.push(`Subtasks (${subtaskCount}):`);
-			lines.push(...subtaskLines);
-		} else {
-			lines.push(`Subtasks: ${subtaskCount}`);
-		}
-	}
-
-	if (task.references?.length) {
-		lines.push(`References: ${task.references.join(", ")}`);
-	}
-
-	if (task.documentation?.length) {
-		lines.push(`Documentation: ${task.documentation.join(", ")}`);
-	}
+	pushTaskMetadata(lines, task);
 
 	// Every plain task output is a detail read, so this replaces the raw dependency ID list entirely.
 	lines.push(...formatDependencyGraphBlock(task));
 
 	lines.push("");
-	lines.push("Description:");
-	lines.push("-".repeat(50));
 	const description = task.description?.trim();
-	lines.push(transformCodePathsPlain(description && description.length > 0 ? description : "No description provided"));
-	lines.push("");
-
-	lines.push("Acceptance Criteria:");
-	lines.push("-".repeat(50));
-	const criteriaItems = buildAcceptanceCriteriaItems(task);
-	if (criteriaItems.length > 0) {
-		lines.push(...formatAcceptanceCriteriaLines(criteriaItems));
-	} else {
-		lines.push("No acceptance criteria defined");
-	}
-	lines.push("");
-
-	lines.push("Definition of Done:");
-	lines.push("-".repeat(50));
-	const definitionItems = buildDefinitionOfDoneItems(task);
-	if (definitionItems.length > 0) {
-		lines.push(...formatAcceptanceCriteriaLines(definitionItems));
-	} else {
-		lines.push("No Definition of Done items defined");
-	}
-	lines.push("");
+	pushSection(lines, "Description:", description && description.length > 0 ? description : "No description provided");
+	pushChecklistSection(
+		lines,
+		"Acceptance Criteria:",
+		buildAcceptanceCriteriaItems(task),
+		"No acceptance criteria defined",
+	);
+	pushChecklistSection(
+		lines,
+		"Definition of Done:",
+		formatDefinitionOfDoneChecklist(task),
+		"No Definition of Done items defined",
+	);
 
 	const implementationPlan = task.implementationPlan?.trim();
 	if (implementationPlan) {
-		lines.push("Implementation Plan:");
-		lines.push("-".repeat(50));
-		lines.push(transformCodePathsPlain(implementationPlan));
-		lines.push("");
+		pushSection(lines, "Implementation Plan:", implementationPlan);
 	}
 
 	const implementationNotes = task.implementationNotes?.trim();
 	if (implementationNotes) {
-		lines.push("Implementation Notes:");
-		lines.push("-".repeat(50));
-		lines.push(transformCodePathsPlain(implementationNotes));
-		lines.push("");
+		pushSection(lines, "Implementation Notes:", implementationNotes);
 	}
 
 	// Records what the work touched, so it belongs with the plan and the notes rather than with the
@@ -228,10 +186,7 @@ export function formatTaskPlainText(task: TaskDetail, options: TaskPlainTextOpti
 
 	const finalSummary = task.finalSummary?.trim();
 	if (finalSummary) {
-		lines.push("Final Summary:");
-		lines.push("-".repeat(50));
-		lines.push(transformCodePathsPlain(finalSummary));
-		lines.push("");
+		pushSection(lines, "Final Summary:", finalSummary);
 	}
 
 	return lines.join("\n");

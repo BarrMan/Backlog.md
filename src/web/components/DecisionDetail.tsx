@@ -1,66 +1,21 @@
-import { useState, useEffect, memo } from 'react';
+import { useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { apiClient, isAmbiguousIdConflict } from '../lib/api';
-import MDEditor from '@uiw/react-md-editor';
-import MermaidMarkdown from './MermaidMarkdown';
+import { apiClient } from '../lib/api';
 import { type Decision } from '../../types';
-import AmbiguousIdNotice from './AmbiguousIdNotice';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { SuccessToast } from './SuccessToast';
-import { useTheme } from '../contexts/ThemeContext';
 import { sanitizeUrlTitle } from '../utils/urlHelpers';
 import StoredDate from './StoredDate';
+import EditableDocumentContent, { DocumentDetailTitle } from "./EditableDocumentContent";
+import DocumentDetailActions from "./DocumentDetailActions";
+import { useDocumentDetailLifecycle } from "../hooks/use-document-detail-lifecycle";
+import { DocumentDetailGate, EmptyDocumentDetail } from "./DocumentDetailStates";
 
 // Utility function for ID transformations
 const stripIdPrefix = (id: string): string => {
 	if (id.startsWith('decision-')) return id.replace('decision-', '');
 	return id;
 };
-
-// Custom MDEditor wrapper for proper height handling
-const MarkdownEditor = memo(function MarkdownEditor({ 
-	value, 
-	onChange, 
-	isEditing 
-}: {
-	value: string;
-	onChange?: (val: string | undefined) => void;
-	isEditing: boolean;
-	isReadonly?: boolean;
-}) {
-	const { theme } = useTheme();
-	if (!isEditing) {
-		// Preview mode - just show the rendered markdown without editor UI
-			return (
-				<div className="prose prose-sm !max-w-none w-full p-6 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden" data-color-mode={theme}>
-					<MermaidMarkdown source={value} />
-				</div>
-			);
-	}
-
-	// Edit mode - show full editor that fills the available space
-	return (
-		<div className="h-full w-full flex flex-col">
-			<div className="flex-1 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800">
-				<MDEditor
-					value={value}
-					onChange={onChange}
-					preview="edit"
-					height="100%"
-					hideToolbar={false}
-					data-color-mode={theme}
-					textareaProps={{
-						placeholder: 'Write your decision documentation here...',
-						style: { 
-							fontSize: '14px',
-							resize: 'none'
-						}
-					}}
-				/>
-			</div>
-		</div>
-	);
-});
 
 // Utility function to add decision prefix for API calls
 const addDecisionPrefix = (id: string): string => {
@@ -77,94 +32,27 @@ export default function DecisionDetail({ decisions, onRefreshData, dateFormat }:
 	const { id, title } = useParams<{ id: string; title: string }>();
 	const navigate = useNavigate();
 	const [searchParams, setSearchParams] = useSearchParams();
-	const [decision, setDecision] = useState<Decision | null>(null);
 	const [content, setContent] = useState<string>('');
 	const [originalContent, setOriginalContent] = useState<string>('');
 	const [decisionTitle, setDecisionTitle] = useState<string>('');
 	const [originalDecisionTitle, setOriginalDecisionTitle] = useState<string>('');
-	const [isLoading, setIsLoading] = useState(true);
 	const [isSaving, setIsSaving] = useState(false);
-	const [isEditing, setIsEditing] = useState(false);
-	const [error, setError] = useState<Error | null>(null);
-	const [isNewDecision, setIsNewDecision] = useState(false);
 	const [showSaveSuccess, setShowSaveSuccess] = useState(false);
-
-	useEffect(() => {
-		if (id === 'new') {
-			// Handle new decision creation
-			setIsNewDecision(true);
-			setIsEditing(true);
-			setIsLoading(false);
-			// Creating is unrelated to whatever failed to load before, so clear any load error.
-			// Otherwise a previous ambiguity notice keeps rendering instead of the create editor.
-			setError(null);
-			setDecision(null);
-			setDecisionTitle('');
-			setOriginalDecisionTitle('');
-			setContent('');
-			setOriginalContent('');
-		} else if (id) {
-			setIsNewDecision(false);
-			setIsEditing(false); // Ensure we start in preview mode for existing decisions
-			loadDecisionContent();
-		}
-	}, [id, decisions]);
-
-	// Check for edit query parameter to start in edit mode
-	useEffect(() => {
-		if (searchParams.get('edit') === 'true') {
-			setIsEditing(true);
-			// Remove the edit parameter from URL
-			setSearchParams(params => {
-				params.delete('edit');
-				return params;
-			});
-		}
-	}, [searchParams, setSearchParams]);
-
-	const loadDecisionContent = async () => {
-		if (!id) return;
-		
-		try {
-			setIsLoading(true);
-			setError(null);
-			// Find decision from props
-			const prefixedId = addDecisionPrefix(id);
-			const decision = decisions.find(d => d.id === prefixedId);
-			
-			// Always try to fetch the decision from API, whether we found it in decisions or not
-			// This ensures deep linking works even before the parent component loads the decisions array
-			try {
-				const fullDecision = await apiClient.fetchDecision(prefixedId);
-				setContent(fullDecision.rawContent || '');
-				setOriginalContent(fullDecision.rawContent || '');
-				setDecisionTitle(fullDecision.title || '');
-				setOriginalDecisionTitle(fullDecision.title || '');
-				// Update decision state with full data
-				setDecision(fullDecision);
-			} catch (fetchError) {
-				// Never fall back to the cached list entry when the ID is ambiguous: that entry is
-				// one of the candidates, and showing it would silently pick a winner.
-				if (isAmbiguousIdConflict(fetchError)) {
-					setDecision(null);
-					setError(fetchError);
-					console.error('Failed to load decision:', fetchError);
-				} else if (!decision) {
-					// If fetch fails and we don't have the decision in props, show error
-					console.error('Failed to load decision:', fetchError);
-				} else {
-					// We have basic info from props even if fetch failed
-					setDecision(decision);
-					setDecisionTitle(decision.title || '');
-					setOriginalDecisionTitle(decision.title || '');
-				}
-			}
-		} catch (error) {
-			console.error('Failed to load decision:', error);
-		} finally {
-			setIsLoading(false);
-		}
-	};
+	const adapter = useMemo(() => ({
+		prefix: addDecisionPrefix,
+		fetch: apiClient.fetchDecision.bind(apiClient),
+		onLoad: (next: Decision) => {
+			setContent(next.rawContent || ""); setOriginalContent(next.rawContent || "");
+			setDecisionTitle(next.title || ""); setOriginalDecisionTitle(next.title || "");
+		},
+		onFallback: (next: Decision) => { setDecisionTitle(next.title || ""); setOriginalDecisionTitle(next.title || ""); },
+		onNew: () => { setDecisionTitle(""); setOriginalDecisionTitle(""); setContent(""); setOriginalContent(""); },
+		logError: (next: unknown) => console.error("Failed to load decision:", next),
+	}), []);
+	const { entity: decision, isLoading, isEditing, setIsEditing, isNew: isNewDecision, setIsNew: setIsNewDecision, error } = useDocumentDetailLifecycle({
+		id, items: decisions, adapter, editRequested: searchParams.get("edit") === "true",
+		consumeEditRequest: () => setSearchParams((params) => { params.delete("edit"); return params; }),
+	});
 
 	const handleSave = async () => {
 		if (!decisionTitle.trim()) {
@@ -236,33 +124,8 @@ export default function DecisionDetail({ decisions, onRefreshData, dateFormat }:
 		return colors[status.toLowerCase() as keyof typeof colors] || 'bg-gray-50 text-gray-700 border-gray-200';
 	};
 
-	if (!id) {
-		return (
-			<div className="flex-1 flex items-center justify-center p-8">
-				<div className="text-center">
-					<svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3" />
-					</svg>
-					<h3 className="mt-2 text-sm font-medium text-gray-900">No decision selected</h3>
-					<p className="mt-1 text-sm text-gray-500">Select a decision from the sidebar to view its content.</p>
-				</div>
-			</div>
-		);
-	}
-
-	if (isLoading) {
-		return (
-			<div className="flex-1 flex items-center justify-center">
-				<div className="text-gray-500">Loading...</div>
-			</div>
-		);
-	}
-
-	if (isAmbiguousIdConflict(error)) {
-		return <AmbiguousIdNotice message={error.message} />;
-	}
-
 	return (
+		<DocumentDetailGate id={id} isLoading={isLoading} error={error} empty={<EmptyDocumentDetail kind="decision" message="Select a decision from the sidebar to view its content." icon="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3" />}>
 		<ErrorBoundary>
 			<div className="h-full bg-white dark:bg-gray-900 flex flex-col transition-colors duration-200">
 			{/* Header Section - Confluence/Linear Style */}
@@ -270,19 +133,7 @@ export default function DecisionDetail({ decisions, onRefreshData, dateFormat }:
 				<div className="max-w-4xl mx-auto px-8 py-6">
 					<div className="flex items-start justify-between mb-6">
 						<div className="flex-1">
-							{isEditing ? (
-								<input
-									type="text"
-									value={decisionTitle}
-									onChange={(e) => setDecisionTitle(e.target.value)}
-									className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2 w-full bg-transparent border border-gray-300 dark:border-gray-600 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
-									placeholder="Decision title"
-								/>
-							) : (
-								<h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2 transition-colors duration-200">
-									{decisionTitle || decision?.title || (title ? decodeURIComponent(title) : `Decision ${id}`)}
-								</h1>
-							)}
+							<DocumentDetailTitle isEditing={isEditing} value={decisionTitle} fallback={decision?.title || (title ? decodeURIComponent(title) : `Decision ${id}`)} placeholder="Decision title" onChange={setDecisionTitle} />
 							<div className="flex items-center space-x-6 text-sm text-gray-500 dark:text-gray-400 transition-colors duration-200">
 								<div className="flex items-center space-x-2">
 									<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -318,58 +169,17 @@ export default function DecisionDetail({ decisions, onRefreshData, dateFormat }:
 								)}
 							</div>
 						</div>
-						<div className="flex items-center space-x-3 ml-6">
-							{/* Temporarily hidden - decisions editing not ready */}
-								{false ? (
-									<button
-										onClick={handleEdit}
-										className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-									>
-										<svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-										</svg>
-										Edit
-								</button>
-							) : null}
-							{isEditing && (
-								<div className="flex items-center space-x-2">
-										<button
-											onClick={handleCancelEdit}
-											className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 dark:focus:ring-gray-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-										>
-											Cancel
-										</button>
-									<button
-										onClick={handleSave}
-										disabled={!hasChanges || isSaving}
-											className={`inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200 ${
-												hasChanges && !isSaving
-													? 'bg-blue-600 dark:bg-blue-600 text-white hover:bg-blue-700 dark:hover:bg-blue-700 focus:ring-blue-500 dark:focus:ring-blue-400'
-													: 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400'
-											}`}
-										>
-											<svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-											</svg>
-										{isSaving ? 'Saving...' : 'Save'}
-									</button>
-								</div>
-							)}
-						</div>
+						<div className="flex items-center space-x-3 ml-6"><DocumentDetailActions isEditing={isEditing} showEdit={false} onEdit={handleEdit} onCancel={handleCancelEdit} onSave={handleSave} hasChanges={hasChanges} isSaving={isSaving} /></div>
 					</div>
 				</div>
 			</div>
 
-			{/* Content Section */}
-			<div className="flex-1 bg-gray-50 dark:bg-gray-800 transition-colors duration-200 flex flex-col">
-				<div className="flex-1 p-8 flex flex-col min-h-0">
-					<MarkdownEditor
-						value={content}
-						onChange={(val) => setContent(val || '')}
-						isEditing={isEditing}
-					/>
-				</div>
-			</div>
+			<EditableDocumentContent
+				value={content}
+				onChange={setContent}
+				isEditing={isEditing}
+				placeholder="Write your decision documentation here..."
+			/>
 			</div>
 			
 		{/* Save Success Toast */}
@@ -385,5 +195,6 @@ export default function DecisionDetail({ decisions, onRefreshData, dateFormat }:
 			/>
 		)}
 		</ErrorBoundary>
+		</DocumentDetailGate>
 	);
 }

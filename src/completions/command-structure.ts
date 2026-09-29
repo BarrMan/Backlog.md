@@ -82,20 +82,8 @@ function extractOptionInfo(option: Option): OptionInfo {
 /**
  * Find a command by name (including aliases)
  */
-export function findCommand(info: CommandInfo, commandName: string): CommandInfo | null {
+function findCommand(info: CommandInfo, commandName: string): CommandInfo | null {
 	return info.subcommands.find((cmd) => cmd.name === commandName || cmd.aliases.includes(commandName)) || null;
-}
-
-/**
- * Find a subcommand within a command
- */
-export function findSubcommand(info: CommandInfo, commandName: string, subcommandName: string): CommandInfo | null {
-	const command = findCommand(info, commandName);
-	if (!command) {
-		return null;
-	}
-
-	return command.subcommands.find((sub) => sub.name === subcommandName || sub.aliases.includes(subcommandName)) || null;
 }
 
 /**
@@ -129,23 +117,8 @@ export function getSubcommandNames(info: CommandInfo, commandName: string): stri
  * Get all option flags for a specific command/subcommand
  */
 export function getOptionFlags(info: CommandInfo, commandName?: string, subcommandName?: string): string[] {
-	let targetCommand = info;
-
-	if (commandName) {
-		const cmd = findCommand(info, commandName);
-		if (!cmd) {
-			return [];
-		}
-		targetCommand = cmd;
-	}
-
-	if (subcommandName) {
-		const sub = findCommand(targetCommand, subcommandName);
-		if (!sub) {
-			return [];
-		}
-		targetCommand = sub;
-	}
+	const targetCommand = resolveCommandTarget(info, commandName, subcommandName);
+	if (!targetCommand) return [];
 
 	const flags: string[] = [];
 	for (const opt of targetCommand.options) {
@@ -163,12 +136,16 @@ export function getOptionFlags(info: CommandInfo, commandName?: string, subcomma
  * Get expected arguments for a command/subcommand
  */
 export function getExpectedArguments(info: CommandInfo, commandName?: string, subcommandName?: string): ArgumentInfo[] {
+	return resolveCommandTarget(info, commandName, subcommandName)?.arguments ?? [];
+}
+
+function resolveCommandTarget(info: CommandInfo, commandName?: string, subcommandName?: string): CommandInfo | null {
 	let targetCommand = info;
 
 	if (commandName) {
 		const cmd = findCommand(info, commandName);
 		if (!cmd) {
-			return [];
+			return null;
 		}
 		targetCommand = cmd;
 	}
@@ -176,10 +153,10 @@ export function getExpectedArguments(info: CommandInfo, commandName?: string, su
 	if (subcommandName) {
 		const sub = findCommand(targetCommand, subcommandName);
 		if (!sub) {
-			return [];
+			return null;
 		}
 		targetCommand = sub;
 	}
 
-	return targetCommand.arguments;
+	return targetCommand;
 }

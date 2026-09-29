@@ -425,4 +425,37 @@ describe("generateMilestoneGroupedBoard", () => {
 		const board = generateMilestoneGroupedBoard(tasks, ["To Do"], milestones, "Test Project");
 		expect(board.match(/## Shared \(\d+ tasks\)/g)?.length).toBe(2);
 	});
+
+	it("uses canonical numeric aliases when raw IDs collide", () => {
+		const tasks: Task[] = [
+			{
+				id: "task-1",
+				title: "Canonical",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2026-01-01",
+				labels: [],
+				dependencies: [],
+				milestone: "m-1",
+			},
+			{
+				id: "task-2",
+				title: "Numeric alias",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2026-01-01",
+				labels: [],
+				dependencies: [],
+				milestone: "1",
+			},
+		];
+		const milestones = [
+			{ id: "m-1", title: "Canonical", description: "", rawContent: "" },
+			{ id: "1", title: "Legacy", description: "", rawContent: "" },
+		];
+
+		const board = generateMilestoneGroupedBoard(tasks, ["To Do"], milestones, "Test Project");
+		expect(board).toContain("## Canonical (2 tasks)");
+		expect(board).not.toContain("## Legacy (1 tasks)");
+	});
 });

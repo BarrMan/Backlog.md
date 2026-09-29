@@ -1,6 +1,13 @@
 import { mkdir, rename as moveFile, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import { DEFAULT_DIRECTORIES, DEFAULT_STATUSES, FALLBACK_STATUS } from "../constants/index.ts";
+import {
+	DEFAULT_DIRECTORIES,
+	DEFAULT_DONE_STATUS,
+	DEFAULT_INIT_CONFIG,
+	DEFAULT_RUNTIME_TASK_RESOLUTION_STRATEGY,
+	DEFAULT_STATUSES,
+	FALLBACK_STATUS,
+} from "../constants/index.ts";
 import {
 	type DraftFileReference,
 	DraftIdentityError,
@@ -13,7 +20,7 @@ import {
 import { type GitBranchTip, type GitIndexEntry, GitOperations } from "../git/operations.ts";
 import { parseFrontmatter } from "../markdown/frontmatter.ts";
 import { parseTask } from "../markdown/parser.ts";
-import { assertSectionInputHasNoMarkerLines, assertValidChecklistMarks } from "../markdown/structured-sections.ts";
+import { assertValidChecklistMarks } from "../markdown/structured-sections.ts";
 import {
 	type AcceptanceCriterion,
 	type BacklogConfig,
@@ -28,12 +35,12 @@ import {
 	type Milestone,
 	type SearchFilters,
 	type Task,
-	type TaskCommentInput,
 	type TaskCreateInput,
 	type TaskListFilter,
 	type TaskUpdateInput,
 } from "../types/index.ts";
 import { normalizeAssignee } from "../utils/assignee.ts";
+import { formatStoredDate } from "../utils/date.ts";
 import { decisionIdKey } from "../utils/decision-id.ts";
 import { documentIdKey, findDocumentById, normalizeDocumentId } from "../utils/document-id.ts";
 import {
@@ -77,7 +84,6 @@ import {
 	buildDefinitionOfDoneItems,
 	normalizeStringList,
 	parseDelimitedStringList,
-	stringArraysEqual,
 	validateDependencies,
 } from "../utils/task-builders.ts";
 import { withoutVacatedTaskLinks } from "../utils/task-links.ts";
@@ -114,13 +120,19 @@ import {
 	resolveOrdinalConflicts,
 } from "./reorder.ts";
 import { SearchService } from "./search-service.ts";
-import { TaskIdentityIndex, type TaskIdentityRecord } from "./task-identity-index.ts";
+import {
+	completedTaskIdentityRecord,
+	TaskIdentityIndex,
+	type TaskIdentityRecord,
+	type TaskIdentityResolution,
+} from "./task-identity-index.ts";
 import {
 	BranchTaskLoader,
 	type BranchTaskStateEntry,
 	getBranchHistoryCutoff,
 	getTaskLoadingMessage,
 } from "./task-loader.ts";
+import { applyTaskUpdate, assertSectionInputsSafe } from "./task-update/index.ts";
 
 interface BlessedScreen {
 	program: {
@@ -157,6 +169,17 @@ interface CreatedTaskWrite {
 interface CreatedTaskRollbackResult {
 	indexRestored: boolean;
 	workingPathRestored: boolean;
+}
+
+interface MoveTasksPlan {
+	readonly movedTasks: Task[];
+	readonly changedTasks: Task[];
+	readonly failures: Array<{ taskId: string; reason: string }>;
+}
+
+interface MoveTaskPlacement {
+	readonly movedTasks: Task[];
+	readonly changedTasks: Task[];
 }
 
 const REMOTE_REF_REFRESH_INTERVAL_MS = 60_000;
@@ -206,6 +229,12 @@ export interface TuiTaskEditResult {
 	task?: Task;
 	reason?: TuiTaskEditFailureReason;
 }
+
+type TuiTaskEditSession = {
+	task: Task;
+	taskFilePath: string | null;
+	filePath: string;
+};
 
 /** Sanitized copies of the records that referenced a task ID being vacated, by corpus. */
 type VacatedIdCleanup = {
@@ -311,17 +340,6 @@ function normalizeDocumentTypeInput(type: unknown): DocumentType | undefined {
 	throw new Error(`Document type must be one of: ${DOCUMENT_TYPE_VALUES.join(", ")}.`);
 }
 
-function formatAvailableIndexHint(items: AcceptanceCriterion[], emptyMessage: string): string {
-	if (items.length === 0) {
-		return emptyMessage;
-	}
-	const indexes = items.map((item) => item.index).sort((a, b) => a - b);
-	const first = indexes[0] ?? 1;
-	const last = indexes[indexes.length - 1] ?? first;
-	const range = first === last ? `#${first}` : `#${first}-#${last}`;
-	return `Available indexes: ${range}.`;
-}
-
 /** Dependencies are validated against the working copy on both the create and the edit path. */
 function formatMissingDependenciesError(invalid: string[]): Error {
 	return new Error(
@@ -346,35 +364,6 @@ function normalizeTargetMilestone(targetMilestone: string | null | undefined): s
 	if (typeof targetMilestone !== "string") return undefined;
 	const trimmed = targetMilestone.trim();
 	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-/**
- * Structured-section input that contains its own sentinel marker as a whole
- * line is rejected before any write: wrapping it would nest markers and hide
- * the stored content from every reader (GitHub issue #932).
- */
-function assertSectionInputsSafe(input: {
-	description?: string;
-	implementationPlan?: string;
-	implementationNotes?: string;
-	finalSummary?: string;
-	appendImplementationPlan?: string[];
-	appendImplementationNotes?: string[];
-	appendFinalSummary?: string[];
-}): void {
-	assertSectionInputHasNoMarkerLines(input.description, "description");
-	assertSectionInputHasNoMarkerLines(input.implementationPlan, "implementationPlan");
-	assertSectionInputHasNoMarkerLines(input.implementationNotes, "implementationNotes");
-	assertSectionInputHasNoMarkerLines(input.finalSummary, "finalSummary");
-	for (const value of input.appendImplementationPlan ?? []) {
-		assertSectionInputHasNoMarkerLines(value, "implementationPlan");
-	}
-	for (const value of input.appendImplementationNotes ?? []) {
-		assertSectionInputHasNoMarkerLines(value, "implementationNotes");
-	}
-	for (const value of input.appendFinalSummary ?? []) {
-		assertSectionInputHasNoMarkerLines(value, "finalSummary");
-	}
 }
 
 export class TaskArchiveStatusError extends Error {
@@ -437,15 +426,7 @@ export class Core {
 			});
 		}
 		for (const task of completedTasks) {
-			records.push({
-				id: task.id,
-				type: "completed",
-				branch: "local",
-				path: task.filePath ?? join(filesystem.completedDir, task.id),
-				lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
-				task: { ...task, source: "completed" },
-				workingCopy: true,
-			});
+			records.push(completedTaskIdentityRecord(task, task.filePath ?? join(filesystem.completedDir, task.id)));
 		}
 		records.push(...branchRecords);
 
@@ -634,7 +615,7 @@ export class Core {
 	}
 
 	private getActiveBranchSettings(config: BacklogConfig | null, filesystem = this.fs) {
-		const activeBranchDays = config?.activeBranchDays ?? 30;
+		const activeBranchDays = config?.activeBranchDays ?? DEFAULT_INIT_CONFIG.activeBranchDays;
 		const checkActiveBranches = config?.checkActiveBranches !== false;
 		const filesystemOnly = config?.filesystemOnly === true;
 		return {
@@ -645,7 +626,7 @@ export class Core {
 			remoteOperations: config?.remoteOperations !== false,
 			filesystemOnly,
 			taskPrefix: config?.prefixes?.task ?? "task",
-			taskResolutionStrategy: config?.taskResolutionStrategy ?? "most_progressed",
+			taskResolutionStrategy: config?.taskResolutionStrategy ?? DEFAULT_RUNTIME_TASK_RESOLUTION_STRATEGY,
 			statuses: config?.statuses ?? DEFAULT_STATUSES,
 			backlogDir: filesystem.backlogDirName,
 		};
@@ -963,7 +944,7 @@ export class Core {
 		filePaths: string[];
 	}> {
 		const filePaths: string[] = [];
-		const updatedDate = new Date().toISOString().slice(0, 16).replace("T", " ");
+		const updatedDate = formatStoredDate();
 		const writeAll = async () => {
 			for (const task of cleanup.active) {
 				const updated = { ...task, updatedDate };
@@ -987,105 +968,75 @@ export class Core {
 		return { cleanedTaskIds: vacatedIdCleanupTargets(cleanup).map((task) => task.id), filePaths };
 	}
 
+	private async filterTaskQueryResults(
+		collection: Task[],
+		options: TaskQueryOptions,
+		filesystem: FileSystem,
+	): Promise<Task[]> {
+		const resolveMilestoneLabel = options.filters?.milestone
+			? await Promise.all([filesystem.listMilestones(), filesystem.listArchivedMilestones()]).then(
+					([active, archived]) => createMilestoneFilterValueResolver([...active, ...archived]),
+				)
+			: undefined;
+		let tasks = options.filters
+			? applyTaskFilters(collection, { ...options.filters, resolveMilestoneLabel })
+			: [...collection];
+		if (options.includeCrossBranch === false) tasks = this.filterLocalEditableTasks(tasks);
+		return typeof options.limit === "number" && options.limit >= 0 ? tasks.slice(0, options.limit) : tasks;
+	}
+
+	private async queryCrossBranchTasks(
+		options: TaskQueryOptions,
+		filesystem: FileSystem,
+		projectChanged: () => boolean,
+	): Promise<Task[] | null> {
+		const storeAlreadyReady = this.contentStore?.isInitialized() ?? false;
+		const store = await this.getContentStore();
+		if (projectChanged() || store !== this.contentStore) return null;
+		await this.refreshCachedTasksForCrossBranchRead(true, storeAlreadyReady && options.refreshCrossBranch !== false);
+		if (projectChanged() || store !== this.contentStore) return null;
+		const query = options.query?.trim();
+		if (!query) {
+			return projectChanged() ? null : await this.filterTaskQueryResults(store.getTasks(), options, filesystem);
+		}
+
+		const searchFilters: SearchFilters = {};
+		for (const field of ["status", "excludeStatus", "type", "project", "priority", "assignee", "labels"] as const) {
+			if (options.filters?.[field]) searchFilters[field] = options.filters[field];
+		}
+		if (options.filters?.labels) searchFilters.labelMatch = options.filters.labelMatch;
+		const seen = new Set<string>();
+		const searchResults = (await this.getSearchService()).search({
+			query,
+			limit: options.limit,
+			types: ["task"],
+			filters: Object.keys(searchFilters).length ? searchFilters : undefined,
+		});
+		const tasks: Task[] = [];
+		for (const result of searchResults) {
+			if (result.type !== "task" || seen.has(result.task.id)) continue;
+			seen.add(result.task.id);
+			tasks.push(result.task);
+		}
+		if (projectChanged() || store !== this.contentStore) return null;
+		return await this.filterTaskQueryResults(tasks, options, filesystem);
+	}
+
 	async queryTasks(options: TaskQueryOptions = {}): Promise<Task[]> {
 		while (true) {
 			const generation = this.projectGeneration;
 			const filesystem = this.fs;
-			const backlogRoot = filesystem.backlogDir;
 			const projectChanged = () =>
-				generation !== this.projectGeneration || filesystem !== this.fs || backlogRoot !== filesystem.backlogDir;
-			const { filters, query, limit } = options;
-			const trimmedQuery = query?.trim();
-			const includeCrossBranch = options.includeCrossBranch ?? true;
-			const milestoneResolverPromise = filters?.milestone
-				? Promise.all([filesystem.listMilestones(), filesystem.listArchivedMilestones()]).then(
-						([activeMilestones, archivedMilestones]) =>
-							createMilestoneFilterValueResolver([...activeMilestones, ...archivedMilestones]),
-					)
-				: undefined;
-
-			const applyFiltersAndLimit = async (collection: Task[]): Promise<Task[]> => {
-				const resolveMilestoneLabel = milestoneResolverPromise ? await milestoneResolverPromise : undefined;
-				let filtered = filters ? applyTaskFilters(collection, { ...filters, resolveMilestoneLabel }) : [...collection];
-				if (!includeCrossBranch) {
-					filtered = this.filterLocalEditableTasks(filtered);
-				}
-				if (typeof limit === "number" && limit >= 0) {
-					return filtered.slice(0, limit);
-				}
-				return filtered;
-			};
-
-			if (!includeCrossBranch) {
+				generation !== this.projectGeneration || filesystem !== this.fs || filesystem.backlogDir !== this.fs.backlogDir;
+			if (options.includeCrossBranch === false) {
 				const localTasks = await filesystem.listTasks();
-				if (projectChanged()) continue;
-				const tasks = trimmedQuery ? createTaskSearchIndex(localTasks).search({ query: trimmedQuery }) : localTasks;
-				const filteredTasks = await applyFiltersAndLimit(tasks);
-				if (projectChanged()) continue;
-				return filteredTasks;
+				const query = options.query?.trim();
+				const tasks = query ? createTaskSearchIndex(localTasks).search({ query }) : localTasks;
+				if (!projectChanged()) return await this.filterTaskQueryResults(tasks, options, filesystem);
+				continue;
 			}
-
-			const storeAlreadyReady = this.contentStore?.isInitialized() ?? false;
-			const store = await this.getContentStore();
-			if (projectChanged() || store !== this.contentStore) continue;
-			await this.refreshCachedTasksForCrossBranchRead(
-				includeCrossBranch,
-				storeAlreadyReady && options.refreshCrossBranch !== false,
-			);
-			if (projectChanged() || store !== this.contentStore) continue;
-
-			if (!trimmedQuery) {
-				const filteredTasks = await applyFiltersAndLimit(store.getTasks());
-				if (projectChanged() || store !== this.contentStore) continue;
-				return filteredTasks;
-			}
-
-			const searchService = await this.getSearchService();
-			if (projectChanged() || store !== this.contentStore) continue;
-			const searchFilters: SearchFilters = {};
-			if (filters?.status) {
-				searchFilters.status = filters.status;
-			}
-			if (filters?.excludeStatus) {
-				searchFilters.excludeStatus = filters.excludeStatus;
-			}
-			if (filters?.type) {
-				searchFilters.type = filters.type;
-			}
-			if (filters?.project) {
-				searchFilters.project = filters.project;
-			}
-			if (filters?.priority) {
-				searchFilters.priority = filters.priority;
-			}
-			if (filters?.assignee) {
-				searchFilters.assignee = filters.assignee;
-			}
-			if (filters?.labels) {
-				searchFilters.labels = filters.labels;
-				searchFilters.labelMatch = filters.labelMatch;
-			}
-
-			const searchResults = searchService.search({
-				query: trimmedQuery,
-				limit,
-				types: ["task"],
-				filters: Object.keys(searchFilters).length > 0 ? searchFilters : undefined,
-			});
-
-			const seen = new Set<string>();
-			const tasks: Task[] = [];
-			for (const result of searchResults) {
-				if (result.type !== "task") continue;
-				const task = result.task;
-				if (seen.has(task.id)) continue;
-				seen.add(task.id);
-				tasks.push(task);
-			}
-
-			const filteredTasks = await applyFiltersAndLimit(tasks);
-			if (projectChanged() || store !== this.contentStore) continue;
-			return filteredTasks;
+			const tasks = await this.queryCrossBranchTasks(options, filesystem, projectChanged);
+			if (tasks && !projectChanged()) return tasks;
 		}
 	}
 
@@ -1181,6 +1132,10 @@ export class Core {
 	private async loadWorkingCopyTask(taskId: string, forMutation: boolean, activeTasks?: Task[]): Promise<Task | null> {
 		const index = await this.buildWorkingCopyTaskIndex(activeTasks);
 		const resolution = forMutation ? index.resolveForMutation(taskId) : index.resolveForRead(taskId);
+		return await this.loadResolvedTaskOrFilesystem(taskId, resolution);
+	}
+
+	private async loadResolvedTaskOrFilesystem(taskId: string, resolution: TaskIdentityResolution): Promise<Task | null> {
 		if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(taskId, resolution.candidates);
 		if (resolution.status === "found") return { ...resolution.task };
 		// Lists skip damaged files; an explicit lookup must still report why its task cannot load.
@@ -1195,10 +1150,7 @@ export class Core {
 		const store = await this.getContentStore();
 		await store.refreshTasks();
 		const resolution = store.resolveTaskForMutation(taskId);
-		if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(taskId, resolution.candidates);
-		if (resolution.status === "found") return { ...resolution.task };
-		await this.fs.loadTask(taskId);
-		return null;
+		return await this.loadResolvedTaskOrFilesystem(taskId, resolution);
 	}
 
 	async getTaskContent(taskId: string): Promise<string | null> {
@@ -1310,61 +1262,50 @@ export class Core {
 	private parseLegacyInlineArray(value: string): string[] {
 		const items: string[] = [];
 		let current = "";
-		let quote: '"' | "'" | null = null;
-
-		const pushCurrent = () => {
-			const normalized = current.trim().replace(/\\(['"])/g, "$1");
-			if (normalized) {
-				items.push(normalized);
+		this.scanYamlScalar(value, (ch) => {
+			if (ch === ",") {
+				const normalized = current.trim().replace(/\\(['"])/g, "$1");
+				if (normalized) items.push(normalized);
+				current = "";
+			} else {
+				current += ch;
 			}
-			current = "";
-		};
+		});
+		const normalized = current.trim().replace(/\\(['"])/g, "$1");
+		if (normalized) items.push(normalized);
+		return items;
+	}
 
+	private scanYamlScalar(
+		value: string,
+		onCharacter: (character: string, index: number, quoted: boolean) => void,
+	): void {
+		let quote: '"' | "'" | null = null;
 		for (let i = 0; i < value.length; i += 1) {
-			const ch = value[i];
+			const ch = value[i] as string;
 			const prev = i > 0 ? value[i - 1] : "";
 			if (quote) {
 				if (ch === quote && prev !== "\\") {
 					quote = null;
 					continue;
 				}
-				current += ch;
+				onCharacter(ch, i, true);
 				continue;
 			}
 			if (ch === '"' || ch === "'") {
 				quote = ch;
 				continue;
 			}
-			if (ch === ",") {
-				pushCurrent();
-				continue;
-			}
-			current += ch;
+			onCharacter(ch, i, false);
 		}
-		pushCurrent();
-		return items;
 	}
 
 	private stripYamlComment(value: string): string {
-		let quote: '"' | "'" | null = null;
-		for (let i = 0; i < value.length; i += 1) {
-			const ch = value[i];
-			const prev = i > 0 ? value[i - 1] : "";
-			if (quote) {
-				if (ch === quote && prev !== "\\") {
-					quote = null;
-				}
-				continue;
-			}
-			if (ch === '"' || ch === "'") {
-				quote = ch;
-				continue;
-			}
-			if (ch === "#") {
-				return value.slice(0, i).trimEnd();
-			}
-		}
-		return value;
+		let commentAt = -1;
+		this.scanYamlScalar(value, (character, index, quoted) => {
+			if (!quoted && character === "#" && commentAt === -1) commentAt = index;
+		});
+		return commentAt === -1 ? value : value.slice(0, commentAt).trimEnd();
 	}
 
 	private parseLegacyYamlValue(value: string): string {
@@ -1789,7 +1730,7 @@ export class Core {
 		const priority = await this.normalizePriority(input.priority);
 		const type = await this.normalizeTaskType(input.type);
 		const project = await this.normalizeProject(input.project);
-		const createdDate = new Date().toISOString().slice(0, 16).replace("T", " ");
+		const createdDate = formatStoredDate();
 		if (
 			input.ordinal !== undefined &&
 			(typeof input.ordinal !== "number" || !Number.isFinite(input.ordinal) || input.ordinal < 0)
@@ -1966,7 +1907,7 @@ export class Core {
 		const statusChanged = oldStatus !== newStatus;
 
 		if (hasUpdatedDateRelevantChanges(originalTask, task)) {
-			task.updatedDate = new Date().toISOString().slice(0, 16).replace("T", " ");
+			task.updatedDate = formatStoredDate();
 		} else if (originalTask?.updatedDate) {
 			task.updatedDate = originalTask.updatedDate;
 		} else {
@@ -1993,610 +1934,15 @@ export class Core {
 		input: TaskUpdateInput,
 		statusResolver: (status: string) => Promise<string>,
 	): Promise<{ task: Task; mutated: boolean }> {
-		assertSectionInputsSafe(input);
-		if (
-			input.acceptanceCriteria !== undefined ||
-			input.removeAcceptanceCriteria?.length ||
-			input.checkAcceptanceCriteria?.length ||
-			input.uncheckAcceptanceCriteria?.length
-		) {
-			assertValidChecklistMarks(task.rawContent ?? "", "AC");
-		}
-		if (
-			input.removeDefinitionOfDone?.length ||
-			input.checkDefinitionOfDone?.length ||
-			input.uncheckDefinitionOfDone?.length
-		) {
-			assertValidChecklistMarks(task.rawContent ?? "", "DOD");
-		}
-		let mutated = false;
-
-		const applyStringField = (
-			value: string | undefined,
-			current: string | undefined,
-			assign: (next: string) => void,
-		) => {
-			if (typeof value === "string") {
-				const next = value;
-				if ((current ?? "") !== next) {
-					assign(next);
-					mutated = true;
-				}
-			}
-		};
-
-		if (input.title !== undefined) {
-			const trimmed = input.title.trim();
-			if (trimmed.length === 0) {
-				throw new Error("Title cannot be empty.");
-			}
-			if (task.title !== trimmed) {
-				task.title = trimmed;
-				mutated = true;
-			}
-		}
-
-		applyStringField(input.description, task.description, (next) => {
-			task.description = next;
+		const mutated = await applyTaskUpdate(task, input, {
+			resolveStatus: statusResolver,
+			normalizePriority: (priority) => this.normalizePriority(priority),
+			normalizeType: (type) => this.normalizeTaskType(type),
+			normalizeProject: (project) => this.normalizeProject(project),
+			validateDependencies: (dependencies, candidate) => validateDependencies(dependencies, this, candidate),
+			taskIdsEqual,
+			formatMissingDependenciesError,
 		});
-
-		if (input.dueDate !== undefined) {
-			const dueDate = input.dueDate === null ? undefined : normalizeDueDate(input.dueDate, "Due date");
-			if (task.dueDate !== dueDate) {
-				if (dueDate) task.dueDate = dueDate;
-				else delete task.dueDate;
-				mutated = true;
-			}
-		}
-
-		if (input.status !== undefined) {
-			const canonicalStatus = await statusResolver(input.status);
-			if ((task.status ?? "") !== canonicalStatus) {
-				task.status = canonicalStatus;
-				mutated = true;
-			}
-		}
-
-		if (input.priority !== undefined) {
-			const normalizedPriority = await this.normalizePriority(String(input.priority));
-			if (task.priority !== normalizedPriority) {
-				task.priority = normalizedPriority;
-				mutated = true;
-			}
-		}
-
-		if (input.type !== undefined) {
-			const normalizedType = await this.normalizeTaskType(String(input.type));
-			if (task.type !== normalizedType) {
-				task.type = normalizedType;
-				mutated = true;
-			}
-		}
-
-		if (input.project !== undefined) {
-			const normalizedProject = input.project === null ? undefined : await this.normalizeProject(input.project);
-			if ((task.project ?? undefined) !== normalizedProject) {
-				if (normalizedProject === undefined) {
-					delete task.project;
-				} else {
-					task.project = normalizedProject;
-				}
-				mutated = true;
-			}
-		}
-
-		if (input.milestone !== undefined) {
-			const normalizedMilestone =
-				input.milestone === null ? undefined : input.milestone.trim().length > 0 ? input.milestone.trim() : undefined;
-			if ((task.milestone ?? undefined) !== normalizedMilestone) {
-				if (normalizedMilestone === undefined) {
-					delete task.milestone;
-				} else {
-					task.milestone = normalizedMilestone;
-				}
-				mutated = true;
-			}
-		}
-
-		if (input.ordinal !== undefined) {
-			if (typeof input.ordinal !== "number" || !Number.isFinite(input.ordinal) || input.ordinal < 0) {
-				throw new Error("Ordinal must be a non-negative number.");
-			}
-			if (task.ordinal !== input.ordinal) {
-				task.ordinal = input.ordinal;
-				mutated = true;
-			}
-		}
-
-		if (input.agentConfiguration !== undefined) {
-			const next = input.agentConfiguration ?? undefined;
-			if (JSON.stringify(task.agentConfiguration) !== JSON.stringify(next)) {
-				if (next) task.agentConfiguration = structuredClone(next);
-				else delete task.agentConfiguration;
-				mutated = true;
-			}
-		}
-
-		if (input.assignee !== undefined) {
-			const sanitizedAssignee = normalizeStringList(input.assignee) ?? [];
-			if (!stringArraysEqual(sanitizedAssignee, task.assignee ?? [])) {
-				task.assignee = sanitizedAssignee;
-				mutated = true;
-			}
-		}
-
-		const resolveLabelChanges = (): void => {
-			let currentLabels = [...(task.labels ?? [])];
-			if (input.labels !== undefined) {
-				const sanitizedLabels = normalizeStringList(input.labels) ?? [];
-				if (!stringArraysEqual(sanitizedLabels, currentLabels)) {
-					task.labels = sanitizedLabels;
-					mutated = true;
-				}
-				currentLabels = sanitizedLabels;
-			}
-
-			const labelsToAdd = normalizeStringList(input.addLabels) ?? [];
-			if (labelsToAdd.length > 0) {
-				const labelSet = new Set(currentLabels.map((label) => label.toLowerCase()));
-				for (const label of labelsToAdd) {
-					if (!labelSet.has(label.toLowerCase())) {
-						currentLabels.push(label);
-						labelSet.add(label.toLowerCase());
-						mutated = true;
-					}
-				}
-				task.labels = currentLabels;
-			}
-
-			const labelsToRemove = normalizeStringList(input.removeLabels) ?? [];
-			if (labelsToRemove.length > 0) {
-				const removalSet = new Set(labelsToRemove.map((label) => label.toLowerCase()));
-				const filtered = currentLabels.filter((label) => !removalSet.has(label.toLowerCase()));
-				if (!stringArraysEqual(filtered, currentLabels)) {
-					task.labels = filtered;
-					mutated = true;
-				}
-			}
-		};
-
-		resolveLabelChanges();
-
-		const resolveDependencies = async (): Promise<void> => {
-			let currentDependencies = [...(task.dependencies ?? [])];
-
-			if (input.dependencies !== undefined) {
-				const normalized = parseDelimitedStringList(input.dependencies) ?? [];
-				const { valid, invalid } = await validateDependencies(normalized, this, task);
-				if (invalid.length > 0) {
-					throw formatMissingDependenciesError(invalid);
-				}
-				if (!stringArraysEqual(valid, currentDependencies)) {
-					currentDependencies = valid;
-					mutated = true;
-				}
-			}
-
-			if (input.addDependencies && input.addDependencies.length > 0) {
-				const additions = parseDelimitedStringList(input.addDependencies) ?? [];
-				const { valid, invalid } = await validateDependencies(additions, this, task);
-				if (invalid.length > 0) {
-					throw formatMissingDependenciesError(invalid);
-				}
-				const depSet = new Set(currentDependencies);
-				for (const dep of valid) {
-					if (!depSet.has(dep)) {
-						currentDependencies.push(dep);
-						depSet.add(dep);
-						mutated = true;
-					}
-				}
-			}
-
-			if (input.removeDependencies && input.removeDependencies.length > 0) {
-				const removals = parseDelimitedStringList(input.removeDependencies) ?? [];
-				const filtered = currentDependencies.filter((dep) => !removals.some((removal) => taskIdsEqual(removal, dep)));
-				if (!stringArraysEqual(filtered, currentDependencies)) {
-					currentDependencies = filtered;
-					mutated = true;
-				}
-			}
-
-			task.dependencies = currentDependencies;
-		};
-
-		await resolveDependencies();
-
-		const resolveReferences = (): void => {
-			let currentReferences = [...(task.references ?? [])];
-			if (input.references !== undefined) {
-				const sanitizedReferences = normalizeStringList(input.references) ?? [];
-				if (!stringArraysEqual(sanitizedReferences, currentReferences)) {
-					task.references = sanitizedReferences;
-					mutated = true;
-				}
-				currentReferences = sanitizedReferences;
-			}
-
-			const referencesToAdd = normalizeStringList(input.addReferences) ?? [];
-			if (referencesToAdd.length > 0) {
-				const refSet = new Set(currentReferences);
-				for (const ref of referencesToAdd) {
-					if (!refSet.has(ref)) {
-						currentReferences.push(ref);
-						refSet.add(ref);
-						mutated = true;
-					}
-				}
-				task.references = currentReferences;
-			}
-
-			const referencesToRemove = normalizeStringList(input.removeReferences) ?? [];
-			if (referencesToRemove.length > 0) {
-				const removalSet = new Set(referencesToRemove);
-				const filtered = currentReferences.filter((ref) => !removalSet.has(ref));
-				if (!stringArraysEqual(filtered, currentReferences)) {
-					task.references = filtered;
-					mutated = true;
-				}
-			}
-		};
-
-		resolveReferences();
-
-		const resolveDocumentation = (): void => {
-			let currentDocumentation = [...(task.documentation ?? [])];
-			if (input.documentation !== undefined) {
-				const sanitizedDocumentation = normalizeStringList(input.documentation) ?? [];
-				if (!stringArraysEqual(sanitizedDocumentation, currentDocumentation)) {
-					task.documentation = sanitizedDocumentation;
-					mutated = true;
-				}
-				currentDocumentation = sanitizedDocumentation;
-			}
-
-			const documentationToAdd = normalizeStringList(input.addDocumentation) ?? [];
-			if (documentationToAdd.length > 0) {
-				const docSet = new Set(currentDocumentation);
-				for (const doc of documentationToAdd) {
-					if (!docSet.has(doc)) {
-						currentDocumentation.push(doc);
-						docSet.add(doc);
-						mutated = true;
-					}
-				}
-				task.documentation = currentDocumentation;
-			}
-
-			const documentationToRemove = normalizeStringList(input.removeDocumentation) ?? [];
-			if (documentationToRemove.length > 0) {
-				const removalSet = new Set(documentationToRemove);
-				const filtered = currentDocumentation.filter((doc) => !removalSet.has(doc));
-				if (!stringArraysEqual(filtered, currentDocumentation)) {
-					task.documentation = filtered;
-					mutated = true;
-				}
-			}
-		};
-
-		resolveDocumentation();
-
-		const resolveModifiedFiles = (): void => {
-			if (input.modifiedFiles === undefined) {
-				return;
-			}
-			const sanitizedModifiedFiles = normalizeStringList(input.modifiedFiles) ?? [];
-			if (!stringArraysEqual(sanitizedModifiedFiles, task.modifiedFiles ?? [])) {
-				task.modifiedFiles = sanitizedModifiedFiles;
-				mutated = true;
-			}
-		};
-
-		resolveModifiedFiles();
-
-		const sanitizeAppendInput = (values: string[] | undefined): string[] => {
-			if (!values) return [];
-			return values.map((value) => String(value).trim()).filter((value) => value.length > 0);
-		};
-
-		const appendBlock = (
-			existing: string | undefined,
-			additions: string[] | undefined,
-		): { value?: string; changed: boolean } => {
-			const sanitizedAdditions = (additions ?? [])
-				.map((value) => String(value).trim())
-				.filter((value) => value.length > 0);
-			if (sanitizedAdditions.length === 0) {
-				return { value: existing, changed: false };
-			}
-			const current = (existing ?? "").trim();
-			const additionBlock = sanitizedAdditions.join("\n\n");
-			if (current.length === 0) {
-				return { value: additionBlock, changed: true };
-			}
-			return { value: `${current}\n\n${additionBlock}`, changed: true };
-		};
-
-		const containsCommentMarker = (inputValue: string): boolean => /<!--\s*COMMENTS?:/i.test(inputValue);
-		const containsCommentDelimiter = (inputValue: string): boolean =>
-			/^\s*---\s*$/m.test(inputValue.replace(/\r\n/g, "\n"));
-
-		const sanitizeCommentInput = (value: TaskCommentInput | string): TaskCommentInput | undefined => {
-			const rawBody = typeof value === "string" ? value : value.body;
-			const body = String(rawBody ?? "")
-				.replace(/\r\n/g, "\n")
-				.trim();
-			if (body.length === 0) return undefined;
-			if (containsCommentMarker(body)) {
-				throw new Error("Comment body cannot contain Backlog comment markers.");
-			}
-			if (containsCommentDelimiter(body)) {
-				throw new Error("Comment body cannot contain standalone '---' delimiter lines.");
-			}
-			const author =
-				typeof value === "string"
-					? undefined
-					: String(value.author ?? "")
-							.replace(/\s+/g, " ")
-							.trim();
-			const createdDate = typeof value === "string" ? undefined : String(value.createdDate ?? "").trim();
-			if (author && containsCommentMarker(author)) {
-				throw new Error("Comment author cannot contain Backlog comment markers.");
-			}
-			if (author && containsCommentDelimiter(author)) {
-				throw new Error("Comment author cannot contain standalone '---' delimiter lines.");
-			}
-			if (createdDate && containsCommentMarker(createdDate)) {
-				throw new Error("Comment created date cannot contain Backlog comment markers.");
-			}
-			if (createdDate && containsCommentDelimiter(createdDate)) {
-				throw new Error("Comment created date cannot contain standalone '---' delimiter lines.");
-			}
-			return {
-				body,
-				...(author && { author }),
-				...(createdDate && { createdDate }),
-			};
-		};
-
-		if (input.clearImplementationPlan) {
-			if (task.implementationPlan !== undefined) {
-				delete task.implementationPlan;
-				mutated = true;
-			}
-		}
-
-		applyStringField(input.implementationPlan, task.implementationPlan, (next) => {
-			task.implementationPlan = next;
-		});
-
-		const planAppends = sanitizeAppendInput(input.appendImplementationPlan);
-		if (planAppends.length > 0) {
-			const { value, changed } = appendBlock(task.implementationPlan, planAppends);
-			if (changed) {
-				task.implementationPlan = value;
-				mutated = true;
-			}
-		}
-
-		if (input.clearImplementationNotes) {
-			if (task.implementationNotes !== undefined) {
-				delete task.implementationNotes;
-				mutated = true;
-			}
-		}
-
-		applyStringField(input.implementationNotes, task.implementationNotes, (next) => {
-			task.implementationNotes = next;
-		});
-
-		const notesAppends = sanitizeAppendInput(input.appendImplementationNotes);
-		if (notesAppends.length > 0) {
-			const { value, changed } = appendBlock(task.implementationNotes, notesAppends);
-			if (changed) {
-				task.implementationNotes = value;
-				mutated = true;
-			}
-		}
-
-		if (input.appendComments && input.appendComments.length > 0) {
-			const currentComments = Array.isArray(task.comments) ? task.comments.map((comment) => ({ ...comment })) : [];
-			let nextIndex = currentComments.length > 0 ? Math.max(...currentComments.map((comment) => comment.index)) + 1 : 1;
-			const createdDate = new Date().toISOString().slice(0, 16).replace("T", " ");
-			for (const value of input.appendComments) {
-				const sanitized = sanitizeCommentInput(value);
-				if (!sanitized) continue;
-				currentComments.push({
-					index: nextIndex++,
-					body: sanitized.body,
-					createdDate: sanitized.createdDate ?? createdDate,
-					...(sanitized.author && { author: sanitized.author }),
-				});
-				mutated = true;
-			}
-			if (mutated) {
-				task.comments = currentComments;
-			}
-		}
-
-		if (input.clearFinalSummary) {
-			if (task.finalSummary !== undefined) {
-				task.finalSummary = "";
-				mutated = true;
-			}
-		}
-
-		applyStringField(input.finalSummary, task.finalSummary, (next) => {
-			task.finalSummary = next;
-		});
-
-		const finalSummaryAppends = sanitizeAppendInput(input.appendFinalSummary);
-		if (finalSummaryAppends.length > 0) {
-			const { value, changed } = appendBlock(task.finalSummary, finalSummaryAppends);
-			if (changed) {
-				task.finalSummary = value;
-				mutated = true;
-			}
-		}
-
-		let acceptanceCriteria = Array.isArray(task.acceptanceCriteriaItems)
-			? task.acceptanceCriteriaItems.map((criterion) => ({ ...criterion }))
-			: [];
-
-		const rebuildIndices = () => {
-			acceptanceCriteria = acceptanceCriteria.map((criterion, index) => ({
-				...criterion,
-				index: index + 1,
-			}));
-		};
-
-		if (input.acceptanceCriteria !== undefined) {
-			const sanitized = input.acceptanceCriteria
-				.map((criterion) => ({
-					text: String(criterion.text ?? "").trim(),
-					checked: Boolean(criterion.checked),
-				}))
-				.filter((criterion) => criterion.text.length > 0)
-				.map((criterion, index) => ({
-					index: index + 1,
-					text: criterion.text,
-					checked: criterion.checked,
-				}));
-			acceptanceCriteria = sanitized;
-			mutated = true;
-		}
-
-		if (input.addAcceptanceCriteria && input.addAcceptanceCriteria.length > 0) {
-			const additions = input.addAcceptanceCriteria
-				.map((criterion) => (typeof criterion === "string" ? criterion.trim() : String(criterion.text ?? "").trim()))
-				.filter((text) => text.length > 0);
-			let index =
-				acceptanceCriteria.length > 0 ? Math.max(...acceptanceCriteria.map((criterion) => criterion.index)) + 1 : 1;
-			for (const text of additions) {
-				acceptanceCriteria.push({ index: index++, text, checked: false });
-				mutated = true;
-			}
-		}
-
-		if (input.removeAcceptanceCriteria && input.removeAcceptanceCriteria.length > 0) {
-			const removalSet = new Set(input.removeAcceptanceCriteria);
-			const beforeLength = acceptanceCriteria.length;
-			acceptanceCriteria = acceptanceCriteria.filter((criterion) => !removalSet.has(criterion.index));
-			if (acceptanceCriteria.length === beforeLength) {
-				throw new Error(
-					`Acceptance criterion ${Array.from(removalSet)
-						.map((index) => `#${index}`)
-						.join(", ")} not found. ${formatAvailableIndexHint(
-						acceptanceCriteria,
-						"No acceptance criteria are defined.",
-					)}`,
-				);
-			}
-			mutated = true;
-			rebuildIndices();
-		}
-
-		const toggleCriteria = (indices: number[] | undefined, checked: boolean) => {
-			if (!indices || indices.length === 0) return;
-			const missing: number[] = [];
-			for (const index of indices) {
-				const criterion = acceptanceCriteria.find((item) => item.index === index);
-				if (!criterion) {
-					missing.push(index);
-					continue;
-				}
-				if (criterion.checked !== checked) {
-					criterion.checked = checked;
-					mutated = true;
-				}
-			}
-			if (missing.length > 0) {
-				const label = missing.map((index) => `#${index}`).join(", ");
-				throw new Error(
-					`Acceptance criterion ${label} not found. ${formatAvailableIndexHint(
-						acceptanceCriteria,
-						"No acceptance criteria are defined.",
-					)}`,
-				);
-			}
-		};
-
-		toggleCriteria(input.checkAcceptanceCriteria, true);
-		toggleCriteria(input.uncheckAcceptanceCriteria, false);
-
-		task.acceptanceCriteriaItems = acceptanceCriteria;
-
-		let definitionOfDone = Array.isArray(task.definitionOfDoneItems)
-			? task.definitionOfDoneItems.map((criterion) => ({ ...criterion }))
-			: [];
-
-		const rebuildDefinitionIndices = () => {
-			definitionOfDone = definitionOfDone.map((criterion, index) => ({
-				...criterion,
-				index: index + 1,
-			}));
-		};
-
-		if (input.addDefinitionOfDone && input.addDefinitionOfDone.length > 0) {
-			const additions = input.addDefinitionOfDone
-				.map((criterion) => (typeof criterion === "string" ? criterion.trim() : String(criterion.text ?? "").trim()))
-				.filter((text) => text.length > 0);
-			let index =
-				definitionOfDone.length > 0 ? Math.max(...definitionOfDone.map((criterion) => criterion.index)) + 1 : 1;
-			for (const text of additions) {
-				definitionOfDone.push({ index: index++, text, checked: false });
-				mutated = true;
-			}
-		}
-
-		const toggleDefinitionItems = (indices: number[] | undefined, checked: boolean) => {
-			if (!indices || indices.length === 0) return;
-			const missing: number[] = [];
-			for (const index of indices) {
-				const criterion = definitionOfDone.find((item) => item.index === index);
-				if (!criterion) {
-					missing.push(index);
-					continue;
-				}
-				if (criterion.checked !== checked) {
-					criterion.checked = checked;
-					mutated = true;
-				}
-			}
-			if (missing.length > 0) {
-				const label = missing.map((index) => `#${index}`).join(", ");
-				throw new Error(
-					`Definition of Done item ${label} not found. ${formatAvailableIndexHint(
-						definitionOfDone,
-						"No Definition of Done items are defined.",
-					)}`,
-				);
-			}
-		};
-
-		toggleDefinitionItems(input.checkDefinitionOfDone, true);
-		toggleDefinitionItems(input.uncheckDefinitionOfDone, false);
-
-		if (input.removeDefinitionOfDone && input.removeDefinitionOfDone.length > 0) {
-			const removalSet = new Set(input.removeDefinitionOfDone);
-			const beforeLength = definitionOfDone.length;
-			definitionOfDone = definitionOfDone.filter((criterion) => !removalSet.has(criterion.index));
-			if (definitionOfDone.length === beforeLength) {
-				throw new Error(
-					`Definition of Done item ${Array.from(removalSet)
-						.map((index) => `#${index}`)
-						.join(", ")} not found. ${formatAvailableIndexHint(
-						definitionOfDone,
-						"No Definition of Done items are defined.",
-					)}`,
-				);
-			}
-			mutated = true;
-			rebuildDefinitionIndices();
-		}
-
-		task.definitionOfDoneItems = definitionOfDone;
-
 		return { task, mutated };
 	}
 
@@ -2644,7 +1990,7 @@ export class Core {
 		// Drafts always keep status Draft
 		task.status = "Draft";
 		normalizeAssignee(task);
-		task.updatedDate = new Date().toISOString().slice(0, 16).replace("T", " ");
+		task.updatedDate = formatStoredDate();
 
 		const previousPath = task.filePath;
 		const filepath = await this.fs.saveDraft(task);
@@ -2766,9 +2112,7 @@ export class Core {
 					id: newTaskId,
 					status: canonicalStatus,
 					filePath: undefined,
-					...(mutated || draft.status !== canonicalStatus
-						? { updatedDate: new Date().toISOString().slice(0, 16).replace("T", " ") }
-						: {}),
+					...(mutated || draft.status !== canonicalStatus ? { updatedDate: formatStoredDate() } : {}),
 				};
 
 				normalizeAssignee(promotedTask);
@@ -2839,9 +2183,7 @@ export class Core {
 					id: newDraftId,
 					status: "Draft",
 					filePath: undefined,
-					...(mutated || current.status !== "Draft"
-						? { updatedDate: new Date().toISOString().slice(0, 16).replace("T", " ") }
-						: {}),
+					...(mutated || current.status !== "Draft" ? { updatedDate: formatStoredDate() } : {}),
 				};
 
 				normalizeAssignee(demotedDraft);
@@ -3137,208 +2479,245 @@ export class Core {
 	}): Promise<{ movedTasks: Task[]; changedTasks: Task[]; failures: Array<{ taskId: string; reason: string }> }> {
 		const targetStatus = String(params.targetStatus || "").trim();
 		if (!targetStatus) throw new Error("targetStatus is required");
-		const defaultStep = params.defaultStep ?? DEFAULT_ORDINAL_STEP;
+		const plan = await this.planTasksToStatus(params, targetStatus);
 
+		if (plan.changedTasks.length > 0) {
+			await this.updateTasksBulk(
+				plan.changedTasks,
+				params.commitMessage ?? `Move ${plan.changedTasks.length} tasks to ${targetStatus}`,
+				params.autoCommit,
+			);
+		}
+
+		return plan;
+	}
+
+	private async planTasksToStatus(
+		params: Parameters<Core["moveTasksToStatus"]>[0],
+		targetStatus: string,
+	): Promise<MoveTasksPlan> {
 		const { store, resolutions } = await this.resolveTasksForBoardMove(params.taskIds);
 		if (resolutions.length === 0) throw new Error("taskIds must include at least one task");
 
 		const failures: Array<{ taskId: string; reason: string }> = [];
 		const tasksToMove: Task[] = [];
 		for (const { taskId, task, ambiguity } of resolutions) {
-			if (ambiguity) {
-				failures.push({ taskId, reason: ambiguity.message });
-				continue;
+			if (ambiguity) failures.push({ taskId, reason: ambiguity.message });
+			else if (!task) failures.push({ taskId, reason: `Task ${taskId} not found.` });
+			else {
+				const crossBranchReason = crossBranchMoveReason(task, "moved");
+				if (crossBranchReason) failures.push({ taskId, reason: crossBranchReason });
+				else tasksToMove.push(task);
 			}
-			if (!task) {
-				failures.push({ taskId, reason: `Task ${taskId} not found.` });
-				continue;
-			}
-			const crossBranchReason = crossBranchMoveReason(task, "moved");
-			if (crossBranchReason) {
-				failures.push({ taskId, reason: crossBranchReason });
-				continue;
-			}
-			tasksToMove.push(task);
 		}
+		if (tasksToMove.length === 0) return { movedTasks: [], changedTasks: [], failures };
 
-		if (tasksToMove.length === 0) {
-			return { movedTasks: [], changedTasks: [], failures };
-		}
-
-		// A drop into a milestone lane means the lane as much as the column, so the batch carries the
-		// same milestone semantics as a single-task reorder: the field is only touched when the caller
-		// names a lane, and the board's no-milestone lane clears it.
 		const hasTargetMilestone = params.targetMilestone !== undefined;
 		const normalizedTargetMilestone = normalizeTargetMilestone(params.targetMilestone);
-
-		const movedIds = new Set(tasksToMove.map((task) => task.id));
 		const applyMove = (task: Task): Task => ({
 			...task,
 			status: targetStatus,
 			...(hasTargetMilestone ? { milestone: normalizedTargetMilestone } : {}),
 		});
+		const placement = params.orderedTaskIds
+			? this.planOrderedTaskMove(
+					store,
+					params.orderedTaskIds,
+					tasksToMove,
+					failures,
+					applyMove,
+					params.defaultStep ?? DEFAULT_ORDINAL_STEP,
+				)
+			: this.planAppendedTaskMove(
+					store,
+					targetStatus,
+					tasksToMove,
+					applyMove,
+					hasTargetMilestone,
+					normalizedTargetMilestone,
+					params.defaultStep ?? DEFAULT_ORDINAL_STEP,
+				);
+		return { ...placement, failures, changedTasks: placement.changedTasks.filter((task) => !task.branch) };
+	}
 
-		let movedTasks: Task[];
-		let changedTasks: Task[];
-
-		if (params.orderedTaskIds) {
-			// The caller names the target column's final order, so the moved tasks land exactly where
-			// the board previewed them instead of appending to the end.
-			const seenOrdered = new Set<string>();
-			for (const id of params.orderedTaskIds) {
-				const key = canonicalTaskId(id);
-				if (seenOrdered.has(key)) throw new Error(`Duplicate task ID in orderedTaskIds: ${id}`);
-				seenOrdered.add(key);
+	private planOrderedTaskMove(
+		store: ContentStore,
+		orderedTaskIds: string[],
+		tasksToMove: Task[],
+		failures: Array<{ taskId: string; reason: string }>,
+		applyMove: (task: Task) => Task,
+		defaultStep: number,
+	): MoveTaskPlacement {
+		const seenOrdered = new Set<string>();
+		for (const id of orderedTaskIds) {
+			const key = canonicalTaskId(id);
+			if (seenOrdered.has(key)) throw new Error(`Duplicate task ID in orderedTaskIds: ${id}`);
+			seenOrdered.add(key);
+		}
+		for (const task of tasksToMove) {
+			if (!seenOrdered.has(canonicalTaskId(task.id))) {
+				throw new Error("orderedTaskIds must include every task being moved");
 			}
-			for (const task of tasksToMove) {
-				if (!seenOrdered.has(canonicalTaskId(task.id))) {
-					throw new Error("orderedTaskIds must include every task being moved");
-				}
-			}
+		}
 
-			const movedByKey = new Map(tasksToMove.map((task) => [canonicalTaskId(task.id), task]));
-			// A task that failed to resolve is not moving, so it keeps its place and stays out of the
-			// target column's ordering.
-			const failedKeys = new Set(failures.map((failure) => canonicalTaskId(failure.taskId)));
-			const rows: Array<{ task: Task; moved: boolean }> = [];
-			for (const id of params.orderedTaskIds) {
-				const key = canonicalTaskId(id);
-				if (failedKeys.has(key)) continue;
-				const movedTask = movedByKey.get(key);
-				if (movedTask) {
-					rows.push({ task: movedTask, moved: true });
-					continue;
-				}
+		const movedByKey = new Map(tasksToMove.map((task) => [canonicalTaskId(task.id), task]));
+		const failedKeys = new Set(failures.map((failure) => canonicalTaskId(failure.taskId)));
+		const rows: Array<{ task: Task; moved: boolean }> = [];
+		for (const id of orderedTaskIds) {
+			const key = canonicalTaskId(id);
+			if (failedKeys.has(key)) continue;
+			const movedTask = movedByKey.get(key);
+			if (movedTask) rows.push({ task: movedTask, moved: true });
+			else {
 				const resolution = store.resolveTaskForMutation(key);
 				if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(id, resolution.candidates);
-				// Tasks that couldn't be loaded (may have been moved/deleted) drop out of the ordering
 				if (resolution.status === "found") rows.push({ task: resolution.task, moved: false });
 			}
+		}
 
-			// Seed each run of moved tasks with block ordinals between its unmoved neighbors, exactly
-			// as a single-task reorder seeds its midpoint, then let conflict resolution settle the rest.
-			let requiresRebalance = false;
-			const tasksInOrder: Task[] = [];
-			for (let index = 0; index < rows.length; ) {
-				const row = rows[index];
-				if (!row) break;
-				if (!row.moved) {
-					tasksInOrder.push(row.task);
-					index += 1;
-					continue;
-				}
-				let runEnd = index;
-				while (runEnd < rows.length && rows[runEnd]?.moved) runEnd += 1;
-				const block = calculateBlockOrdinals({
-					previous: index > 0 ? (rows[index - 1]?.task ?? null) : null,
-					next: rows[runEnd]?.task ?? null,
-					count: runEnd - index,
-					defaultStep,
-				});
-				requiresRebalance = requiresRebalance || block.requiresRebalance;
-				for (let offset = index; offset < runEnd; offset += 1) {
-					const movedRow = rows[offset];
-					if (!movedRow) continue;
-					tasksInOrder.push({ ...applyMove(movedRow.task), ordinal: block.ordinals[offset - index] });
-				}
-				index = runEnd;
+		let requiresRebalance = false;
+		const tasksInOrder: Task[] = [];
+		for (let index = 0; index < rows.length; ) {
+			const row = rows[index];
+			if (!row) break;
+			if (!row.moved) {
+				tasksInOrder.push(row.task);
+				index += 1;
+				continue;
 			}
-
-			const resolutionUpdates = resolveOrdinalConflicts(tasksInOrder, {
+			let runEnd = index;
+			while (runEnd < rows.length && rows[runEnd]?.moved) runEnd += 1;
+			const block = calculateBlockOrdinals({
+				previous: index > 0 ? (rows[index - 1]?.task ?? null) : null,
+				next: rows[runEnd]?.task ?? null,
+				count: runEnd - index,
+				defaultStep,
+			});
+			requiresRebalance ||= block.requiresRebalance;
+			for (let offset = index; offset < runEnd; offset += 1) {
+				const movedRow = rows[offset];
+				if (movedRow) tasksInOrder.push({ ...applyMove(movedRow.task), ordinal: block.ordinals[offset - index] });
+			}
+			index = runEnd;
+		}
+		return this.reconcileMovedTasks(
+			tasksInOrder,
+			resolveOrdinalConflicts(tasksInOrder, {
 				defaultStep,
 				startOrdinal: defaultStep,
 				forceSequential: requiresRebalance,
-			});
-			const updatesMap = new Map(tasksInOrder.map((task) => [task.id, task]));
-			for (const update of resolutionUpdates) {
-				updatesMap.set(update.id, update);
-			}
+			}),
+			rows.map(({ task }) => task),
+			tasksToMove,
+			applyMove,
+		);
+	}
 
-			const originalMap = new Map([
-				...rows.map(({ task }) => [task.id, task] as const),
-				...tasksToMove.map((task) => [task.id, task] as const),
-			]);
-			movedTasks = tasksToMove.map((task) => updatesMap.get(task.id) ?? applyMove(task));
-			changedTasks = Array.from(updatesMap.values()).filter((task) => {
-				const original = originalMap.get(task.id);
-				if (!original) return true;
-				return (
-					(original.status ?? "") !== (task.status ?? "") ||
-					(original.ordinal ?? null) !== (task.ordinal ?? null) ||
-					(original.milestone ?? "") !== (task.milestone ?? "")
-				);
-			});
-		} else {
-			// A task already in the target column is not moving, so it keeps its place and ordinal;
-			// only a named lane still applies to it. Everything else appends after the column as
-			// rendered.
-			const stayingIds = new Set(tasksToMove.filter((task) => task.status === targetStatus).map((task) => task.id));
-			const arriving = tasksToMove.filter((task) => !stayingIds.has(task.id));
-
-			if (arriving.length === 0) {
-				movedTasks = tasksToMove.map((task) => applyMove(task));
-				changedTasks = movedTasks.filter((task, index) => {
+	private planAppendedTaskMove(
+		store: ContentStore,
+		targetStatus: string,
+		tasksToMove: Task[],
+		applyMove: (task: Task) => Task,
+		hasTargetMilestone: boolean,
+		normalizedTargetMilestone: string | undefined,
+		defaultStep: number,
+	): MoveTaskPlacement {
+		const stayingIds = new Set(tasksToMove.filter((task) => task.status === targetStatus).map((task) => task.id));
+		const arriving = tasksToMove.filter((task) => !stayingIds.has(task.id));
+		if (arriving.length === 0) {
+			const movedTasks = tasksToMove.map(applyMove);
+			return {
+				movedTasks,
+				changedTasks: movedTasks.filter((task, index) => {
 					const original = tasksToMove[index];
-					if (!original) return true;
-					return original.status !== task.status || (original.milestone ?? "") !== (task.milestone ?? "");
-				});
-			} else {
-				// Ordinal-less column tasks render after ordinal-bearing ones, so they get materialized
-				// ordinals rather than letting the appended tasks slot in above them, and a non-finite
-				// ordinal from a corrupt file counts as missing instead of poisoning the column.
-				// A named lane scopes the ordering to that lane: a drop into Milestone A must not
-				// renumber cards that only share the status in other lanes. Staying tasks remain in
-				// scope regardless, because a named lane still has to be applied to them.
-				const sanitizeOrdinal = (task: Task): Task =>
-					task.ordinal === undefined || Number.isFinite(task.ordinal) ? task : { ...task, ordinal: undefined };
-				const inTargetLane = (task: Task): boolean =>
-					!hasTargetMilestone || (task.milestone?.trim() || "") === (normalizedTargetMilestone ?? "");
-				const columnTasks = sortByOrdinal(
-					store
-						.getTasks({ status: targetStatus })
-						.filter((task) => (stayingIds.has(task.id) ? true : !movedIds.has(task.id) && inTargetLane(task)))
-						.map(sanitizeOrdinal),
-				);
-				const tasksInOrder: Task[] = [
-					...columnTasks.map((task) => (stayingIds.has(task.id) ? applyMove(task) : task)),
-					...arriving.map((task) => ({ ...applyMove(task), ordinal: undefined })),
-				];
-				const resolutionUpdates = resolveOrdinalConflicts(tasksInOrder, { defaultStep, startOrdinal: defaultStep });
-				const updatesMap = new Map(tasksInOrder.map((task) => [task.id, task]));
-				for (const update of resolutionUpdates) {
-					updatesMap.set(update.id, update);
-				}
-
-				const originalMap = new Map([
-					...store.getTasks({ status: targetStatus }).map((task) => [task.id, task] as const),
-					...tasksToMove.map((task) => [task.id, task] as const),
-				]);
-				movedTasks = tasksToMove.map((task) => updatesMap.get(task.id) ?? applyMove(task));
-				changedTasks = Array.from(updatesMap.values()).filter((task) => {
-					const original = originalMap.get(task.id);
-					if (!original) return true;
-					return (
-						(original.status ?? "") !== (task.status ?? "") ||
-						(original.ordinal ?? null) !== (task.ordinal ?? null) ||
-						(original.milestone ?? "") !== (task.milestone ?? "")
-					);
-				});
-			}
+					return !original || original.status !== task.status || (original.milestone ?? "") !== (task.milestone ?? "");
+				}),
+			};
 		}
 
-		// A cross-branch card can constrain the ordering, but writing it here would create a local
-		// copy of a task the board treats as read-only. It keeps its file untouched on its own branch.
-		changedTasks = changedTasks.filter((task) => !task.branch);
+		const movedIds = new Set(tasksToMove.map((task) => task.id));
+		const sanitizeOrdinal = (task: Task): Task =>
+			task.ordinal === undefined || Number.isFinite(task.ordinal) ? task : { ...task, ordinal: undefined };
+		const inTargetLane = (task: Task): boolean =>
+			!hasTargetMilestone || (task.milestone?.trim() || "") === (normalizedTargetMilestone ?? "");
+		const columnTasks = sortByOrdinal(
+			store
+				.getTasks({ status: targetStatus })
+				.filter((task) => (stayingIds.has(task.id) ? true : !movedIds.has(task.id) && inTargetLane(task)))
+				.map(sanitizeOrdinal),
+		);
+		const tasksInOrder = [
+			...columnTasks.map((task) => (stayingIds.has(task.id) ? applyMove(task) : task)),
+			...arriving.map((task) => ({ ...applyMove(task), ordinal: undefined })),
+		];
+		return this.reconcileMovedTasks(
+			tasksInOrder,
+			resolveOrdinalConflicts(tasksInOrder, { defaultStep, startOrdinal: defaultStep }),
+			store.getTasks({ status: targetStatus }),
+			tasksToMove,
+			applyMove,
+		);
+	}
 
-		if (changedTasks.length > 0) {
-			await this.updateTasksBulk(
-				changedTasks,
-				params.commitMessage ?? `Move ${changedTasks.length} tasks to ${targetStatus}`,
-				params.autoCommit,
+	private reconcileMovedTasks(
+		tasksInOrder: Task[],
+		resolutionUpdates: Task[],
+		originalTasks: Task[],
+		tasksToMove: Task[],
+		applyMove: (task: Task) => Task,
+	): { movedTasks: Task[]; changedTasks: Task[] } {
+		const updatesMap = new Map(tasksInOrder.map((task) => [task.id, task]));
+		for (const update of resolutionUpdates) {
+			updatesMap.set(update.id, update);
+		}
+		const originalMap = new Map([
+			...originalTasks.map((task) => [task.id, task] as const),
+			...tasksToMove.map((task) => [task.id, task] as const),
+		]);
+		const movedTasks = tasksToMove.map((task) => updatesMap.get(task.id) ?? applyMove(task));
+		const changedTasks = Array.from(updatesMap.values()).filter((task) => {
+			const original = originalMap.get(task.id);
+			return (
+				!original ||
+				(original.status ?? "") !== (task.status ?? "") ||
+				(original.ordinal ?? null) !== (task.ordinal ?? null) ||
+				(original.milestone ?? "") !== (task.milestone ?? "")
 			);
-		}
+		});
+		return { movedTasks, changedTasks };
+	}
 
-		return { movedTasks, changedTasks, failures };
+	private async commitStagedMilestoneMove(
+		sourcePath: string,
+		targetPath: string,
+		message: string,
+		rollback: () => Promise<void>,
+	): Promise<void> {
+		const repoRoot = await this.git.stageFileMove(sourcePath, targetPath);
+		const commitPaths = [sourcePath, targetPath];
+		try {
+			await this.git.commitFiles(message, commitPaths, repoRoot);
+		} catch (error) {
+			await this.git.resetPaths(commitPaths, repoRoot);
+			await rollback();
+			throw error;
+		}
+	}
+
+	private async commitMilestoneMove(
+		result: { success: boolean; sourcePath?: string; targetPath?: string; milestone?: Milestone },
+		verb: "Archive" | "Rename",
+		autoCommitEnabled: boolean,
+		rollback: () => Promise<void>,
+	): Promise<void> {
+		if (!result.success || !result.sourcePath || !result.targetPath || !autoCommitEnabled) return;
+		const label = result.milestone?.id ? ` ${result.milestone.id}` : "";
+		await this.commitStagedMilestoneMove(
+			result.sourcePath,
+			result.targetPath,
+			`backlog: ${verb} milestone${label}`,
+			rollback,
+		);
 	}
 
 	async archiveTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<VacatedTaskResult> {
@@ -3355,7 +2734,7 @@ export class Core {
 			const config = await this.fs.loadConfig();
 			const statuses = config?.statuses ?? [...DEFAULT_STATUSES];
 			if (isTerminalStatus(current.status, statuses)) {
-				throw new TaskArchiveStatusError(current.id, getTerminalStatus(statuses) ?? "Done");
+				throw new TaskArchiveStatusError(current.id, getTerminalStatus(statuses) ?? DEFAULT_DONE_STATUS);
 			}
 
 			const taskPath = current.filePath ?? (await getTaskPath(normalizedTaskId, this));
@@ -3404,22 +2783,15 @@ export class Core {
 		const autoCommitEnabled = await this.shouldAutoCommit(autoCommit);
 		const result = await this.fs.archiveMilestone(identifier);
 
-		if (result.success && result.sourcePath && result.targetPath && autoCommitEnabled) {
-			const repoRoot = await this.git.stageFileMove(result.sourcePath, result.targetPath);
-			const label = result.milestone?.id ? ` ${result.milestone.id}` : "";
-			const commitPaths = [result.sourcePath, result.targetPath];
+		await this.commitMilestoneMove(result, "Archive", autoCommitEnabled, async () => {
+			const sourcePath = result.sourcePath as string;
+			const targetPath = result.targetPath as string;
 			try {
-				await this.git.commitFiles(`backlog: Archive milestone${label}`, commitPaths, repoRoot);
-			} catch (error) {
-				await this.git.resetPaths(commitPaths, repoRoot);
-				try {
-					await moveFile(result.targetPath, result.sourcePath);
-				} catch {
-					// Ignore rollback failure and propagate original commit error.
-				}
-				throw error;
+				await moveFile(targetPath, sourcePath);
+			} catch {
+				// Ignore rollback failure and propagate original commit error.
 			}
-		}
+		});
 
 		return {
 			success: result.success,
@@ -3447,27 +2819,18 @@ export class Core {
 			return result;
 		}
 
-		if (result.sourcePath && result.targetPath && (await this.shouldAutoCommit(autoCommit))) {
-			const repoRoot = await this.git.stageFileMove(result.sourcePath, result.targetPath);
-			const label = result.milestone?.id ? ` ${result.milestone.id}` : "";
-			const commitPaths = [result.sourcePath, result.targetPath];
+		await this.commitMilestoneMove(result, "Rename", await this.shouldAutoCommit(autoCommit), async () => {
+			const rollbackTitle = result.previousTitle ?? title;
 			try {
-				await this.git.commitFiles(`backlog: Rename milestone${label}`, commitPaths, repoRoot);
-			} catch (error) {
-				await this.git.resetPaths(commitPaths, repoRoot);
-				const rollbackTitle = result.previousTitle ?? title;
-				try {
-					await this.fs.renameMilestone(
-						result.milestone?.id ?? identifier,
-						rollbackTitle,
-						result.previousDueDate ?? null,
-					);
-				} catch {
-					// Ignore rollback failure and propagate original commit error.
-				}
-				throw error;
+				await this.fs.renameMilestone(
+					result.milestone?.id ?? identifier,
+					rollbackTitle,
+					result.previousDueDate ?? null,
+				);
+			} catch {
+				// Ignore rollback failure and propagate original commit error.
 			}
-		}
+		});
 
 		return result;
 	}
@@ -3690,43 +3053,42 @@ export class Core {
 		await this.updateTask(task, autoCommit);
 	}
 
+	private async mutateAcceptanceCriteria<T>(
+		taskId: string,
+		autoCommit: boolean | undefined,
+		mutate: (items: AcceptanceCriterion[]) => { items: AcceptanceCriterion[]; result: T },
+	): Promise<T> {
+		const task = await this.fs.loadTask(taskId);
+		if (!task) throw new Error(`Task not found: ${taskId}`);
+		assertValidChecklistMarks(task.rawContent ?? "", "AC");
+		const { items, result } = mutate(
+			Array.isArray(task.acceptanceCriteriaItems) ? [...task.acceptanceCriteriaItems] : [],
+		);
+		task.acceptanceCriteriaItems = items;
+		await this.updateTask(task, autoCommit);
+		return result;
+	}
+
 	/**
 	 * Remove acceptance criteria by indices (supports batch operations)
 	 * @returns Array of removed indices
 	 */
 	async removeAcceptanceCriteria(taskId: string, indices: number[], autoCommit?: boolean): Promise<number[]> {
-		const task = await this.fs.loadTask(taskId);
-		if (!task) {
-			throw new Error(`Task not found: ${taskId}`);
-		}
-		assertValidChecklistMarks(task.rawContent ?? "", "AC");
-
-		let list = Array.isArray(task.acceptanceCriteriaItems) ? [...task.acceptanceCriteriaItems] : [];
-		const removed: number[] = [];
-
-		// Sort indices in descending order to avoid index shifting issues
-		const sortedIndices = [...indices].sort((a, b) => b - a);
-
-		for (const idx of sortedIndices) {
-			const before = list.length;
-			list = list.filter((c) => c.index !== idx);
-			if (list.length < before) {
-				removed.push(idx);
-			}
-		}
-
-		if (removed.length === 0) {
-			throw new Error("No criteria were removed. Check that the specified indices exist.");
-		}
-
-		// Re-index remaining items (1-based)
-		list = list.map((c, i) => ({ ...c, index: i + 1 }));
-		task.acceptanceCriteriaItems = list;
-
-		// Save the task
-		await this.updateTask(task, autoCommit);
-
-		return removed.sort((a, b) => a - b); // Return in ascending order
+		return await this.mutateAcceptanceCriteria(taskId, autoCommit, (items) => {
+			let remaining = items;
+			const removed = [...indices]
+				.sort((a, b) => b - a)
+				.filter((index) => {
+					const before = remaining.length;
+					remaining = remaining.filter((item) => item.index !== index);
+					return remaining.length < before;
+				});
+			if (removed.length === 0) throw new Error("No criteria were removed. Check that the specified indices exist.");
+			return {
+				items: remaining.map((item, index) => ({ ...item, index: index + 1 })),
+				result: removed.sort((a, b) => a - b),
+			};
+		});
 	}
 
 	/**
@@ -3740,38 +3102,17 @@ export class Core {
 		checked: boolean,
 		autoCommit?: boolean,
 	): Promise<number[]> {
-		const task = await this.fs.loadTask(taskId);
-		if (!task) {
-			throw new Error(`Task not found: ${taskId}`);
-		}
-		assertValidChecklistMarks(task.rawContent ?? "", "AC");
-
-		let list = Array.isArray(task.acceptanceCriteriaItems) ? [...task.acceptanceCriteriaItems] : [];
-		const updated: number[] = [];
-
-		// Filter to only valid indices and update them
-		for (const idx of indices) {
-			if (list.some((c) => c.index === idx)) {
-				list = list.map((c) => {
-					if (c.index === idx) {
-						updated.push(idx);
-						return { ...c, checked };
-					}
-					return c;
-				});
+		return await this.mutateAcceptanceCriteria(taskId, autoCommit, (items) => {
+			let updatedItems = items;
+			const updated: number[] = [];
+			for (const index of indices) {
+				if (!updatedItems.some((item) => item.index === index)) continue;
+				updatedItems = updatedItems.map((item) => (item.index === index ? { ...item, checked } : item));
+				updated.push(index);
 			}
-		}
-
-		if (updated.length === 0) {
-			throw new Error("No criteria were updated.");
-		}
-
-		task.acceptanceCriteriaItems = list;
-
-		// Save the task
-		await this.updateTask(task, autoCommit);
-
-		return updated.sort((a, b) => a - b);
+			if (updated.length === 0) throw new Error("No criteria were updated.");
+			return { items: updatedItems, result: updated.sort((a, b) => a - b) };
+		});
 	}
 
 	/**
@@ -3854,7 +3195,7 @@ export class Core {
 		const decision: Decision = {
 			id,
 			title,
-			date: new Date().toISOString().slice(0, 16).replace("T", " "),
+			date: formatStoredDate(),
 			status: "proposed",
 			context: "[Describe the context and problem that needs to be addressed]",
 			decision: "[Describe the decision that was made]",
@@ -3910,7 +3251,7 @@ export class Core {
 				id,
 				title,
 				type,
-				createdDate: new Date().toISOString().slice(0, 16).replace("T", " "),
+				createdDate: formatStoredDate(),
 				rawContent: input.content ?? "",
 				...(tags && tags.length > 0 && { tags }),
 			};
@@ -3945,7 +3286,7 @@ export class Core {
 			title: normalizedTitle ?? existingDoc.title,
 			type,
 			rawContent: input.content,
-			updatedDate: new Date().toISOString().slice(0, 16).replace("T", " "),
+			updatedDate: formatStoredDate(),
 			tags: tags && tags.length > 0 ? tags : undefined,
 		};
 
@@ -3985,7 +3326,10 @@ export class Core {
 	 * @param filePath - Path to the file to edit
 	 * @param screen - Optional blessed screen to suspend (for TUI contexts)
 	 */
-	async editTaskInTui(taskId: string, screen: BlessedScreen, selectedTask?: Task): Promise<TuiTaskEditResult> {
+	private async prepareTuiTaskEdit(
+		taskId: string,
+		selectedTask?: Task,
+	): Promise<TuiTaskEditSession | TuiTaskEditResult> {
 		const contextualTask = selectedTask && taskIdsEqual(selectedTask.id, taskId) ? selectedTask : undefined;
 
 		if (contextualTask && (!isLocalEditableTask(contextualTask) || contextualTask.branch)) {
@@ -4081,6 +3425,13 @@ export class Core {
 		if (!filePath) {
 			return { changed: false, task: editableTask, reason: "not_found" };
 		}
+		return { task: editableTask, taskFilePath, filePath };
+	}
+
+	async editTaskInTui(taskId: string, screen: BlessedScreen, selectedTask?: Task): Promise<TuiTaskEditResult> {
+		const session = await this.prepareTuiTaskEdit(taskId, selectedTask);
+		if ("changed" in session) return session;
+		const { task: editableTask, taskFilePath, filePath } = session;
 		// Re-reading through the validation authority keeps the editor session honest. Parse or
 		// read failures and genuine identity conflicts are reported as distinct outcomes. The
 		// known on-disk path is attached to reloaded tasks so contentStore publication works.
@@ -4132,7 +3483,7 @@ export class Core {
 			return { changed: false, task: outcome.task };
 		}
 
-		const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+		const now = formatStoredDate();
 
 		if (!taskFilePath) {
 			// Draft close: hold the draft lock around the write+validate window so a concurrent
@@ -4315,6 +3666,52 @@ export class Core {
 		return await this.loadTaskCorpusSnapshot(progressCallback, { publishSharedState: options?.publish ?? true });
 	}
 
+	private assertTaskLoadNotCancelled(abortSignal?: AbortSignal): void {
+		if (abortSignal?.aborted) throw new Error("Loading cancelled");
+	}
+
+	private async loadBranchTaskState(
+		shouldLoadBranches: boolean,
+		config: BacklogConfig | null,
+		loader: BranchTaskLoader,
+		snapshot: ActiveBranchSnapshot,
+		localTasks: Task[],
+		includeCompleted: boolean,
+		backlogDirName: string,
+		progressCallback?: (message: string) => void,
+	): Promise<{ entries: BranchTaskStateEntry[]; complete: boolean; backlogDir: string | null }> {
+		if (!shouldLoadBranches) return { entries: [], complete: true, backlogDir: null };
+		progressCallback?.(getTaskLoadingMessage(config));
+		const result = await loader.load(
+			snapshot.branchTips,
+			config,
+			localTasks,
+			includeCompleted,
+			backlogDirName,
+			progressCallback,
+			snapshot.currentBranch,
+		);
+		return { entries: result.entries, complete: result.complete, backlogDir: backlogDirName };
+	}
+
+	private retainBranchTaskSnapshot(
+		loader: BranchTaskLoader,
+		snapshot: ActiveBranchSnapshot,
+		config: BacklogConfig | null,
+		shouldLoadBranches: boolean,
+		backlogDir: string | null,
+	): void {
+		if (!shouldLoadBranches || !backlogDir) {
+			loader.clear();
+			return;
+		}
+		loader.retainSnapshot(snapshot.branchTips, {
+			backlogDir,
+			prefix: config?.prefixes?.task ?? "task",
+			activeBranchDays: config?.activeBranchDays ?? 30,
+		});
+	}
+
 	private async loadTasksWithStableBranchSnapshot(
 		options: TaskCorpusLoadOptions,
 		snapshotAttempt = 0,
@@ -4345,9 +3742,7 @@ export class Core {
 		if (projectChanged()) return await retryForCurrentProject();
 		git.setConfig(config);
 		// A cancelled load must not wait out the fetch timeout before noticing.
-		if (abortSignal?.aborted) {
-			throw new Error("Loading cancelled");
-		}
+		this.assertTaskLoadNotCancelled(abortSignal);
 		await this.refreshRemoteRefsForTaskRead(config, git, { force: options.forceRemoteRefresh });
 		if (projectChanged()) return await retryForCurrentProject();
 		const settingsKey = JSON.stringify(this.getActiveBranchSettings(config, filesystem));
@@ -4361,10 +3756,7 @@ export class Core {
 		const includeCompleted = options.includeCompleted ?? false;
 		const shouldLoadBranches = config?.checkActiveBranches !== false && config?.filesystemOnly !== true;
 
-		// Check for cancellation
-		if (abortSignal?.aborted) {
-			throw new Error("Loading cancelled");
-		}
+		this.assertTaskLoadNotCancelled(abortSignal);
 
 		// Load local filesystem tasks first (needed for optimization)
 		const [localTasks, completedTasks] = await Promise.all([
@@ -4373,43 +3765,20 @@ export class Core {
 		]);
 		if (projectChanged()) return await retryForCurrentProject();
 
-		// Check for cancellation
-		if (abortSignal?.aborted) {
-			throw new Error("Loading cancelled");
-		}
+		this.assertTaskLoadNotCancelled(abortSignal);
+		const branchLoad = await this.loadBranchTaskState(
+			shouldLoadBranches,
+			config,
+			branchTaskLoader,
+			snapshotBefore,
+			localTasks,
+			includeCompleted,
+			filesystem.backlogDirName,
+			progressCallback,
+		);
+		if (projectChanged()) return await retryForCurrentProject();
 
-		// Load tasks from remote branches and other local branches in parallel
-		// Skip entirely when cross-branch scanning is disabled
-		const branchStateEntries: BranchTaskStateEntry[] = [];
-		let branchLoadComplete = true;
-
-		let backlogDir: string | null = null;
-		if (shouldLoadBranches) {
-			progressCallback?.(getTaskLoadingMessage(config));
-			backlogDir = filesystem.backlogDirName;
-			const branchLoad = await branchTaskLoader.load(
-				snapshotBefore.branchTips,
-				config,
-				localTasks,
-				includeCompleted,
-				backlogDir,
-				progressCallback,
-				snapshotBefore.currentBranch,
-			);
-			branchStateEntries.push(...branchLoad.entries);
-			branchLoadComplete = branchLoad.complete;
-			if (projectChanged()) return await retryForCurrentProject();
-		}
-
-		// Check for cancellation after loading
-		if (abortSignal?.aborted) {
-			throw new Error("Loading cancelled");
-		}
-
-		// Check for cancellation before identity resolution
-		if (abortSignal?.aborted) {
-			throw new Error("Loading cancelled");
-		}
+		this.assertTaskLoadNotCancelled(abortSignal);
 
 		if (shouldLoadBranches) {
 			progressCallback?.("Applying latest task states from branch scans...");
@@ -4417,7 +3786,7 @@ export class Core {
 		const identityIndex = await this.buildTaskIdentityIndex(
 			localTasks,
 			completedTasks,
-			branchStateEntries,
+			branchLoad.entries,
 			statuses,
 			resolutionStrategy,
 			undefined,
@@ -4442,23 +3811,15 @@ export class Core {
 		// Healthy branches remain publishable after a partial read, but an
 		// incomplete generation must retry even while its refs stay unchanged.
 		if (options.publishSharedState) {
-			this.activeBranchFingerprint = branchLoadComplete ? snapshotAfter.fingerprint : null;
+			this.activeBranchFingerprint = branchLoad.complete ? snapshotAfter.fingerprint : null;
 		}
-		if (shouldLoadBranches && backlogDir) {
-			branchTaskLoader.retainSnapshot(snapshotAfter.branchTips, {
-				backlogDir,
-				prefix: config?.prefixes?.task ?? "task",
-				activeBranchDays: config?.activeBranchDays ?? 30,
-			});
-		} else {
-			branchTaskLoader.clear();
-		}
+		this.retainBranchTaskSnapshot(branchTaskLoader, snapshotAfter, config, shouldLoadBranches, branchLoad.backlogDir);
 		return {
 			tasks: filteredTasks,
 			activeTasks: localTasks,
 			completedTasks,
 			identityIndex,
-			branchStateEntries,
+			branchStateEntries: branchLoad.entries,
 			config,
 		};
 	}

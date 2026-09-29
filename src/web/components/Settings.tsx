@@ -3,6 +3,26 @@ import { apiClient } from '../lib/api';
 import { SuccessToast } from './SuccessToast';
 import type { BacklogConfig } from '../../types';
 
+const ToggleSetting: React.FC<{
+	label: string;
+	description: string;
+	checked: boolean;
+	onChange: (checked: boolean) => void;
+}> = ({ label, description, checked, onChange }) => (
+	<div>
+		<label className="flex items-center justify-between">
+			<div>
+				<span className="text-sm font-medium text-gray-700 dark:text-gray-300">{label}</span>
+				<p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{description}</p>
+			</div>
+			<div className="relative inline-flex items-center cursor-pointer">
+				<input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="sr-only peer" />
+				<div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-circle peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-circle after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+			</div>
+		</label>
+	</div>
+);
+
 const Settings: React.FC = () => {
 	const [config, setConfig] = useState<BacklogConfig | null>(null);
 	const [originalConfig, setOriginalConfig] = useState<BacklogConfig | null>(null);
@@ -193,45 +213,9 @@ const Settings: React.FC = () => {
 					<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
 						<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Workflow Settings</h2>
 						<div className="space-y-4">
-							<div>
-								<label className="flex items-center justify-between">
-									<div>
-										<span className="text-sm font-medium text-gray-700 dark:text-gray-300">Auto Commit</span>
-										<p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-											Automatically commit changes to Git after task operations
-										</p>
-									</div>
-									<div className="relative inline-flex items-center cursor-pointer">
-										<input
-											type="checkbox"
-											checked={config.autoCommit}
-											onChange={(e) => handleInputChange('autoCommit', e.target.checked)}
-											className="sr-only peer"
-										/>
-										<div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-circle peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-circle after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-									</div>
-								</label>
-							</div>
+							<ToggleSetting label="Auto Commit" description="Automatically commit changes to Git after task operations" checked={config.autoCommit ?? false} onChange={(value) => handleInputChange('autoCommit', value)} />
 
-							<div>
-								<label className="flex items-center justify-between">
-									<div>
-										<span className="text-sm font-medium text-gray-700 dark:text-gray-300">Remote Operations</span>
-										<p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-											Fetch tasks information from remote branches
-										</p>
-									</div>
-									<div className="relative inline-flex items-center cursor-pointer">
-										<input
-											type="checkbox"
-											checked={config.remoteOperations}
-											onChange={(e) => handleInputChange('remoteOperations', e.target.checked)}
-											className="sr-only peer"
-										/>
-										<div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-circle peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-circle after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-									</div>
-								</label>
-							</div>
+							<ToggleSetting label="Remote Operations" description="Fetch tasks information from remote branches" checked={config.remoteOperations ?? false} onChange={(value) => handleInputChange('remoteOperations', value)} />
 
 							<div>
 								<label htmlFor="defaultStatus" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -339,45 +323,9 @@ const Settings: React.FC = () => {
 								)}
 							</div>
 
-							<div>
-								<label className="flex items-center justify-between">
-									<div>
-										<span className="text-sm font-medium text-gray-700 dark:text-gray-300">Auto Open Browser</span>
-										<p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-											Automatically open browser when starting web UI
-										</p>
-									</div>
-									<div className="relative inline-flex items-center cursor-pointer">
-										<input
-											type="checkbox"
-											checked={config.autoOpenBrowser}
-											onChange={(e) => handleInputChange('autoOpenBrowser', e.target.checked)}
-											className="sr-only peer"
-										/>
-										<div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-circle peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-circle after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-									</div>
-								</label>
-							</div>
+							<ToggleSetting label="Auto Open Browser" description="Automatically open browser when starting web UI" checked={config.autoOpenBrowser ?? false} onChange={(value) => handleInputChange('autoOpenBrowser', value)} />
 
-							<div>
-								<label className="flex items-center justify-between">
-									<div>
-										<span className="text-sm font-medium text-gray-700 dark:text-gray-300">Hide Empty Columns</span>
-										<p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-											Hide board columns whose status has no tasks. Columns reappear while dragging a task so they remain valid drop targets.
-										</p>
-									</div>
-									<div className="relative inline-flex items-center cursor-pointer">
-										<input
-											type="checkbox"
-											checked={config.hideEmptyColumns ?? false}
-											onChange={(e) => handleInputChange('hideEmptyColumns', e.target.checked)}
-											className="sr-only peer"
-										/>
-										<div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-circle peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-circle after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-									</div>
-								</label>
-							</div>
+							<ToggleSetting label="Hide Empty Columns" description="Hide board columns whose status has no tasks. Columns reappear while dragging a task so they remain valid drop targets." checked={config.hideEmptyColumns ?? false} onChange={(value) => handleInputChange('hideEmptyColumns', value)} />
 						</div>
 					</div>
 

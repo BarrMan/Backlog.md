@@ -98,10 +98,6 @@ export const INSTRUCTION_GUIDES: WorkflowGuideDefinition[] = [
 	},
 ];
 
-export function getWorkflowGuideByUri(uri: string): WorkflowGuideDefinition | undefined {
-	return WORKFLOW_GUIDES.find((guide) => guide.uri === uri);
-}
-
 export function getWorkflowGuideByKey(key: WorkflowGuideKey): WorkflowGuideDefinition | undefined {
 	return WORKFLOW_GUIDES.find((guide) => guide.key === key);
 }

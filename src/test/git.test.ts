@@ -63,6 +63,55 @@ describe("Git Operations", () => {
 		});
 	});
 
+	describe("repository path resolution", () => {
+		it("uses the shared resolver before committing selected paths", async () => {
+			const git = new GitOperations(process.cwd());
+			const calls: Array<{ paths: readonly string[]; repoRoot?: string | null }> = [];
+			const internals = git as unknown as {
+				resolveRepositoryPaths: (
+					paths: readonly string[],
+					repoRoot?: string | null,
+				) => Promise<{ repoRoot: string; relativePaths: string[] } | null>;
+				execGit: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
+			};
+			internals.resolveRepositoryPaths = async (paths, repoRoot) => {
+				calls.push({ paths, repoRoot });
+				return { repoRoot: "/repo", relativePaths: ["backlog/tasks/back-1.md"] };
+			};
+			internals.execGit = async () => ({ stdout: "", stderr: "" });
+
+			await git.commitFiles("Update task", [" /repo/backlog/tasks/back-1.md ", "/repo/backlog/tasks/back-1.md"]);
+
+			expect(calls).toEqual([{ paths: ["/repo/backlog/tasks/back-1.md"], repoRoot: process.cwd() }]);
+		});
+
+		it("uses the shared resolver before resetting selected paths", async () => {
+			const git = new GitOperations(process.cwd());
+			const calls: Array<{ paths: readonly string[]; repoRoot?: string | null }> = [];
+			let capturedArgs: string[] = [];
+			const internals = git as unknown as {
+				resolveRepositoryPaths: (
+					paths: readonly string[],
+					repoRoot?: string | null,
+				) => Promise<{ repoRoot: string; relativePaths: string[] } | null>;
+				execGit: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
+			};
+			internals.resolveRepositoryPaths = async (paths, repoRoot) => {
+				calls.push({ paths, repoRoot });
+				return { repoRoot: "/repo", relativePaths: ["backlog/tasks/back-1.md"] };
+			};
+			internals.execGit = async (args) => {
+				capturedArgs = args;
+				return { stdout: "", stderr: "" };
+			};
+
+			await git.resetPaths([" /repo/backlog/tasks/back-1.md ", "/repo/backlog/tasks/back-1.md"], "/repo");
+
+			expect(calls).toEqual([{ paths: ["/repo/backlog/tasks/back-1.md"], repoRoot: "/repo" }]);
+			expect(capturedArgs).toEqual(["reset", "HEAD", "--", "backlog/tasks/back-1.md"]);
+		});
+	});
+
 	describe("isRepository", () => {
 		it("coalesces concurrent checks and reuses positive results per directory", async () => {
 			const git = new GitOperations(process.cwd());

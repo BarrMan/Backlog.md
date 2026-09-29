@@ -1,5 +1,6 @@
 import type { BoxInterface, ScreenInterface } from "neo-neo-bblessed";
 import { box, log } from "neo-neo-bblessed";
+import { keymapKeys } from "./keymap.ts";
 import { createScreen } from "./tui.ts";
 
 /**
@@ -120,7 +121,7 @@ function createLoadingScreenBase(config: LoadingScreenConfig): {
 	}
 
 	// Handle escape/Ctrl+C to close AND exit process immediately
-	screen.key(["escape", "C-c", "q"], () => {
+	screen.key(keymapKeys("shared", "quit"), () => {
 		if (!closed) {
 			closed = true;
 			if (spinnerInterval) clearInterval(spinnerInterval);
@@ -147,64 +148,6 @@ function createLoadingScreenBase(config: LoadingScreenConfig): {
 		update: () => {}, // Will be overridden by specific implementations
 		close,
 	};
-}
-
-/**
- * Show a loading screen while an async operation runs.
- * Falls back to console.log if blessed is not available.
- *
- * @param message - The message to display during loading
- * @param operation - The async operation to run while showing the loading screen
- * @returns The result of the async operation
- *
- * @example
- * const result = await withLoadingScreen("Loading data", async () => {
- *   return await fetchDataFromAPI();
- * });
- */
-export async function withLoadingScreen<T>(message: string, operation: () => Promise<T>): Promise<T> {
-	const base = createLoadingScreenBase({
-		message,
-		width: 60, // Larger width to prevent wrapping
-		height: 5, // Compact height
-		showSpinner: true,
-		spinnerPosition: "center",
-	});
-
-	// Non-TTY fallback handled in base
-	if (!base.screen) {
-		return operation();
-	}
-
-	// Add message text to loading box - ensure it doesn't overlap borders
-	if (base.loadingBox) {
-		// Use a simple box for message line
-		box({
-			parent: base.loadingBox,
-			top: 0,
-			left: 2, // More space from left border
-			width: "100%-6", // Account for borders + padding (2 borders + 4 padding)
-			height: 1,
-			align: "center",
-			content: message,
-			style: {},
-		});
-	}
-
-	base.screen.render();
-
-	// Small delay to ensure loading screen renders before heavy async work starts
-	// This is especially important on Windows where the terminal might block
-	await new Promise((resolve) => setTimeout(resolve, 10));
-
-	try {
-		const result = await operation();
-		base.close();
-		return result;
-	} catch (error) {
-		base.close();
-		throw error;
-	}
 }
 
 /**

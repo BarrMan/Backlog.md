@@ -46,9 +46,8 @@ function commentItemsEqual(left: Task["comments"], right: Task["comments"]): boo
 	});
 }
 
-export function serializeTask(task: Task): string {
-	normalizeAssignee(task);
-	const frontmatter = {
+function taskFrontmatter(task: Task): Record<string, unknown> {
+	return {
 		id: task.id,
 		title: task.title,
 		status: task.status,
@@ -72,6 +71,20 @@ export function serializeTask(task: Task): string {
 		...(task.onStatusChange && { onStatusChange: task.onStatusChange }),
 		...(task.agentConfiguration && { agentConfiguration: task.agentConfiguration }),
 	};
+}
+
+function serializeMarkdownRecord(
+	content: string,
+	frontmatter: Record<string, unknown>,
+	ensureBlankLine = false,
+): string {
+	const serialized = stringifyFrontmatter(content, frontmatter);
+	return ensureBlankLine ? serialized.replace(/^(---\n(?:.*\n)*?---)\n(?!$)/, "$1\n\n") : serialized;
+}
+
+export function serializeTask(task: Task): string {
+	normalizeAssignee(task);
+	const frontmatter = taskFrontmatter(task);
 
 	let contentBody = task.rawContent ?? "";
 	const rawContent = task.rawContent ?? "";
@@ -123,9 +136,7 @@ export function serializeTask(task: Task): string {
 		contentBody = updateTaskFinalSummary(contentBody, task.finalSummary);
 	}
 
-	const serialized = stringifyFrontmatter(contentBody, frontmatter);
-	// Ensure there's a blank line between frontmatter and content
-	return serialized.replace(/^(---\n(?:.*\n)*?---)\n(?!$)/, "$1\n\n");
+	return serializeMarkdownRecord(contentBody, frontmatter, true);
 }
 
 export function serializeDecision(decision: Decision): string {
@@ -144,7 +155,7 @@ export function serializeDecision(decision: Decision): string {
 		content += `\n\n## Alternatives\n\n${decision.alternatives}`;
 	}
 
-	return stringifyFrontmatter(content, frontmatter);
+	return serializeMarkdownRecord(content, frontmatter);
 }
 
 export function serializeDocument(document: Document): string {
@@ -157,90 +168,31 @@ export function serializeDocument(document: Document): string {
 		...(document.tags && document.tags.length > 0 && { tags: document.tags }),
 	};
 
-	return stringifyFrontmatter(document.rawContent, frontmatter);
+	return serializeMarkdownRecord(document.rawContent, frontmatter);
 }
 
-export function updateTaskAcceptanceCriteria(content: string, criteria: string[]): string {
-	// Normalize to LF while computing, preserve original EOL at return
-	const useCRLF = /\r\n/.test(content);
-	const src = content.replace(/\r\n/g, "\n");
-	// Find if there's already an Acceptance Criteria section
-	const criteriaRegex = /## Acceptance Criteria\s*\n([\s\S]*?)(?=\n## |$)/i;
-	const match = src.match(criteriaRegex);
+type EditableTaskSection = "description" | "implementationPlan" | "implementationNotes" | "finalSummary";
 
-	const newCriteria = criteria.map((criterion) => `- [ ] ${criterion}`).join("\n");
-	const newSection = `## Acceptance Criteria\n\n${newCriteria}`;
-
-	let out: string | undefined;
-	if (match) {
-		// Replace existing section
-		out = src.replace(criteriaRegex, newSection);
-	} else {
-		// Add new section at the end
-		out = `${src}\n\n${newSection}`;
-	}
-	return useCRLF ? out.replace(/\n/g, "\r\n") : out;
+function updateTaskSection(content: string, section: EditableTaskSection, value: string): string {
+	return updateStructuredSections(content, { ...getStructuredSections(content), [section]: value });
 }
 
-export function updateTaskImplementationPlan(content: string, plan: string): string {
-	const sections = getStructuredSections(content);
-	return updateStructuredSections(content, {
-		description: sections.description ?? "",
-		implementationPlan: plan,
-		implementationNotes: sections.implementationNotes ?? "",
-		finalSummary: sections.finalSummary ?? "",
-	});
+function updateTaskImplementationPlan(content: string, plan: string): string {
+	return updateTaskSection(content, "implementationPlan", plan);
 }
 
 export function updateTaskImplementationNotes(content: string, notes: string): string {
-	const sections = getStructuredSections(content);
-	return updateStructuredSections(content, {
-		description: sections.description ?? "",
-		implementationPlan: sections.implementationPlan ?? "",
-		implementationNotes: notes,
-		finalSummary: sections.finalSummary ?? "",
-	});
+	return updateTaskSection(content, "implementationNotes", notes);
 }
 
-export function updateTaskFinalSummary(content: string, summary: string): string {
-	const sections = getStructuredSections(content);
-	return updateStructuredSections(content, {
-		description: sections.description ?? "",
-		implementationPlan: sections.implementationPlan ?? "",
-		implementationNotes: sections.implementationNotes ?? "",
-		finalSummary: summary,
-	});
+function updateTaskFinalSummary(content: string, summary: string): string {
+	return updateTaskSection(content, "finalSummary", summary);
 }
 
-export function updateTaskComments(content: string, comments: NonNullable<Task["comments"]>): string {
+function updateTaskComments(content: string, comments: NonNullable<Task["comments"]>): string {
 	return CommentsManager.updateContent(content, comments);
 }
 
-export function appendTaskImplementationNotes(content: string, notesChunks: string | string[]): string {
-	const chunks = (Array.isArray(notesChunks) ? notesChunks : [notesChunks])
-		.map((c) => String(c))
-		.map((c) => c.replace(/\r\n/g, "\n"))
-		.map((c) => c.trim())
-		.filter(Boolean);
-
-	const sections = getStructuredSections(content);
-	const appendedBlock = chunks.join("\n\n");
-	const existingNotes = sections.implementationNotes?.trim();
-	const combined = existingNotes ? `${existingNotes}\n\n${appendedBlock}` : appendedBlock;
-	return updateStructuredSections(content, {
-		description: sections.description ?? "",
-		implementationPlan: sections.implementationPlan ?? "",
-		implementationNotes: combined,
-		finalSummary: sections.finalSummary ?? "",
-	});
-}
-
 export function updateTaskDescription(content: string, description: string): string {
-	const sections = getStructuredSections(content);
-	return updateStructuredSections(content, {
-		description,
-		implementationPlan: sections.implementationPlan ?? "",
-		implementationNotes: sections.implementationNotes ?? "",
-		finalSummary: sections.finalSummary ?? "",
-	});
+	return updateTaskSection(content, "description", description);
 }

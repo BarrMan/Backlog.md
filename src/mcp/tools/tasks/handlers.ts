@@ -18,7 +18,7 @@ import {
 	createMilestoneFilterValueResolver,
 	type MilestoneFilterValueResolver,
 } from "../../../utils/milestone-filter.ts";
-import { resolveMilestoneInputForStorage } from "../../../utils/milestone-storage.ts";
+import { resolveMilestoneInputFromFilesystem } from "../../../utils/milestone-storage.ts";
 import { buildTaskUpdateInput } from "../../../utils/task-edit-builder.ts";
 import { applyTaskFilters, createTaskSearchIndex } from "../../../utils/task-search.ts";
 import { sortByOrdinalAndPriority } from "../../../utils/task-sorting.ts";
@@ -75,15 +75,44 @@ export type TaskSearchArgs = {
 	limit?: number;
 };
 
+function textResult(text: string): CallToolResult {
+	return { content: [{ type: "text", text }] };
+}
+
+function noTasksResult(query?: string): CallToolResult {
+	return textResult(query === undefined ? "No tasks found." : `No tasks found for "${query}".`);
+}
+
+function taskOperationError(error: unknown, isLockError: (error: unknown) => error is Error): BacklogToolError {
+	if (isLockError(error)) {
+		return new BacklogToolError(error.message, "OPERATION_FAILED");
+	}
+	return new BacklogToolError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR");
+}
+
+function buildTaskListFilters(args: TaskListArgs): TaskListFilter | undefined {
+	const filters: TaskListFilter = Object.fromEntries(
+		Object.entries({
+			status: args.status,
+			type: args.type?.length ? args.type : undefined,
+			project: args.project?.length ? args.project : undefined,
+			assignee: args.assignee,
+			unassigned: args.unassigned || undefined,
+			milestone: args.milestone,
+		}).filter(([, value]) => value !== undefined && value !== ""),
+	);
+	if (args.labels?.length) {
+		filters.labels = args.labels;
+		filters.labelMatch = "all";
+	}
+	return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
 export class TaskHandlers {
 	constructor(private readonly core: McpServer) {}
 
 	private async resolveMilestoneInput(milestone: string): Promise<string> {
-		const [activeMilestones, archivedMilestones] = await Promise.all([
-			this.core.filesystem.listMilestones(),
-			this.core.filesystem.listArchivedMilestones(),
-		]);
-		return resolveMilestoneInputForStorage(milestone, activeMilestones, archivedMilestones);
+		return resolveMilestoneInputFromFilesystem(milestone, this.core.filesystem);
 	}
 
 	private async createMilestoneFilterValueResolver(): Promise<MilestoneFilterValueResolver> {
@@ -163,13 +192,7 @@ export class TaskHandlers {
 
 			return await formatTaskCallResult(await loadTaskDetail(this.core, createdTask));
 		} catch (error) {
-			if (isCreateLockError(error)) {
-				throw new BacklogToolError(error.message, "OPERATION_FAILED");
-			}
-			if (error instanceof Error) {
-				throw new BacklogToolError(error.message, "VALIDATION_ERROR");
-			}
-			throw new BacklogToolError(String(error), "VALIDATION_ERROR");
+			throw taskOperationError(error, isCreateLockError);
 		}
 	}
 
@@ -178,154 +201,45 @@ export class TaskHandlers {
 			throw new BacklogToolError("unassigned cannot be combined with assignee.", "VALIDATION_ERROR");
 		}
 		const config = await this.core.filesystem.loadConfig();
-		const priorities = config?.priorities;
 		if (this.isDraftStatus(args.status)) {
-			let drafts = applyTaskFilters(await this.core.filesystem.listDrafts(), {
-				query: args.search,
-				// Searching drafts has always narrowed to the literal "Draft" status; listing them has not.
-				status: args.search || args.type?.length || args.project?.length ? "Draft" : undefined,
-				type: args.type,
-				project: args.project,
-				assignee: args.assignee,
-				unassigned: args.unassigned,
-				milestone: args.milestone,
-				resolveMilestoneLabel: args.milestone ? await this.createMilestoneFilterValueResolver() : undefined,
-				labels: args.labels,
-				labelMatch: "all",
-			});
-			if (args.ready) {
-				drafts = (await loadTaskListItems(this.core, drafts)).filter((draft) => draft.isReady);
-			}
+			return await this.listDraftTasks(args, config?.priorities);
+		}
+		return await this.listActiveTasks(args, config?.priorities, config?.statuses ?? []);
+	}
 
-			if (drafts.length === 0) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "No tasks found.",
-						},
-					],
-				};
-			}
+	private async listDraftTasks(args: TaskListArgs, priorities?: string[]): Promise<CallToolResult> {
+		let drafts = applyTaskFilters(await this.core.filesystem.listDrafts(), {
+			query: args.search,
+			status: args.search || args.type?.length || args.project?.length ? "Draft" : undefined,
+			type: args.type,
+			project: args.project,
+			assignee: args.assignee,
+			unassigned: args.unassigned,
+			milestone: args.milestone,
+			resolveMilestoneLabel: args.milestone ? await this.createMilestoneFilterValueResolver() : undefined,
+			labels: args.labels,
+			labelMatch: "all",
+		});
+		if (args.ready) drafts = (await loadTaskListItems(this.core, drafts)).filter((draft) => draft.isReady);
+		const sortedDrafts = this.applyLimit(sortByOrdinalAndPriority(drafts, priorities), args.limit);
+		return sortedDrafts.length === 0
+			? noTasksResult()
+			: textResult(["Draft:", ...sortedDrafts.map((task) => this.formatTaskSummaryLine(task))].join("\n"));
+	}
 
-			let sortedDrafts = sortByOrdinalAndPriority(drafts, priorities);
-			if (typeof args.limit === "number" && args.limit >= 0) {
-				sortedDrafts = sortedDrafts.slice(0, args.limit);
-			}
-			const lines = ["Draft:"];
-			for (const draft of sortedDrafts) {
-				lines.push(this.formatTaskSummaryLine(draft));
-			}
-
-			return {
-				content: [
-					{
-						type: "text",
-						text: lines.join("\n"),
-					},
-				],
-			};
-		}
-
-		const filters: TaskListFilter = {};
-		if (args.status) {
-			filters.status = args.status;
-		}
-		if (args.type?.length) {
-			filters.type = args.type;
-		}
-		if (args.project?.length) {
-			filters.project = args.project;
-		}
-		if (args.assignee) {
-			filters.assignee = args.assignee;
-		}
-		if (args.unassigned) {
-			filters.unassigned = true;
-		}
-		if (args.milestone) {
-			filters.milestone = args.milestone;
-		}
-		if (args.labels?.length) {
-			filters.labels = args.labels;
-			filters.labelMatch = "all";
-		}
-
+	private async listActiveTasks(
+		args: TaskListArgs,
+		priorities: string[] | undefined,
+		statuses: string[],
+	): Promise<CallToolResult> {
 		let tasks = await this.core.queryTasks({
 			query: args.search,
-			filters: Object.keys(filters).length > 0 ? filters : undefined,
+			filters: buildTaskListFilters(args),
 			includeCrossBranch: false,
 		});
-
-		if (args.ready) {
-			// The same shared verdict `task list --ready` filters on, resolved against the whole
-			// corpus rather than the tasks the filters above left.
-			tasks = (await loadTaskListItems(this.core, tasks)).filter((task) => task.isReady);
-		}
-
-		const filteredByLabels = tasks.filter((task) => isLocalEditableTask(task));
-
-		if (filteredByLabels.length === 0) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: "No tasks found.",
-					},
-				],
-			};
-		}
-
-		const statuses = config?.statuses ?? [];
-
-		const canonicalByLower = new Map<string, string>();
-		for (const status of statuses) {
-			canonicalByLower.set(status.toLowerCase(), status);
-		}
-
-		const grouped = new Map<string, Task[]>();
-		for (const task of filteredByLabels) {
-			const rawStatus = (task.status ?? "").trim();
-			const canonicalStatus = canonicalByLower.get(rawStatus.toLowerCase()) ?? rawStatus;
-			const bucketKey = canonicalStatus || "";
-			const existing = grouped.get(bucketKey) ?? [];
-			existing.push(task);
-			grouped.set(bucketKey, existing);
-		}
-
-		const orderedStatuses = [
-			...statuses.filter((status) => grouped.has(status)),
-			...Array.from(grouped.keys()).filter((status) => !statuses.includes(status)),
-		];
-
-		const contentItems: Array<{ type: "text"; text: string }> = [];
-		let remaining = typeof args.limit === "number" && args.limit >= 0 ? args.limit : undefined;
-		for (const status of orderedStatuses) {
-			const bucket = grouped.get(status) ?? [];
-			const sortedBucket = sortByOrdinalAndPriority(bucket, priorities);
-			const limitedBucket = remaining !== undefined ? sortedBucket.slice(0, remaining) : sortedBucket;
-			if (remaining !== undefined) {
-				remaining -= limitedBucket.length;
-			}
-			if (limitedBucket.length === 0) {
-				continue;
-			}
-			const sectionLines: string[] = [`${status || "No Status"}:`];
-			for (const task of limitedBucket) {
-				sectionLines.push(this.formatTaskSummaryLine(task));
-			}
-			contentItems.push({
-				type: "text",
-				text: sectionLines.join("\n"),
-			});
-		}
-
-		if (contentItems.length === 0) {
-			contentItems.push({
-				type: "text",
-				text: "No tasks found.",
-			});
-		}
+		if (args.ready) tasks = (await loadTaskListItems(this.core, tasks)).filter((task) => task.isReady);
+		const contentItems = this.groupTaskList(tasks.filter(isLocalEditableTask), statuses, priorities, args.limit);
+		if (contentItems.length === 0) contentItems.push({ type: "text", text: "No tasks found." });
 
 		try {
 			const duplicateGroups = await findLocalDuplicateTaskIds(this.core);
@@ -344,10 +258,48 @@ export class TaskHandlers {
 		};
 	}
 
+	private applyLimit(tasks: Task[], limit?: number): Task[] {
+		return typeof limit === "number" && limit >= 0 ? tasks.slice(0, limit) : tasks;
+	}
+
+	private groupTaskList(
+		tasks: Task[],
+		statuses: string[],
+		priorities: string[] | undefined,
+		limit?: number,
+	): Array<{ type: "text"; text: string }> {
+		const canonical = new Map(statuses.map((status) => [status.toLowerCase(), status]));
+		const grouped = new Map<string, Task[]>();
+		for (const task of tasks) {
+			const status = (task.status ?? "").trim();
+			const key = canonical.get(status.toLowerCase()) ?? status;
+			grouped.set(key, [...(grouped.get(key) ?? []), task]);
+		}
+		let remaining = typeof limit === "number" && limit >= 0 ? limit : undefined;
+		return [
+			...statuses.filter((status) => grouped.has(status)),
+			...[...grouped.keys()].filter((status) => !statuses.includes(status)),
+		].flatMap((status) => {
+			const bucket =
+				remaining === undefined
+					? sortByOrdinalAndPriority(grouped.get(status) ?? [], priorities)
+					: sortByOrdinalAndPriority(grouped.get(status) ?? [], priorities).slice(0, remaining);
+			if (remaining !== undefined) remaining -= bucket.length;
+			return bucket.length
+				? [
+						{
+							type: "text" as const,
+							text: [`${status || "No Status"}:`, ...bucket.map((task) => this.formatTaskSummaryLine(task))].join("\n"),
+						},
+					]
+				: [];
+		});
+	}
+
 	async searchTasks(args: TaskSearchArgs): Promise<CallToolResult> {
 		const query = args.query?.trim() ?? "";
 		const modifiedFiles = args.modifiedFiles?.map((file) => file.trim()).filter((file) => file.length > 0);
-		if (!query && (!modifiedFiles || modifiedFiles.length === 0) && !args.type?.length && !args.project?.length) {
+		if (!this.hasSearchCriteria(query, modifiedFiles, args)) {
 			throw new BacklogToolError(
 				"Search query, modifiedFiles, type filter, or project filter is required",
 				"VALIDATION_ERROR",
@@ -355,85 +307,39 @@ export class TaskHandlers {
 		}
 
 		if (this.isDraftStatus(args.status)) {
-			const drafts = await this.core.filesystem.listDrafts();
-			const searchIndex = createTaskSearchIndex(drafts);
-			let draftMatches = searchIndex.search({
+			return this.searchTaskCollection(await this.core.filesystem.listDrafts(), args, query, modifiedFiles, false);
+		}
+		return this.searchTaskCollection(await this.core.loadWorkingCopyTasks(true), args, query, modifiedFiles, true);
+	}
+
+	private hasSearchCriteria(query: string, modifiedFiles: string[] | undefined, args: TaskSearchArgs): boolean {
+		return Boolean(query || modifiedFiles?.length || args.type?.length || args.project?.length);
+	}
+
+	private searchTaskCollection(
+		tasks: Task[],
+		args: TaskSearchArgs,
+		query: string,
+		modifiedFiles: string[] | undefined,
+		localOnly: boolean,
+	): CallToolResult {
+		const matches = this.applyLimit(
+			createTaskSearchIndex(tasks).search({
 				query,
-				status: "Draft",
+				status: this.isDraftStatus(args.status) ? "Draft" : args.status,
 				type: args.type,
 				project: args.project,
 				priority: args.priority,
 				modifiedFiles,
-			});
-			if (typeof args.limit === "number" && args.limit >= 0) {
-				draftMatches = draftMatches.slice(0, args.limit);
-			}
-
-			if (draftMatches.length === 0) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `No tasks found for "${query || modifiedFiles?.join(", ")}".`,
-						},
-					],
-				};
-			}
-
-			const lines: string[] = ["Tasks:"];
-			for (const draft of draftMatches) {
-				lines.push(this.formatTaskSummaryLine(draft, { includeStatus: true }));
-			}
-
-			return {
-				content: [
-					{
-						type: "text",
-						text: lines.join("\n"),
-					},
-				],
-			};
-		}
-
-		const tasks = await this.core.loadWorkingCopyTasks(true);
-		const searchIndex = createTaskSearchIndex(tasks);
-		let taskMatches = searchIndex.search({
-			query,
-			status: args.status,
-			type: args.type,
-			project: args.project,
-			priority: args.priority,
-			modifiedFiles,
-		});
-		if (typeof args.limit === "number" && args.limit >= 0) {
-			taskMatches = taskMatches.slice(0, args.limit);
-		}
-
-		const taskResults = taskMatches.filter((task) => isLocalEditableTask(task));
-		if (taskResults.length === 0) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `No tasks found for "${query || modifiedFiles?.join(", ")}".`,
-					},
-				],
-			};
-		}
-
-		const lines: string[] = ["Tasks:"];
-		for (const task of taskResults) {
-			lines.push(this.formatTaskSummaryLine(task, { includeStatus: true }));
-		}
-
-		return {
-			content: [
-				{
-					type: "text",
-					text: lines.join("\n"),
-				},
-			],
-		};
+			}),
+			args.limit,
+		).filter((task) => !localOnly || isLocalEditableTask(task));
+		const searchText = query || modifiedFiles?.join(", ") || "";
+		return matches.length === 0
+			? noTasksResult(searchText)
+			: textResult(
+					["Tasks:", ...matches.map((task) => this.formatTaskSummaryLine(task, { includeStatus: true }))].join("\n"),
+				);
 	}
 
 	async viewTask(args: { id: string }): Promise<CallToolResult> {
@@ -519,29 +425,6 @@ export class TaskHandlers {
 		});
 	}
 
-	async demoteTask(args: { id: string }): Promise<CallToolResult> {
-		const task = await this.loadTaskOrThrow(args.id);
-		let demotion: VacatedTaskResult;
-		try {
-			demotion = await this.core.demoteTask(task.id, false);
-		} catch (error) {
-			if (isCreateLockError(error)) {
-				throw new BacklogToolError(error.message, "OPERATION_FAILED");
-			}
-			throw error;
-		}
-		if (!demotion.success) {
-			throw new BacklogToolError(`Failed to demote task: ${args.id}`, "OPERATION_FAILED");
-		}
-
-		const refreshed = (await this.core.getTask(task.id)) ?? task;
-		const cleanupMessage = formatDependencyCleanupMessage(task.id, demotion.cleanedTaskIds);
-		return await formatTaskCallResult(
-			await loadTaskDetail(this.core, refreshed),
-			cleanupMessage ? [`${cleanupMessage}.`] : undefined,
-		);
-	}
-
 	async editTask(args: TaskEditRequest): Promise<CallToolResult> {
 		try {
 			const rawOrdinal = (args as { ordinal?: unknown }).ordinal;
@@ -560,13 +443,7 @@ export class TaskHandlers {
 				cleanupMessage ? [`${cleanupMessage}.`] : undefined,
 			);
 		} catch (error) {
-			if (isTaskLockError(error)) {
-				throw new BacklogToolError(error.message, "OPERATION_FAILED");
-			}
-			if (error instanceof Error) {
-				throw new BacklogToolError(error.message, "VALIDATION_ERROR");
-			}
-			throw new BacklogToolError(String(error), "VALIDATION_ERROR");
+			throw taskOperationError(error, isTaskLockError);
 		}
 	}
 }

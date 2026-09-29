@@ -5,37 +5,31 @@ import { DEFAULT_STATUSES } from "../constants/index.ts";
 import { Core, TaskArchiveStatusError } from "../core/backlog.ts";
 import type { ContentStore } from "../core/content-store.ts";
 import { initializeProject } from "../core/init.ts";
+import { MilestoneWorkflow, MilestoneWorkflowError } from "../core/milestone-workflow.ts";
+import { collectMilestoneAliasKeys } from "../core/milestones.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
 import { loadTaskDetail } from "../core/task-detail.ts";
 import { isCreateLockError, isTaskLockError } from "../file-system/operations.ts";
-import { BacklogToolError } from "../mcp/errors/mcp-errors.ts";
-import { MilestoneHandlers } from "../mcp/tools/milestones/handlers.ts";
-import {
-	DOCUMENT_TYPE_VALUES,
-	type Document,
-	type SearchPriorityFilter,
-	type SearchResultType,
-	type Task,
-	type TaskUpdateInput,
-} from "../types/index.ts";
+import { DOCUMENT_TYPE_VALUES, type Document, type Task } from "../types/index.ts";
 import { launchBrowser } from "../utils/browser-launch.ts";
 import type { BrowserLoadingState } from "../utils/browser-loading-state.ts";
-import { normalizeDueDate } from "../utils/due-date.ts";
 import { isAmbiguousIdError } from "../utils/entity-id.ts";
-import { resolveMilestoneInputForStorage } from "../utils/milestone-storage.ts";
-import { DRAFT_PREFIX, extractAnyPrefix, getTaskPrefixError } from "../utils/prefix-config.ts";
+import { resolveMilestoneInputFromFilesystem } from "../utils/milestone-storage.ts";
+import { DRAFT_PREFIX, extractAnyPrefix } from "../utils/prefix-config.ts";
 import { formatValidPriorityValues, resolvePriorityValue } from "../utils/priority-config.ts";
-import {
-	formatValidProjectValues,
-	getProjectValues,
-	noProjectsConfiguredMessage,
-	resolveProjectValues,
-} from "../utils/project-config.ts";
 import { formatValidStatuses, getCanonicalStatuses, getValidStatuses } from "../utils/status.ts";
 import { isValidTaskId } from "../utils/task-id.ts";
 import { isAmbiguousTaskIdError, LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
 import { getVersion } from "../utils/version.ts";
+import { parseSearchRequest } from "./search.ts";
+import {
+	normalizeAcceptanceCriteriaItems,
+	parseDocumentUpdate,
+	parseDueDate,
+	parseInitInput,
+	parseTaskUpdate,
+} from "./validation.ts";
 
 // Regex pattern to match any prefix (letters followed by dash)
 const PREFIX_PATTERN = /^[a-zA-Z]+-/i;
@@ -62,8 +56,6 @@ function formatErrorForWeb(message: string): string {
 	return message.replace(LOCAL_TASK_LOOKUP_HINT, WEB_TASK_LOOKUP_HINT);
 }
 
-type DueDatePayloadResult = { ok: true; value: string | null | undefined } | { ok: false; error: string };
-
 /**
  * Read the marker core attaches when a mutation failed after the record had already moved. The
  * response carries it so a client refreshes and reports what happened instead of retrying a move
@@ -78,21 +70,6 @@ function readDemotionFailureCause(error: unknown): "cleanup" | "commit" | undefi
 	const cause =
 		typeof error === "object" && error !== null ? (error as Record<string, unknown>).demotionFailureCause : undefined;
 	return cause === "cleanup" || cause === "commit" ? cause : undefined;
-}
-
-function parseDueDatePayload(value: unknown, clearable: boolean): DueDatePayloadResult {
-	if (value === undefined) return { ok: true, value: undefined };
-	if (value === null) {
-		return clearable ? { ok: true, value: null } : { ok: false, error: "Due date must be a string." };
-	}
-	if (typeof value !== "string") {
-		return { ok: false, error: `Due date must be a string${clearable ? " or null" : ""}.` };
-	}
-	try {
-		return { ok: true, value: normalizeDueDate(value, "Due date") };
-	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
-	}
 }
 
 class DocumentPayloadValidationError extends Error {
@@ -136,16 +113,6 @@ function parseCreateDocumentPath(value: unknown): string | undefined {
 		throw new DocumentPayloadValidationError("Document path must be a string.");
 	}
 	return value;
-}
-
-function parseUpdateDocumentPath(value: unknown): string | null | undefined {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (value === null || typeof value === "string") {
-		return value;
-	}
-	throw new DocumentPayloadValidationError("Document path must be a string or null.");
 }
 
 function collectDelimitedSearchParams(url: URL, names: string[]): string[] {
@@ -220,8 +187,11 @@ export function markHtmlBundleNoStore(bundle: Bun.HTMLBundle): Bun.HTMLBundle {
 const spaIndexHtml = markHtmlBundleNoStore(indexHtml);
 const BUNDLE_ASSET_DIR_ENV = "BACKLOG_BUNDLE_ASSET_DIR";
 const BROWSER_HOST = "127.0.0.1";
+const DEFAULT_BROWSER_PORT = 6420;
 const MIN_PORT = 1;
 const MAX_PORT = 65535;
+const DATA_BROADCAST_DEBOUNCE_MS = 75;
+const SERVER_STOP_TIMEOUT_MS = 1500;
 
 export async function isPortAvailable(port: number): Promise<boolean> {
 	if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) return false;
@@ -266,11 +236,7 @@ export class BacklogServer {
 	}
 
 	private async resolveMilestoneInput(milestone: string): Promise<string> {
-		const [activeMilestones, archivedMilestones] = await Promise.all([
-			this.core.filesystem.listMilestones(),
-			this.core.filesystem.listArchivedMilestones(),
-		]);
-		return resolveMilestoneInputForStorage(milestone, activeMilestones, archivedMilestones);
+		return resolveMilestoneInputFromFilesystem(milestone, this.core.filesystem);
 	}
 
 	private async ensureServicesReady(): Promise<void> {
@@ -346,6 +312,14 @@ export class BacklogServer {
 		return this.server?.port ?? null;
 	}
 
+	private broadcast(message: string) {
+		for (const ws of this.sockets) {
+			try {
+				ws.send(message);
+			} catch {}
+		}
+	}
+
 	private broadcastDataUpdated(scope: "tasks" | "milestones" = "tasks") {
 		// Milestone changes widen the message so clients also refetch milestone
 		// entities; the debounce keeps the widest scope seen in the window.
@@ -355,30 +329,147 @@ export class BacklogServer {
 			this.taskBroadcastTimer = undefined;
 			const message = this.pendingDataBroadcastScope === "milestones" ? "milestones-updated" : "tasks-updated";
 			this.pendingDataBroadcastScope = "tasks";
-			for (const ws of this.sockets) {
-				try {
-					ws.send(message);
-				} catch {}
-			}
-		}, 75);
+			this.broadcast(message);
+		}, DATA_BROADCAST_DEBOUNCE_MS);
 	}
 
 	private broadcastConfigUpdated() {
-		for (const ws of this.sockets) {
-			try {
-				ws.send("config-updated");
-			} catch {}
-		}
+		this.broadcast("config-updated");
 	}
 
 	private publishBrowserLoadingState(state: BrowserLoadingState) {
 		this.browserLoadingState = state;
 		const message = JSON.stringify(state);
-		for (const ws of this.sockets) {
-			try {
-				ws.send(message);
-			} catch {}
-		}
+		this.broadcast(message);
+	}
+
+	private createRoutes() {
+		return {
+			"/": spaIndexHtml,
+			"/tasks": spaIndexHtml,
+			"/tasks/*": spaIndexHtml,
+			"/board": spaIndexHtml,
+			"/board/*": spaIndexHtml,
+			"/milestones": spaIndexHtml,
+			"/drafts": spaIndexHtml,
+			"/documentation": spaIndexHtml,
+			"/documentation/*": spaIndexHtml,
+			"/decisions": spaIndexHtml,
+			"/decisions/*": spaIndexHtml,
+			"/statistics": spaIndexHtml,
+			"/settings": spaIndexHtml,
+			"/api/tasks": {
+				GET: async (req: Request) => await this.handleListTasks(req),
+				POST: async (req: Request) => await this.handleCreateTask(req),
+			},
+			"/api/task/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetTask(req.params.id),
+			},
+			"/api/tasks/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetTask(req.params.id),
+				PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateTask(req, req.params.id),
+				DELETE: async (req: Request & { params: { id: string } }) => await this.handleDeleteTask(req.params.id),
+			},
+			"/api/tasks/:id/complete": {
+				POST: async (req: Request & { params: { id: string } }) => await this.handleCompleteTask(req.params.id),
+			},
+			"/api/tasks/:id/demote": {
+				POST: async (req: Request & { params: { id: string } }) => await this.handleDemoteTask(req.params.id),
+			},
+			"/api/statuses": { GET: async () => await this.handleGetStatuses() },
+			"/api/config": {
+				GET: async () => await this.handleGetConfig(),
+				PUT: async (req: Request) => await this.handleUpdateConfig(req),
+			},
+			"/api/docs": {
+				GET: async () => await this.handleListDocs(),
+				POST: async (req: Request) => await this.handleCreateDoc(req),
+			},
+			"/api/doc/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetDoc(req.params.id),
+			},
+			"/api/docs/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetDoc(req.params.id),
+				PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateDoc(req, req.params.id),
+			},
+			"/api/decisions": {
+				GET: async () => await this.handleListDecisions(),
+				POST: async (req: Request) => await this.handleCreateDecision(req),
+			},
+			"/api/decision/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetDecision(req.params.id),
+			},
+			"/api/decisions/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetDecision(req.params.id),
+				PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateDecision(req, req.params.id),
+			},
+			"/api/drafts": { GET: async () => await this.handleListDrafts() },
+			"/api/drafts/:id/promote": {
+				POST: async (req: Request & { params: { id: string } }) => await this.handlePromoteDraft(req.params.id),
+			},
+			"/api/milestones": {
+				GET: async () => await this.handleListMilestones(),
+				POST: async (req: Request) => await this.handleCreateMilestone(req),
+			},
+			"/api/milestones/archived": { GET: async () => await this.handleListArchivedMilestones() },
+			"/api/milestones/:id": {
+				GET: async (req: Request & { params: { id: string } }) => await this.handleGetMilestone(req.params.id),
+				PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateMilestone(req, req.params.id),
+				DELETE: async (req: Request & { params: { id: string } }) =>
+					await this.handleRemoveMilestone(req, req.params.id),
+			},
+			"/api/milestones/:id/archive": {
+				POST: async (req: Request & { params: { id: string } }) => await this.handleArchiveMilestone(req.params.id),
+			},
+			"/api/tasks/reorder": { POST: async (req: Request) => await this.handleReorderTask(req) },
+			"/api/tasks/move": { POST: async (req: Request) => await this.handleMoveTasks(req) },
+			"/api/tasks/cleanup": { GET: async (req: Request) => await this.handleCleanupPreview(req) },
+			"/api/tasks/duplicates": {
+				GET: async () => await this.handleGetDuplicateTasks(),
+				POST: async (req: Request) => await this.handleRepairDuplicateTasks(req),
+			},
+			"/api/tasks/cleanup/execute": { POST: async (req: Request) => await this.handleCleanupExecute(req) },
+			"/api/version": { GET: async () => await this.handleGetVersion() },
+			"/api/statistics": { GET: async () => await this.handleGetStatistics() },
+			"/api/status": { GET: async () => await this.handleGetStatus() },
+			"/api/init": { POST: async (req: Request) => await this.handleInit(req) },
+			"/api/search": { GET: async (req: Request) => await this.handleSearch(req) },
+			"/assets/*": { GET: async (req: Request) => await this.handleAssetRequest(req) },
+		};
+	}
+
+	private async handleFetch(req: Request, server: Server<unknown>): Promise<Response> {
+		const response = await this.handleRequest(req, server);
+		if (req.method === "GET" || req.method === "HEAD") applyNoStoreHeaders(response.headers);
+		return response;
+	}
+
+	private createWebSocketHandlers() {
+		return {
+			open: (ws: ServerWebSocket) => {
+				this.sockets.add(ws);
+				ws.send(JSON.stringify(this.browserLoadingState));
+				if (this.browserLoadingState.type === "loading") void this.ensureServicesReady().catch(() => {});
+			},
+			message(ws: ServerWebSocket) {
+				ws.send("pong");
+			},
+			close: (ws: ServerWebSocket) => {
+				this.sockets.delete(ws);
+			},
+		};
+	}
+
+	private createServeOptions(port: number) {
+		return {
+			port,
+			hostname: BROWSER_HOST,
+			development: process.env.NODE_ENV === "development",
+			routes: this.createRoutes(),
+			fetch: this.handleFetch.bind(this),
+			error: this.handleError.bind(this),
+			websocket: this.createWebSocketHandlers(),
+		};
 	}
 
 	async start(port?: number, openBrowser = true): Promise<void> {
@@ -392,7 +483,7 @@ export class BacklogServer {
 		const config = await this.core.filesystem.loadConfig();
 
 		// Use config default port if no port specified
-		const finalPort = port ?? config?.defaultPort ?? 6420;
+		const finalPort = port ?? config?.defaultPort ?? DEFAULT_BROWSER_PORT;
 		this.projectName = config?.projectName || "Untitled Project";
 
 		// Check if browser should open (config setting or CLI override)
@@ -400,10 +491,8 @@ export class BacklogServer {
 		const shouldOpenBrowser = openBrowser && (config?.autoOpenBrowser ?? true);
 
 		try {
-			const serveOptions = {
-				port: finalPort,
-				hostname: BROWSER_HOST,
-				development: process.env.NODE_ENV === "development",
+			const serveOptions = this.createServeOptions(finalPort);
+			/*
 				routes: {
 					"/": spaIndexHtml,
 					"/tasks": spaIndexHtml,
@@ -527,34 +616,7 @@ export class BacklogServer {
 						GET: async (req: Request) => await this.handleAssetRequest(req),
 					},
 				},
-				fetch: async (req: Request, server: Server<unknown>) => {
-					const res = await this.handleRequest(req, server);
-
-					// Disable caching for GET/HEAD so browser always fetches latest content
-					if (req.method === "GET" || req.method === "HEAD") {
-						applyNoStoreHeaders(res.headers);
-					}
-
-					return res;
-				},
-				error: this.handleError.bind(this),
-				websocket: {
-					open: (ws: ServerWebSocket) => {
-						this.sockets.add(ws);
-						ws.send(JSON.stringify(this.browserLoadingState));
-						if (this.browserLoadingState.type === "loading") {
-							void this.ensureServicesReady().catch(() => {});
-						}
-					},
-					message(ws: ServerWebSocket) {
-						ws.send("pong");
-					},
-					close: (ws: ServerWebSocket) => {
-						this.sockets.delete(ws);
-					},
-				},
-				/* biome-ignore format: keep cast on single line below for type narrowing */
-			};
+			*/
 			const bundleAssetDirectory = process.env[BUNDLE_ASSET_DIR_ENV]?.trim();
 			if (bundleAssetDirectory) {
 				this.runtimeWorkingDirectory = process.cwd();
@@ -639,7 +701,7 @@ export class BacklogServer {
 					await serverRef.stop();
 				} catch {}
 			})();
-			const timeout = new Promise<void>((resolve) => setTimeout(resolve, 1500));
+			const timeout = new Promise<void>((resolve) => setTimeout(resolve, SERVER_STOP_TIMEOUT_MS));
 			await Promise.race([stopPromise, timeout]);
 			this.server = null;
 			console.log("Server stopped");
@@ -812,157 +874,14 @@ export class BacklogServer {
 
 	private async handleSearch(req: Request): Promise<Response> {
 		try {
-			const url = new URL(req.url);
-			const query = url.searchParams.get("query") ?? undefined;
-			const limitParam = url.searchParams.get("limit");
-			const typeParams = [...url.searchParams.getAll("type"), ...url.searchParams.getAll("types")];
-			const statusParams = url.searchParams.getAll("status");
-			const excludeStatusParams = collectDelimitedSearchParams(url, [
-				"excludeStatus",
-				"exclude-status",
-				"excludeStatuses",
-				"exclude-statuses",
-			]);
-			const priorityParamsRaw = url.searchParams.getAll("priority");
-			const projectParamsRaw = url.searchParams.getAll("project");
-			const assigneeParamsRaw = [...url.searchParams.getAll("assignee"), ...url.searchParams.getAll("assignees")];
-			const labelParamsRaw = [...url.searchParams.getAll("label"), ...url.searchParams.getAll("labels")];
-			const modifiedFileParamsRaw = [
-				...url.searchParams.getAll("modifiedFile"),
-				...url.searchParams.getAll("modifiedFiles"),
-			];
-			const assigneesCsv = url.searchParams.get("assignees");
-			if (assigneesCsv) {
-				assigneeParamsRaw.push(...assigneesCsv.split(","));
-			}
-			const labelsCsv = url.searchParams.get("labels");
-			if (labelsCsv) {
-				labelParamsRaw.push(...labelsCsv.split(","));
-			}
-			const modifiedFilesCsv = url.searchParams.get("modifiedFiles");
-			if (modifiedFilesCsv) {
-				modifiedFileParamsRaw.push(...modifiedFilesCsv.split(","));
-			}
-
-			let limit: number | undefined;
-			if (limitParam) {
-				const parsed = Number.parseInt(limitParam, 10);
-				if (Number.isNaN(parsed) || parsed <= 0) {
-					return Response.json({ error: "limit must be a positive integer" }, { status: 400 });
-				}
-				limit = parsed;
-			}
-
-			let types: SearchResultType[] | undefined;
-			if (typeParams.length > 0) {
-				const allowed: SearchResultType[] = ["task", "document", "decision"];
-				const normalizedTypes = typeParams
-					.map((value) => value.toLowerCase())
-					.filter((value): value is SearchResultType => {
-						return allowed.includes(value as SearchResultType);
-					});
-				if (normalizedTypes.length === 0) {
-					return Response.json({ error: "type must be task, document, or decision" }, { status: 400 });
-				}
-				types = normalizedTypes;
-			}
-
-			const filters: {
-				status?: string | string[];
-				excludeStatus?: string | string[];
-				priority?: SearchPriorityFilter | SearchPriorityFilter[];
-				project?: string | string[];
-				assignee?: string | string[];
-				labels?: string | string[];
-				modifiedFiles?: string | string[];
-			} = {};
-
-			if (statusParams.length === 1) {
-				filters.status = statusParams[0];
-			} else if (statusParams.length > 1) {
-				filters.status = statusParams;
-			}
-
-			if (excludeStatusParams.length > 0) {
-				const { values, invalid, validStatuses } = await getCanonicalStatuses(excludeStatusParams, this.core);
-				if (invalid.length > 0) {
-					return Response.json(
-						{
-							error: `Invalid excludeStatus filter: ${invalid.join(", ")}. Valid statuses are: ${formatValidStatuses(validStatuses)}`,
-						},
-						{ status: 400 },
-					);
-				}
-				filters.excludeStatus = values.length === 1 ? values[0] : values;
-			}
-
-			if (priorityParamsRaw.length > 0) {
-				const config = await this.core.filesystem.loadConfig();
-				const normalizedPriorities = priorityParamsRaw.map((value) => resolvePriorityValue(value, config));
-				const invalidPriority = priorityParamsRaw[normalizedPriorities.findIndex((value) => !value)];
-				if (invalidPriority) {
-					return Response.json(
-						{
-							error: `Unsupported priority '${invalidPriority}'. Use ${formatValidPriorityValues(config)}.`,
-						},
-						{ status: 400 },
-					);
-				}
-				const casted = normalizedPriorities.filter((value): value is SearchPriorityFilter => Boolean(value));
-				filters.priority = casted.length === 1 ? casted[0] : casted;
-			}
-
-			if (projectParamsRaw.length > 0) {
-				const config = await this.core.filesystem.loadConfig();
-				if (getProjectValues(config).length === 0) {
-					return Response.json(
-						{ error: noProjectsConfiguredMessage(this.core.filesystem.configFilePath) },
-						{ status: 400 },
-					);
-				}
-				const { values: canonicalProjects, invalid } = resolveProjectValues(projectParamsRaw, config);
-				if (invalid.length > 0) {
-					return Response.json(
-						{
-							error: `Unsupported project '${invalid[0]}'. Use ${formatValidProjectValues(config)}.`,
-						},
-						{ status: 400 },
-					);
-				}
-				filters.project = canonicalProjects.length === 1 ? canonicalProjects[0] : canonicalProjects;
-			}
-
-			if (assigneeParamsRaw.length > 0) {
-				const normalizedAssignees = assigneeParamsRaw.map((value) => value.trim()).filter((value) => value.length > 0);
-				if (normalizedAssignees.length > 0) {
-					filters.assignee = normalizedAssignees.length === 1 ? normalizedAssignees[0] : normalizedAssignees;
-				}
-			}
-
-			if (labelParamsRaw.length > 0) {
-				const normalizedLabels = labelParamsRaw.map((value) => value.trim()).filter((value) => value.length > 0);
-				if (normalizedLabels.length > 0) {
-					filters.labels = normalizedLabels.length === 1 ? normalizedLabels[0] : normalizedLabels;
-				}
-			}
-
-			if (modifiedFileParamsRaw.length > 0) {
-				const normalizedModifiedFiles = modifiedFileParamsRaw
-					.map((value) => value.trim())
-					.filter((value) => value.length > 0);
-				if (normalizedModifiedFiles.length > 0) {
-					filters.modifiedFiles =
-						normalizedModifiedFiles.length === 1 ? normalizedModifiedFiles[0] : normalizedModifiedFiles;
-				}
-			}
-
+			const parsed = await parseSearchRequest(new URL(req.url), this.core);
+			if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
 			const servicesWereReady = this.servicesInitialized;
 			const searchService = await this.getSearchServiceInstance();
-			if (servicesWereReady && (!types || types.includes("task"))) {
+			if (servicesWereReady && (!parsed.value.types || parsed.value.types.includes("task"))) {
 				await this.core.refreshTasksForTaskRead();
 			}
-
-			const results = searchService.search({ query, limit, types, filters });
+			const results = searchService.search(parsed.value);
 			return Response.json(results);
 		} catch (error) {
 			console.error("Error performing search:", error);
@@ -976,17 +895,10 @@ export class BacklogServer {
 		if (!payload || typeof payload.title !== "string" || payload.title.trim().length === 0) {
 			return Response.json({ error: "Title is required" }, { status: 400 });
 		}
-		const dueDate = parseDueDatePayload(payload.dueDate, false);
-		if (!dueDate.ok) return Response.json({ error: dueDate.error }, { status: 400 });
+		const dueDate = parseDueDate(payload.dueDate, false);
+		if ("error" in dueDate) return Response.json({ error: dueDate.error }, { status: 400 });
 
-		const acceptanceCriteria = Array.isArray(payload.acceptanceCriteriaItems)
-			? payload.acceptanceCriteriaItems
-					.map((item: { text?: string; checked?: boolean }) => ({
-						text: String(item?.text ?? "").trim(),
-						checked: Boolean(item?.checked),
-					}))
-					.filter((item: { text: string }) => item.text.length > 0)
-			: [];
+		const acceptanceCriteria = normalizeAcceptanceCriteriaItems(payload.acceptanceCriteriaItems);
 		const definitionOfDoneAdd = Array.isArray(payload.definitionOfDoneAdd)
 			? payload.definitionOfDoneAdd
 					.map((item: unknown) => String(item ?? "").trim())
@@ -1073,122 +985,11 @@ export class BacklogServer {
 	}
 
 	private async handleUpdateTask(req: Request, taskId: string): Promise<Response> {
-		const updates = await req.json();
-		const dueDate = parseDueDatePayload(updates?.dueDate, true);
-		if (!dueDate.ok) return Response.json({ error: dueDate.error }, { status: 400 });
-
-		const updateInput: TaskUpdateInput = {};
-		for (const [field, inputField] of [
-			["definitionOfDoneRemove", "removeDefinitionOfDone"],
-			["definitionOfDoneCheck", "checkDefinitionOfDone"],
-			["definitionOfDoneUncheck", "uncheckDefinitionOfDone"],
-		] as const) {
-			if (!(field in updates)) continue;
-			const indices = updates[field];
-			if (
-				!Array.isArray(indices) ||
-				indices.some((value: unknown) => typeof value !== "number" || !Number.isFinite(value))
-			) {
-				return Response.json({ error: `${field} must be an array of finite numbers.` }, { status: 400 });
-			}
-			updateInput[inputField] = indices;
-		}
-
-		if ("title" in updates && typeof updates.title === "string") {
-			updateInput.title = updates.title;
-		}
-
-		if ("dueDate" in updates) {
-			updateInput.dueDate = dueDate.value ?? null;
-		}
-
-		if ("description" in updates && typeof updates.description === "string") {
-			updateInput.description = updates.description;
-		}
-
-		if ("status" in updates && typeof updates.status === "string") {
-			updateInput.status = updates.status;
-		}
-
-		if ("priority" in updates && typeof updates.priority === "string") {
-			updateInput.priority = updates.priority;
-		}
-
-		if ("type" in updates && typeof updates.type === "string") {
-			updateInput.type = updates.type;
-		}
-
-		if ("project" in updates && (typeof updates.project === "string" || updates.project === null)) {
-			updateInput.project = updates.project;
-		}
-
-		if ("milestone" in updates && (typeof updates.milestone === "string" || updates.milestone === null)) {
-			if (typeof updates.milestone === "string") {
-				updateInput.milestone = await this.resolveMilestoneInput(updates.milestone);
-			} else {
-				updateInput.milestone = updates.milestone;
-			}
-		}
-
-		if ("labels" in updates && Array.isArray(updates.labels)) {
-			updateInput.labels = updates.labels;
-		}
-
-		if ("assignee" in updates && Array.isArray(updates.assignee)) {
-			updateInput.assignee = updates.assignee;
-		}
-
-		if ("dependencies" in updates && Array.isArray(updates.dependencies)) {
-			updateInput.dependencies = updates.dependencies;
-		}
-
-		if ("references" in updates && Array.isArray(updates.references)) {
-			updateInput.references = updates.references;
-		}
-
-		if ("modifiedFiles" in updates && Array.isArray(updates.modifiedFiles)) {
-			updateInput.modifiedFiles = updates.modifiedFiles;
-		}
-
-		if ("implementationPlan" in updates && typeof updates.implementationPlan === "string") {
-			updateInput.implementationPlan = updates.implementationPlan;
-		}
-
-		if ("implementationNotes" in updates && typeof updates.implementationNotes === "string") {
-			updateInput.implementationNotes = updates.implementationNotes;
-		}
-
-		if ("commentsAppend" in updates && Array.isArray(updates.commentsAppend)) {
-			const author =
-				typeof updates.commentAuthor === "string" && updates.commentAuthor.trim().length > 0
-					? updates.commentAuthor.trim()
-					: undefined;
-			updateInput.appendComments = updates.commentsAppend
-				.map((body: unknown) => ({
-					body: String(body ?? "").trim(),
-					...(author && { author }),
-				}))
-				.filter((comment: { body: string }) => comment.body.length > 0);
-		}
-
-		if ("finalSummary" in updates && typeof updates.finalSummary === "string") {
-			updateInput.finalSummary = updates.finalSummary;
-		}
-
-		if ("acceptanceCriteriaItems" in updates && Array.isArray(updates.acceptanceCriteriaItems)) {
-			updateInput.acceptanceCriteria = updates.acceptanceCriteriaItems
-				.map((item: { text?: string; checked?: boolean }) => ({
-					text: String(item?.text ?? "").trim(),
-					checked: Boolean(item?.checked),
-				}))
-				.filter((item: { text: string }) => item.text.length > 0);
-		}
-
-		if ("definitionOfDoneAdd" in updates && Array.isArray(updates.definitionOfDoneAdd)) {
-			updateInput.addDefinitionOfDone = updates.definitionOfDoneAdd
-				.map((item: unknown) => ({ text: String(item ?? "").trim(), checked: false }))
-				.filter((item: { text: string }) => item.text.length > 0);
-		}
+		const parsed = parseTaskUpdate(await req.json());
+		if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+		const updateInput = parsed.value;
+		if (typeof updateInput.milestone === "string")
+			updateInput.milestone = await this.resolveMilestoneInput(updateInput.milestone);
 
 		try {
 			// editTaskOrDraft keeps a draft a draft, or promotes it when a real status is requested.
@@ -1220,8 +1021,7 @@ export class BacklogServer {
 			if (!success) {
 				return Response.json({ error: "Task not found" }, { status: 404 });
 			}
-			this.broadcastDataUpdated();
-			return Response.json({ success: true, cleanedTaskIds });
+			return this.taskMoveSucceeded(cleanedTaskIds);
 		} catch (error) {
 			if (error instanceof TaskArchiveStatusError) {
 				return Response.json({ error: error.message }, { status: 400 });
@@ -1268,8 +1068,7 @@ export class BacklogServer {
 				return Response.json({ error: "Task not found" }, { status: 404 });
 			}
 
-			this.broadcastDataUpdated();
-			return Response.json({ success: true, cleanedTaskIds });
+			return this.taskMoveSucceeded(cleanedTaskIds);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Failed to demote task";
 			const conflict = isAmbiguousTaskIdError(error) || isCreateLockError(error) || isTaskLockError(error);
@@ -1291,6 +1090,11 @@ export class BacklogServer {
 				{ status },
 			);
 		}
+	}
+
+	private taskMoveSucceeded(cleanedTaskIds: string[]): Response {
+		this.broadcastDataUpdated();
+		return Response.json({ success: true, cleanedTaskIds });
 	}
 
 	private async handleGetStatuses(): Promise<Response> {
@@ -1371,32 +1175,17 @@ export class BacklogServer {
 
 	private async handleUpdateDoc(req: Request, docId: string): Promise<Response> {
 		try {
-			const body = await req.json();
-			const content = typeof body?.content === "string" ? body.content : undefined;
-			const title = typeof body?.title === "string" ? body.title : undefined;
-			const path = parseUpdateDocumentPath(body?.path);
-			const type = parseDocumentType(body?.type);
-			const tags = parseDocumentTags(body?.tags);
-
-			if (typeof content !== "string") {
-				return Response.json({ error: "Document content is required" }, { status: 400 });
-			}
-
-			let normalizedTitle: string | undefined;
-
-			if (typeof title === "string") {
-				normalizedTitle = title.trim();
-				if (normalizedTitle.length === 0) {
-					return Response.json({ error: "Document title cannot be empty" }, { status: 400 });
-				}
-			}
+			const parsed = parseDocumentUpdate(await req.json());
+			if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+			const { content, title, path, type, tags } = parsed.value;
+			const documentType = parseDocumentType(type);
 
 			const document = await this.core.updateDocumentFromInput({
 				id: docId,
 				content,
-				...(normalizedTitle && { title: normalizedTitle }),
+				...(title && { title }),
 				...(path !== undefined && { path }),
-				...(type !== undefined && { type }),
+				...(documentType !== undefined && { type: documentType }),
 				...(tags !== undefined && { tags }),
 			});
 			return Response.json({ success: true, ...document });
@@ -1576,26 +1365,19 @@ export class BacklogServer {
 		try {
 			body = JSON.parse(text);
 		} catch {
-			throw new BacklogToolError("Request body must be valid JSON.", "VALIDATION_ERROR");
+			throw new MilestoneWorkflowError("Request body must be valid JSON.", "VALIDATION_ERROR");
 		}
 
 		if (!body || typeof body !== "object" || Array.isArray(body)) {
-			throw new BacklogToolError("Request body must be a JSON object.", "VALIDATION_ERROR");
+			throw new MilestoneWorkflowError("Request body must be a JSON object.", "VALIDATION_ERROR");
 		}
 
 		return body as Record<string, unknown>;
 	}
 
-	private getMilestoneMutationMessage(result: { content: Array<{ type: string; text?: string }> }): string {
-		return result.content
-			.filter((item) => item.type === "text" && typeof item.text === "string")
-			.map((item) => item.text)
-			.join("\n");
-	}
-
 	private milestoneMutationErrorResponse(error: unknown, context: string): Response {
 		const status =
-			error instanceof BacklogToolError
+			error instanceof MilestoneWorkflowError
 				? error.code === "NOT_FOUND"
 					? 404
 					: error.code === "VALIDATION_ERROR"
@@ -1607,9 +1389,56 @@ export class BacklogServer {
 			console.error(context, error);
 		}
 		return Response.json(
-			{ error: message, code: error instanceof BacklogToolError ? error.code : "INTERNAL_ERROR" },
+			{ error: message, code: error instanceof MilestoneWorkflowError ? error.code : "INTERNAL_ERROR" },
 			{ status },
 		);
+	}
+
+	private formatMilestoneRenameMessage(result: Awaited<ReturnType<MilestoneWorkflow["rename"]>>): string {
+		if (!result.titleChanged && !result.dueDateChanged) {
+			return `Milestone "${result.source.title}" (${result.source.id}) is already named "${result.source.title}". No changes made.`;
+		}
+		const lines: string[] = [];
+		if (result.titleChanged) {
+			lines.push(
+				`Renamed milestone "${result.source.title}" (${result.source.id}) → "${result.milestone.title}" (${result.milestone.id}).`,
+			);
+		}
+		if (result.dueDateChanged) {
+			lines.push(result.milestone.dueDate ? `Due: ${result.milestone.dueDate}` : "Cleared milestone due date.");
+		}
+		if (result.skippedTaskUpdate) lines.push("Skipped updating tasks (updateTasks=false).");
+		else if (result.titleChanged) {
+			lines.push(
+				`Updated ${result.updatedTaskIds.length} local task${result.updatedTaskIds.length === 1 ? "" : "s"}: ${this.formatMilestoneTaskIds(result.updatedTaskIds)}`,
+			);
+		}
+		if (result.sourcePath && result.targetPath && result.sourcePath !== result.targetPath) {
+			lines.push(`Renamed milestone file: ${result.sourcePath} -> ${result.targetPath}`);
+		}
+		return lines.join("\n");
+	}
+
+	private formatMilestoneRemoveMessage(result: Awaited<ReturnType<MilestoneWorkflow["remove"]>>): string {
+		const lines = [`Removed milestone "${result.milestone.title}" (${result.milestone.id}).`];
+		const taskIds = this.formatMilestoneTaskIds(result.updatedTaskIds);
+		if (result.taskHandling === "keep") lines.push("Kept task milestone values unchanged (taskHandling=keep).");
+		else if (result.taskHandling === "reassign") {
+			lines.push(
+				`Reassigned ${result.updatedTaskIds.length} local task${result.updatedTaskIds.length === 1 ? "" : "s"} to "${result.reassignedMilestone?.title}" (${result.reassignedMilestone?.id}): ${taskIds}`,
+			);
+		} else {
+			lines.push(
+				`Cleared milestone for ${result.updatedTaskIds.length} local task${result.updatedTaskIds.length === 1 ? "" : "s"}: ${taskIds}`,
+			);
+		}
+		return lines.join("\n");
+	}
+
+	private formatMilestoneTaskIds(taskIds: string[]): string {
+		const shown = taskIds.slice(0, 20);
+		const suffix = taskIds.length > shown.length ? ` (and ${taskIds.length - shown.length} more)` : "";
+		return `${shown.join(", ")}${suffix}`;
 	}
 
 	private async handleListMilestones(): Promise<Response> {
@@ -1653,35 +1482,17 @@ export class BacklogServer {
 			if (!title) {
 				return Response.json({ error: "Milestone title is required" }, { status: 400 });
 			}
-			const dueDate = parseDueDatePayload(body.dueDate, false);
-			if (!dueDate.ok) return Response.json({ error: dueDate.error }, { status: 400 });
+			const dueDate = parseDueDate(body.dueDate, false);
+			if ("error" in dueDate) return Response.json({ error: dueDate.error }, { status: 400 });
 
 			// Check for duplicates
 			const existingMilestones = await this.core.filesystem.listMilestones();
-			const buildAliasKeys = (value: string): Set<string> => {
-				const normalized = value.trim().toLowerCase();
-				const keys = new Set<string>();
-				if (!normalized) {
-					return keys;
-				}
-				keys.add(normalized);
-				if (/^\d+$/.test(normalized)) {
-					const numeric = String(Number.parseInt(normalized, 10));
-					keys.add(numeric);
-					keys.add(`m-${numeric}`);
-					return keys;
-				}
-				const match = normalized.match(/^m-(\d+)$/);
-				if (match?.[1]) {
-					const numeric = String(Number.parseInt(match[1], 10));
-					keys.add(numeric);
-					keys.add(`m-${numeric}`);
-				}
-				return keys;
-			};
-			const requestedKeys = buildAliasKeys(title);
+			const requestedKeys = collectMilestoneAliasKeys(title);
 			const duplicate = existingMilestones.find((milestone) => {
-				const milestoneKeys = new Set<string>([...buildAliasKeys(milestone.id), ...buildAliasKeys(milestone.title)]);
+				const milestoneKeys = new Set<string>([
+					...collectMilestoneAliasKeys(milestone.id),
+					...collectMilestoneAliasKeys(milestone.title),
+				]);
 				for (const key of requestedKeys) {
 					if (milestoneKeys.has(key)) {
 						return true;
@@ -1707,28 +1518,24 @@ export class BacklogServer {
 			const body = await this.readOptionalJsonBody(req);
 			const title = typeof body.title === "string" ? body.title.trim() : "";
 			const updateTasks = typeof body.updateTasks === "boolean" ? body.updateTasks : true;
-			const dueDate = parseDueDatePayload(body.dueDate, true);
-			if (!dueDate.ok) return Response.json({ error: dueDate.error }, { status: 400 });
+			const dueDate = parseDueDate(body.dueDate, true);
+			if ("error" in dueDate) return Response.json({ error: dueDate.error }, { status: 400 });
 
 			if (!title) {
 				return Response.json({ error: "Milestone title is required" }, { status: 400 });
 			}
 
-			const sourceMilestone = await this.core.filesystem.loadMilestone(milestoneId);
-			const result = await new MilestoneHandlers(this.core).renameMilestone({
+			const result = await new MilestoneWorkflow(this.core).rename({
 				from: milestoneId,
 				to: title,
 				updateTasks,
 				dueDate: "dueDate" in body ? (dueDate.value ?? null) : undefined,
 			});
-			const milestone =
-				(await this.core.filesystem.loadMilestone(sourceMilestone?.id ?? milestoneId)) ??
-				(await this.core.filesystem.loadMilestone(title));
 			this.broadcastDataUpdated("milestones");
 			return Response.json({
 				success: true,
-				milestone: milestone ?? null,
-				message: this.getMilestoneMutationMessage(result),
+				milestone: result.milestone,
+				message: this.formatMilestoneRenameMessage(result),
 			});
 		} catch (error) {
 			return this.milestoneMutationErrorResponse(error, "Error updating milestone");
@@ -1751,7 +1558,7 @@ export class BacklogServer {
 				return Response.json({ error: "taskHandling must be clear, keep, or reassign" }, { status: 400 });
 			}
 
-			const result = await new MilestoneHandlers(this.core).removeMilestone({
+			const result = await new MilestoneWorkflow(this.core).remove({
 				name: milestoneId,
 				taskHandling,
 				reassignTo,
@@ -1759,7 +1566,7 @@ export class BacklogServer {
 			this.broadcastDataUpdated("milestones");
 			return Response.json({
 				success: true,
-				message: this.getMilestoneMutationMessage(result),
+				message: this.formatMilestoneRemoveMessage(result),
 			});
 		} catch (error) {
 			return this.milestoneMutationErrorResponse(error, "Error removing milestone");
@@ -2046,8 +1853,10 @@ export class BacklogServer {
 
 	private async handleInit(req: Request): Promise<Response> {
 		try {
-			const body = await req.json();
-			const projectName = typeof body.projectName === "string" ? body.projectName.trim() : "";
+			const parsed = parseInitInput(await req.json());
+			if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+			const body = parsed.value;
+			const projectName = body.projectName;
 			const backlogDirectory = typeof body.backlogDirectory === "string" ? body.backlogDirectory.trim() : undefined;
 			const backlogDirectorySource =
 				body.backlogDirectorySource === "backlog" ||
@@ -2063,17 +1872,6 @@ export class BacklogServer {
 			const installClaudeAgentFlag = parseOptionalBoolean(body.installClaudeAgent) ?? false;
 			const filesystemOnly = parseOptionalBoolean(body.filesystemOnly) ?? false;
 			const advancedConfig = body.advancedConfig || {};
-
-			// Input validation (browser layer responsibility)
-			if (!projectName) {
-				return Response.json({ error: "Project name is required" }, { status: 400 });
-			}
-			const taskPrefixError = getTaskPrefixError(
-				typeof advancedConfig.taskPrefix === "string" ? advancedConfig.taskPrefix : "",
-			);
-			if (taskPrefixError) {
-				return Response.json({ error: taskPrefixError }, { status: 400 });
-			}
 
 			// Check if already initialized (for browser, we don't allow re-init)
 			const existingConfig = await this.core.filesystem.loadConfig();

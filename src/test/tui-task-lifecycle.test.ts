@@ -3,7 +3,11 @@ import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { completeTaskFromTui, formatTaskCompletionBlockedMessage } from "../ui/task-lifecycle.ts";
+import {
+	completeTaskFromTui,
+	confirmTaskLifecycleAction,
+	formatTaskCompletionBlockedMessage,
+} from "../ui/task-lifecycle.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -92,5 +96,28 @@ describe("TUI task lifecycle", () => {
 		expect(closedTask).not.toBeNull();
 		expect(await completeTaskFromTui(core, closedTask as Task)).toEqual({ success: true });
 		expect((await core.filesystem.listCompletedTasks()).map((task) => task.id)).toEqual(["TASK-2"]);
+	});
+
+	it("uses one confirmation contract for completion and archival", async () => {
+		const task = { id: "task-1", title: "Task", status: "Done" } as Task;
+		const confirmations: Array<{ title: string; message: string }> = [];
+		const confirm = async (options: { title: string; message: string }) => {
+			confirmations.push(options);
+			return true;
+		};
+
+		await confirmTaskLifecycleAction({} as never, task, "complete", confirm as never);
+		await confirmTaskLifecycleAction({} as never, task, "archive", confirm as never);
+
+		expect(confirmations.map(({ title, message }) => ({ title, message }))).toEqual([
+			{
+				title: "Move to Completed",
+				message: "Move {bold}task-1{/bold} to completed?\nRemoves from board; keeps record\nand dependency links.",
+			},
+			{
+				title: "Archive Task",
+				message: "Archive {bold}task-1{/bold}?\nCanceled, duplicate, or invalid work.\nRemoves incoming task links.",
+			},
+		]);
 	});
 });

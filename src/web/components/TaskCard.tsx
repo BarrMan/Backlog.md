@@ -1,5 +1,6 @@
 import React from 'react';
 import { type Task } from '../../types';
+import { formatBrowserShortcutAriaKeys, matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
 import { formatPriorityLabel } from '../../utils/priority-config';
 import AcceptanceCriteriaProgress, { getAcceptanceCriteriaProgressCounts } from './AcceptanceCriteriaProgress';
 import StoredDate from './StoredDate';
@@ -208,6 +209,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
 		role="button"
 		tabIndex={0}
 		aria-label={accessibleLabel}
+		aria-keyshortcuts={formatBrowserShortcutAriaKeys("activateTaskCard")}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onClick={(event) => {
@@ -221,12 +223,15 @@ const TaskCard: React.FC<TaskCardProps> = ({
           onEdit(task);
         }}
 		onKeyDown={(event) => {
-			if (event.key === 'Enter' || event.key === ' ') {
+			if (matchesBrowserShortcut(event, "selectTaskCard")) {
 				event.preventDefault();
-				if (onSelect && !isFromOtherBranch && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+				if (onSelect && !isFromOtherBranch) {
 					onSelect({ shiftKey: event.shiftKey });
-					return;
 				}
+				return;
+			}
+			if (matchesBrowserShortcut(event, "activateTaskCard")) {
+				event.preventDefault();
 				onEdit(task);
 			}
 		}}

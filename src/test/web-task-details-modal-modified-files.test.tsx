@@ -103,4 +103,14 @@ describe("Web task popup modified files display", () => {
 		expect(html).not.toContain("Remove modified file");
 		expect(html).not.toContain("newModifiedFile");
 	});
+
+	it("configures reference links and modified-file controls through the shared list", () => {
+		const html = renderModal(baseTask({ references: ["https://example.com"], modifiedFiles: ["src/cli.ts"] }));
+
+		expect(html).toContain('href="https://example.com"');
+		expect(html).toContain('name="newRef"');
+		expect(html).toContain('name="newModifiedFile"');
+		expect(html).toContain("Remove reference");
+		expect(html).toContain("Remove modified file");
+	});
 });

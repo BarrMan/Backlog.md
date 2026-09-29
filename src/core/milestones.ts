@@ -1,4 +1,4 @@
-import type { Milestone, MilestoneBucket, MilestoneSummary, Task } from "../types/index.ts";
+import type { Milestone, MilestoneBucket, Task } from "../types/index.ts";
 
 const NO_MILESTONE_KEY = "__none";
 
@@ -14,6 +14,26 @@ export function normalizeMilestoneName(name: string): string {
  */
 export function milestoneKey(name?: string | null): string {
 	return normalizeMilestoneName(name ?? "").toLowerCase();
+}
+
+/** Collect case-insensitive ID aliases for a numeric milestone reference. */
+export function collectMilestoneAliasKeys(value: string): Set<string> {
+	const normalized = normalizeMilestoneName(value);
+	const key = milestoneKey(normalized);
+	if (!key) return new Set();
+	const keys = new Set([key]);
+	const match = normalized.match(/^(?:m-)?(\d+)$/i);
+	if (match?.[1]) {
+		const numeric = String(Number.parseInt(match[1], 10));
+		keys.add(numeric);
+		keys.add(`m-${numeric}`);
+	}
+	return keys;
+}
+
+export function canonicalMilestoneId(value: string): string | null {
+	const match = normalizeMilestoneName(value).match(/^(?:m-)?(\d+)$/i);
+	return match?.[1] ? `m-${String(Number.parseInt(match[1], 10))}` : null;
 }
 
 /**
@@ -55,32 +75,14 @@ export function validateMilestoneName(name: string, existingMilestones: string[]
 	return null;
 }
 
-function buildMilestoneAliasMap(
+export function buildMilestoneAliasMap(
 	milestoneEntities: Milestone[],
 	archivedMilestones: Milestone[] = [],
 ): Map<string, string> {
 	const aliasMap = new Map<string, string>();
-	const collectIdAliasKeys = (value: string): string[] => {
-		const idKey = milestoneKey(value);
-		if (!idKey) return [];
-		const keys = new Set<string>([idKey]);
-		if (/^\d+$/.test(value.trim())) {
-			const numericAlias = String(Number.parseInt(value.trim(), 10));
-			keys.add(numericAlias);
-			keys.add(`m-${numericAlias}`);
-			return Array.from(keys);
-		}
-		const idMatch = value.trim().match(/^m-(\d+)$/i);
-		if (idMatch?.[1]) {
-			const numericAlias = String(Number.parseInt(idMatch[1], 10));
-			keys.add(`m-${numericAlias}`);
-			keys.add(numericAlias);
-		}
-		return Array.from(keys);
-	};
 	const reservedIdKeys = new Set<string>();
 	for (const milestone of [...milestoneEntities, ...archivedMilestones]) {
-		for (const key of collectIdAliasKeys(milestone.id)) {
+		for (const key of collectMilestoneAliasKeys(milestone.id)) {
 			reservedIdKeys.add(key);
 		}
 	}
@@ -115,18 +117,12 @@ function buildMilestoneAliasMap(
 		if (idKey) {
 			setAlias(idKey, normalizedId, allowOverwrite);
 		}
-		const idMatch = normalizedId.match(/^m-(\d+)$/i);
-		if (!idMatch?.[1]) {
+		const canonicalId = canonicalMilestoneId(normalizedId);
+		if (!canonicalId) {
 			return;
 		}
-		const numericAlias = String(Number.parseInt(idMatch[1], 10));
-		const canonicalId = `m-${numericAlias}`;
-		if (canonicalId) {
-			setAlias(canonicalId, normalizedId, allowOverwrite);
-		}
-		if (numericAlias) {
-			setAlias(numericAlias, normalizedId, allowOverwrite);
-		}
+		setAlias(canonicalId, normalizedId, allowOverwrite);
+		setAlias(canonicalId.slice(2), normalizedId, allowOverwrite);
 	};
 	const activeTitleCounts = new Map<string, number>();
 	for (const milestone of milestoneEntities) {
@@ -173,24 +169,42 @@ function buildMilestoneAliasMap(
 	return aliasMap;
 }
 
-function canonicalizeMilestoneValue(value: string | null | undefined, aliasMap: Map<string, string>): string {
+/** Build aliases from milestone IDs only, excluding title matches. */
+function buildMilestoneIdAliasMap(milestones: Milestone[], archivedMilestones: Milestone[] = []): Map<string, string> {
+	const withoutTitle = (milestone: Milestone): Milestone => ({ ...milestone, title: "" });
+	return buildMilestoneAliasMap(milestones.map(withoutTitle), archivedMilestones.map(withoutTitle));
+}
+
+export function canonicalizeMilestone(value: string | null | undefined, aliasMap?: Map<string, string>): string {
 	const normalized = normalizeMilestoneName(value ?? "");
 	if (!normalized) return "";
 	const normalizedKey = milestoneKey(normalized);
-	const direct = aliasMap.get(normalizedKey);
+	const direct = aliasMap?.get(normalizedKey);
 	if (direct) {
 		return direct;
 	}
-	const idMatch = normalized.match(/^m-(\d+)$/i);
-	if (idMatch?.[1]) {
-		const numericAlias = String(Number.parseInt(idMatch[1], 10));
-		return aliasMap.get(`m-${numericAlias}`) ?? aliasMap.get(numericAlias) ?? normalized;
-	}
-	if (/^\d+$/.test(normalized)) {
-		const numericAlias = String(Number.parseInt(normalized, 10));
-		return aliasMap.get(`m-${numericAlias}`) ?? aliasMap.get(numericAlias) ?? normalized;
+	const canonicalId = canonicalMilestoneId(normalized);
+	if (canonicalId) {
+		return aliasMap?.get(canonicalId) ?? aliasMap?.get(canonicalId.slice(2)) ?? normalized;
 	}
 	return normalized;
+}
+
+/**
+ * Resolve a configured milestone while honoring an exact stored ID before aliases.
+ */
+export function resolveMilestoneAliasToId(
+	value: string | null | undefined,
+	milestones: Milestone[],
+	archivedMilestones: Milestone[] = [],
+): Milestone | undefined {
+	const normalized = normalizeMilestoneName(value ?? "");
+	if (!normalized) return undefined;
+	const exactId = milestones.find((milestone) => milestoneKey(milestone.id) === milestoneKey(normalized));
+	if (exactId) return exactId;
+	if (!/^(?:m-)?\d+$/i.test(normalized)) return undefined;
+	const canonicalId = canonicalizeMilestone(normalized, buildMilestoneIdAliasMap(milestones, archivedMilestones));
+	return milestones.find((milestone) => milestoneKey(milestone.id) === milestoneKey(canonicalId));
 }
 
 function canonicalizeTaskMilestones(
@@ -200,7 +214,7 @@ function canonicalizeTaskMilestones(
 ): Task[] {
 	const aliasMap = buildMilestoneAliasMap(milestoneEntities, archivedMilestones);
 	return tasks.map((task) => {
-		const canonicalMilestone = canonicalizeMilestoneValue(task.milestone, aliasMap);
+		const canonicalMilestone = canonicalizeMilestone(task.milestone, aliasMap);
 		if (task.milestone === canonicalMilestone) {
 			return task;
 		}
@@ -239,7 +253,7 @@ export function collectMilestoneIds(
 
 	// Then add any milestones from tasks that aren't in entities
 	for (const task of tasks) {
-		addMilestone(canonicalizeMilestoneValue(task.milestone, aliasMap));
+		addMilestone(canonicalizeMilestone(task.milestone, aliasMap));
 	}
 
 	return merged;
@@ -345,38 +359,4 @@ export function buildMilestoneBuckets(
 	];
 
 	return buckets;
-}
-
-/**
- * Build a complete milestone summary
- */
-export function buildMilestoneSummary(
-	tasks: Task[],
-	milestoneEntities: Milestone[],
-	statuses: string[],
-	options?: { archivedMilestoneIds?: string[]; archivedMilestones?: Milestone[] },
-): MilestoneSummary {
-	const archivedKeys = new Set((options?.archivedMilestoneIds ?? []).map((id) => milestoneKey(id)));
-	const canonicalTasks = canonicalizeTaskMilestones(tasks, milestoneEntities, options?.archivedMilestones ?? []);
-	const normalizedTasks =
-		archivedKeys.size > 0
-			? canonicalTasks.map((task) => {
-					const key = milestoneKey(task.milestone);
-					if (!key || !archivedKeys.has(key)) {
-						return task;
-					}
-					return { ...task, milestone: undefined };
-				})
-			: canonicalTasks;
-	const filteredMilestones =
-		archivedKeys.size > 0
-			? milestoneEntities.filter((milestone) => !archivedKeys.has(milestoneKey(milestone.id)))
-			: milestoneEntities;
-	const milestones = collectMilestoneIds(normalizedTasks, filteredMilestones, options?.archivedMilestones ?? []);
-	const buckets = buildMilestoneBuckets(normalizedTasks, filteredMilestones, statuses, options);
-
-	return {
-		milestones,
-		buckets,
-	};
 }

@@ -3,7 +3,7 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -64,7 +64,7 @@ describe("Draft creation consistency", () => {
 		await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
 		await $`bun ${CLI_PATH} draft create "Default assignees"`.cwd(TEST_DIR).quiet();
 		await $`bun ${CLI_PATH} draft create "Explicit assignee" -a @carol`.cwd(TEST_DIR).quiet();
-		await $`bun ${CLI_PATH} draft create "Explicitly unassigned" -a ${""}`.cwd(TEST_DIR).quiet();
+		await runTestCli(["draft", "create", "Explicitly unassigned", "-a", ""], { cwd: TEST_DIR });
 
 		const core = new Core(TEST_DIR);
 		expect((await core.filesystem.loadDraft("draft-1"))?.assignee).toEqual(["@alice", "@bob"]);

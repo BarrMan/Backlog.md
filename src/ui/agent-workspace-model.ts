@@ -19,7 +19,7 @@ export type WorkspaceEntry =
 	| { kind: "header"; status: string; label: string }
 	| { kind: "task"; task: Task; label: string };
 
-export function taskFieldValues(task: Task): Record<DraftField, string> {
+function taskFieldValues(task: Task): Record<DraftField, string> {
 	return {
 		title: task.title,
 		description: task.description ?? "",

@@ -5,21 +5,25 @@ import { type TaskDetail, taskDependencyGraph, taskReadiness } from "../../core/
 import Modal from "./Modal";
 import { apiClient, NetworkError, readDemotionFailureCause, readMovedFailureState } from "../lib/api";
 import { useTheme } from "../contexts/ThemeContext";
-import MDEditor from "@uiw/react-md-editor";
-import AcceptanceCriteriaEditor from "./AcceptanceCriteriaEditor";
-import MermaidMarkdown from './MermaidMarkdown';
-import ChipInput from "./ChipInput";
-import DependencyInput from "./DependencyInput";
-import { DependencyGraphSection } from "./DependencyGraphSection";
-import StoredDate from "./StoredDate";
-import { getPriorityOptions } from "../../utils/priority-config";
-import { getProjectValues, resolveProjectValue } from "../../utils/project-config";
-import { getTaskTypeValues, resolveTaskTypeValue } from "../../utils/task-type-config";
-import { formatReadinessBlockers } from "../../utils/readiness";
+import { resolveProjectValue } from "../../utils/project-config";
+import { resolveTaskTypeValue } from "../../utils/task-type-config";
 import { buildTaskIdIndex, resolveTaskReference } from "../utils/task-id-links";
 import { findDirectSubtasks, findParentTask, summarizeSubtaskProgress } from "../../utils/task-subtasks.ts";
 import { isTerminalStatus } from "../../utils/terminal-status.ts";
 import { createUrlPath } from "../utils/urlHelpers";
+import {
+  buildDefinitionOfDonePayload,
+  type TaskUpdatePayload,
+} from "./task-details-form";
+import { hasCreateModeEntries, useTaskDetailFormState } from "../hooks/use-task-detail-form-state";
+import { useTaskDetailsModalLifecycle } from "../hooks/use-task-details-modal-lifecycle";
+import { useTaskDetailsModalShortcuts } from "../hooks/use-task-details-modal-shortcuts";
+import { resolveMilestoneSelection } from "../utils/milestone-aliases";
+import { useOptimisticTaskUpdates } from "../hooks/use-optimistic-task-updates";
+import { TaskDetailsModalActions } from "./TaskDetailsModalActions";
+import { useTaskMetadataOptions } from "../hooks/use-task-metadata-options";
+import { HierarchyChevron, HierarchyStatusBadge, TaskDetailsContent } from "./TaskDetailsContent";
+import { TaskDetailsMetadata } from "./TaskDetailsMetadata";
 
 interface Props {
   task?: Task | TaskDetail; // Optional for create mode
@@ -46,44 +50,6 @@ interface Props {
 
 type Mode = "preview" | "edit" | "create";
 
-type TaskUpdatePayload = Omit<Partial<Task>, "dueDate" | "project"> & {
-	dueDate?: string | null;
-  project?: string | null;
-  definitionOfDoneAdd?: string[];
-  definitionOfDoneRemove?: number[];
-  definitionOfDoneCheck?: number[];
-  definitionOfDoneUncheck?: number[];
-  disableDefinitionOfDoneDefaults?: boolean;
-  commentsAppend?: string[];
-  commentAuthor?: string;
-};
-
-type InlineMetaUpdatePayload = Omit<Partial<Task>, "milestone"> & {
-  milestone?: string | null;
-};
-
-type TaskDetailsFormState = {
-  title: string;
-  description: string;
-  plan: string;
-  notes: string;
-  displayComments: TaskComment[];
-  finalSummary: string;
-  criteria: AcceptanceCriterion[];
-  definitionOfDone: AcceptanceCriterion[];
-  status: string;
-  assignee: string[];
-  labels: string[];
-  priority: string;
-  taskType: string;
-  project: string;
-  dependencies: string[];
-  references: string[];
-  modifiedFiles: string[];
-  milestone: string;
-  dueDate: string;
-};
-
 // Shared empty defaults. A `= []` default parameter allocates a fresh array on every render, so
 // every memo and effect keyed on it re-runs each time; combined with a state update in that chain
 // the modal spins until React aborts with "Maximum update depth exceeded".
@@ -91,90 +57,6 @@ const EMPTY_STATUSES: string[] = [];
 const EMPTY_TASKS: Task[] = [];
 
 const containsCommentDelimiterLine = (value: string): boolean => /^\s*---\s*$/m.test(value.replace(/\r\n/g, "\n"));
-
-const areJsonEqual = (first: unknown, second: unknown): boolean => JSON.stringify(first) === JSON.stringify(second);
-
-const isEditableKeyboardTarget = (target: EventTarget | null): boolean =>
-  target instanceof Element &&
-  target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null;
-
-const preserveDirtyRefreshValue = <T,>(
-  current: T,
-  previous: T,
-  next: T,
-  isEqual: (first: T, second: T) => boolean = Object.is,
-): T => (isEqual(current, previous) ? next : current);
-
-const buildTaskDetailsFormState = ({
-  task,
-  isCreateMode,
-  isDraftMode,
-  availableStatuses,
-  defaultDefinitionOfDone,
-  createModeAssignee,
-}: {
-  task?: Task | TaskDetail;
-  isCreateMode: boolean;
-  isDraftMode?: boolean;
-  availableStatuses?: string[];
-  defaultDefinitionOfDone: AcceptanceCriterion[];
-  createModeAssignee: string[];
-}): TaskDetailsFormState => ({
-  title: task?.title || "",
-  description: task?.description || "",
-  plan: task?.implementationPlan || "",
-  notes: task?.implementationNotes || "",
-  displayComments: task?.comments ?? [],
-  finalSummary: task?.finalSummary || "",
-  criteria: task?.acceptanceCriteriaItems || [],
-  definitionOfDone: task?.definitionOfDoneItems || (isCreateMode ? defaultDefinitionOfDone : []),
-  status: isDraftMode ? "Draft" : (task?.status || (availableStatuses?.[0] || "To Do")),
-  assignee: task?.assignee || createModeAssignee,
-  labels: task?.labels || [],
-  priority: task?.priority || "",
-  taskType: task?.type || "",
-  project: task?.project || "",
-  dependencies: task?.dependencies || [],
-  references: task?.references || [],
-  modifiedFiles: task?.modifiedFiles || [],
-  milestone: task?.milestone || "",
-  dueDate: task?.dueDate || "",
-});
-
-const SectionHeader: React.FC<{ title: string; right?: React.ReactNode }> = ({ title, right }) => (
-  <div className="flex items-center justify-between mb-3">
-    <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 tracking-tight transition-colors duration-200">
-      {title}
-    </h3>
-    {right ? <div className="ml-2 text-xs text-gray-500 dark:text-gray-400">{right}</div> : null}
-  </div>
-);
-
-const HierarchyStatusBadge: React.FC<{ status: string; statuses: string[] }> = ({ status, statuses }) => {
-  const normalized = (status ?? '').toLowerCase();
-  const tone = isTerminalStatus(status, statuses)
-    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
-    : normalized.includes('progress')
-      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-      : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300';
-  return (
-    <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tone}`}>
-      {status}
-    </span>
-  );
-};
-
-const HierarchyChevron: React.FC = () => (
-  <svg
-    className="h-4 w-4 shrink-0 text-gray-400 transition-transform duration-200 group-hover:translate-x-0.5 dark:text-gray-500"
-    fill="none"
-    stroke="currentColor"
-    viewBox="0 0 24 24"
-    aria-hidden="true"
-  >
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-  </svg>
-);
 
 export const TaskDetailsModal: React.FC<Props> = ({
   task,
@@ -211,27 +93,14 @@ export const TaskDetailsModal: React.FC<Props> = ({
   const modeRef = useRef(mode);
   const previousTaskId = useRef(task?.id ?? "");
   const previousIsOpen = useRef(isOpen);
-  const formBaselineRef = useRef<TaskDetailsFormState | null>(null);
   const activeDemotionRequest = useRef<{ identity: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [demoting, setDemoting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Title field for create mode
-  const [title, setTitle] = useState(task?.title || "");
-
-  // Editable fields (edit mode)
-  const [description, setDescription] = useState(task?.description || "");
-  const [plan, setPlan] = useState(task?.implementationPlan || "");
-  const [notes, setNotes] = useState(task?.implementationNotes || "");
-  const [displayComments, setDisplayComments] = useState<TaskComment[]>(task?.comments ?? []);
-  const [commentBody, setCommentBody] = useState("");
-  const [commentAuthor, setCommentAuthor] = useState("");
   const [commentSaving, setCommentSaving] = useState(false);
   const [commentsChanged, setCommentsChanged] = useState(false);
   const preserveEditModeAfterCommentRefresh = useRef(false);
-  const [finalSummary, setFinalSummary] = useState(task?.finalSummary || "");
-  const [criteria, setCriteria] = useState<AcceptanceCriterion[]>(task?.acceptanceCriteriaItems || []);
   const defaultDefinitionOfDone = useMemo(
     () => (definitionOfDoneDefaults ?? []).map((text, index) => ({ index: index + 1, text, checked: false })),
     [definitionOfDoneDefaults],
@@ -242,166 +111,37 @@ export const TaskDetailsModal: React.FC<Props> = ({
     () => (isCreateMode ? (defaultAssignee ?? []) : []),
     [isCreateMode, defaultAssignee],
   );
-  const initialDefinitionOfDone = task?.definitionOfDoneItems ?? (isCreateMode ? defaultDefinitionOfDone : []);
-  const [definitionOfDone, setDefinitionOfDone] = useState<AcceptanceCriterion[]>(initialDefinitionOfDone);
-  const priorityOptions = useMemo(() => getPriorityOptions(availablePriorities), [availablePriorities]);
-  const typeOptions = useMemo(() => getTaskTypeValues(availableTypes), [availableTypes]);
-  const projectOptions = useMemo(() => getProjectValues(availableProjects), [availableProjects]);
-  const resolveMilestoneToId = useCallback((value?: string | null): string => {
-    const normalized = (value ?? "").trim();
-    if (!normalized) return "";
-    const key = normalized.toLowerCase();
-    const aliasKeys = new Set<string>([key]);
-    const looksLikeMilestoneId = /^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized);
-    const canonicalInputId = looksLikeMilestoneId
-      ? `m-${String(Number.parseInt(normalized.replace(/^m-/i, ""), 10))}`
-      : null;
-    if (/^\d+$/.test(normalized)) {
-      const numericAlias = String(Number.parseInt(normalized, 10));
-      aliasKeys.add(numericAlias);
-      aliasKeys.add(`m-${numericAlias}`);
-    } else {
-      const idMatch = normalized.match(/^m-(\d+)$/i);
-      if (idMatch?.[1]) {
-        const numericAlias = String(Number.parseInt(idMatch[1], 10));
-        aliasKeys.add(numericAlias);
-        aliasKeys.add(`m-${numericAlias}`);
-      }
-    }
-    const idMatchesAlias = (milestoneId: string): boolean => {
-      const milestoneKey = milestoneId.trim().toLowerCase();
-      if (aliasKeys.has(milestoneKey)) {
-        return true;
-      }
-      const idMatch = milestoneId.trim().match(/^m-(\d+)$/i);
-      if (!idMatch?.[1]) {
-        return false;
-      }
-      const numericAlias = String(Number.parseInt(idMatch[1], 10));
-      return aliasKeys.has(numericAlias) || aliasKeys.has(`m-${numericAlias}`);
-    };
-    const findIdMatch = (milestones: Milestone[]): Milestone | undefined => {
-      const rawExactMatch = milestones.find((milestone) => milestone.id.trim().toLowerCase() === key);
-      if (rawExactMatch) {
-        return rawExactMatch;
-      }
-      if (canonicalInputId) {
-        const canonicalRawMatch = milestones.find(
-          (milestone) => milestone.id.trim().toLowerCase() === canonicalInputId,
-        );
-        if (canonicalRawMatch) {
-          return canonicalRawMatch;
-        }
-      }
-      return milestones.find((milestone) => idMatchesAlias(milestone.id));
-    };
-    const activeMilestones = milestoneEntities ?? [];
-    const archivedMilestones = archivedMilestoneEntities ?? [];
-    const activeIdMatch = findIdMatch(activeMilestones);
-    if (activeIdMatch) {
-      return activeIdMatch.id;
-    }
-    if (looksLikeMilestoneId) {
-      const archivedIdMatch = findIdMatch(archivedMilestones);
-      if (archivedIdMatch) {
-        return archivedIdMatch.id;
-      }
-    }
-    const activeTitleMatches = activeMilestones.filter((milestone) => milestone.title.trim().toLowerCase() === key);
-    if (activeTitleMatches.length === 1) {
-      return activeTitleMatches[0]?.id ?? normalized;
-    }
-    if (activeTitleMatches.length > 1) {
-      return normalized;
-    }
-    const archivedIdMatch = findIdMatch(archivedMilestones);
-    if (archivedIdMatch) {
-      return archivedIdMatch.id;
-    }
-    const archivedTitleMatches = archivedMilestones.filter((milestone) => milestone.title.trim().toLowerCase() === key);
-    if (archivedTitleMatches.length === 1) {
-      return archivedTitleMatches[0]?.id ?? normalized;
-    }
-    return normalized;
-  }, [milestoneEntities, archivedMilestoneEntities]);
-  const resolveMilestoneLabel = useCallback((value?: string | null): string => {
-    const normalized = (value ?? "").trim();
-    if (!normalized) return "";
-    const key = normalized.toLowerCase();
-    const aliasKeys = new Set<string>([key]);
-    const canonicalInputId =
-      /^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized)
-        ? `m-${String(Number.parseInt(normalized.replace(/^m-/i, ""), 10))}`
-        : null;
-    if (/^\d+$/.test(normalized)) {
-      const numericAlias = String(Number.parseInt(normalized, 10));
-      aliasKeys.add(numericAlias);
-      aliasKeys.add(`m-${numericAlias}`);
-    } else {
-      const idMatch = normalized.match(/^m-(\d+)$/i);
-      if (idMatch?.[1]) {
-        const numericAlias = String(Number.parseInt(idMatch[1], 10));
-        aliasKeys.add(numericAlias);
-        aliasKeys.add(`m-${numericAlias}`);
-      }
-    }
-    const idMatchesAlias = (milestoneId: string): boolean => {
-      const milestoneKey = milestoneId.trim().toLowerCase();
-      if (aliasKeys.has(milestoneKey)) {
-        return true;
-      }
-      const idMatch = milestoneId.trim().match(/^m-(\d+)$/i);
-      if (!idMatch?.[1]) {
-        return false;
-      }
-      const numericAlias = String(Number.parseInt(idMatch[1], 10));
-      return aliasKeys.has(numericAlias) || aliasKeys.has(`m-${numericAlias}`);
-    };
-    const findIdMatch = (milestones: Milestone[]): Milestone | undefined => {
-      const rawExactMatch = milestones.find((milestone) => milestone.id.trim().toLowerCase() === key);
-      if (rawExactMatch) {
-        return rawExactMatch;
-      }
-      if (canonicalInputId) {
-        const canonicalRawMatch = milestones.find(
-          (milestone) => milestone.id.trim().toLowerCase() === canonicalInputId,
-        );
-        if (canonicalRawMatch) {
-          return canonicalRawMatch;
-        }
-      }
-      return milestones.find((milestone) => idMatchesAlias(milestone.id));
-    };
-    const allMilestones = [...(milestoneEntities ?? []), ...(archivedMilestoneEntities ?? [])];
-    const idMatch = findIdMatch(allMilestones);
-    if (idMatch) {
-      return idMatch.title;
-    }
-    const titleMatches = allMilestones.filter((milestone) => milestone.title.trim().toLowerCase() === key);
-    return titleMatches.length === 1 ? (titleMatches[0]?.title ?? normalized) : normalized;
-  }, [milestoneEntities, archivedMilestoneEntities]);
+  const { priorityOptions, typeOptions, projectOptions } = useTaskMetadataOptions({ availablePriorities, availableTypes, availableProjects });
 
-  // Sidebar metadata (inline edit)
-  const [status, setStatus] = useState(isDraftMode ? "Draft" : (task?.status || (availableStatuses?.[0] || "To Do")));
-  const [assignee, setAssignee] = useState<string[]>(task?.assignee || createModeAssignee);
-  const [labels, setLabels] = useState<string[]>(task?.labels || []);
-  const [priority, setPriority] = useState<string>(task?.priority || "");
-  const [taskType, setTaskType] = useState<string>(task?.type || "");
-  const [project, setProject] = useState<string>(task?.project || "");
-  const [typeUpdateError, setTypeUpdateError] = useState<string | null>(null);
-  const [isTypeUpdating, setIsTypeUpdating] = useState(false);
-  const typeUpdateInFlightRef = useRef(false);
-  const typeUpdateRequestRef = useRef(0);
-  const [dependencies, setDependencies] = useState<string[]>(task?.dependencies || []);
-  const [references, setReferences] = useState<string[]>(task?.references || []);
-  const [modifiedFiles, setModifiedFiles] = useState<string[]>(task?.modifiedFiles || []);
-  const [milestone, setMilestone] = useState<string>(task?.milestone || "");
-  const [dueDate, setDueDate] = useState<string>(task?.dueDate || "");
+  const form = useTaskDetailFormState({ task, isCreateMode, isDraftMode, availableStatuses, defaultDefinitionOfDone, createModeAssignee });
+  const { state: { title, description, plan, notes, displayComments, commentBody, commentAuthor, finalSummary, criteria, definitionOfDone, status, assignee, labels, priority, taskType, project, dependencies, references, modifiedFiles, milestone, dueDate }, isDirty } = form;
+  const { sync: syncForm, resetEditableContent } = form;
+  const setTitle = (value: string) => form.setField("title", value);
+  const setDescription = (value: string) => form.setField("description", value);
+  const setPlan = (value: string) => form.setField("plan", value);
+  const setNotes = (value: string) => form.setField("notes", value);
+  const setDisplayComments = (value: TaskComment[]) => form.setField("displayComments", value);
+  const setCommentBody = (value: string) => form.setField("commentBody", value);
+  const setCommentAuthor = (value: string) => form.setField("commentAuthor", value);
+  const setFinalSummary = (value: string) => form.setField("finalSummary", value);
+  const setCriteria = (value: AcceptanceCriterion[]) => form.setField("criteria", value);
+  const setDefinitionOfDone = (value: AcceptanceCriterion[]) => form.setField("definitionOfDone", value);
+  const setStatus = (value: string) => form.setField("status", value);
+  const setAssignee = (value: string[]) => form.setField("assignee", value);
+  const setLabels = (value: string[]) => form.setField("labels", value);
+  const setPriority = (value: string) => form.setField("priority", value);
+  const setTaskType = (value: string) => form.setField("taskType", value);
+  const setProject = (value: string) => form.setField("project", value);
+  const setDependencies = (value: string[]) => form.setField("dependencies", value);
+  const setReferences = (value: string[]) => form.setField("references", value);
+  const setModifiedFiles = (value: string[]) => form.setField("modifiedFiles", value);
+  const setMilestone = (value: string) => form.setField("milestone", value);
+  const setDueDate = (value: string) => form.setField("dueDate", value);
   const canonicalTypeSelection = resolveTaskTypeValue(taskType, typeOptions);
   const typeSelectionValue = canonicalTypeSelection ?? taskType;
   const canonicalProjectSelection = resolveProjectValue(project, projectOptions);
   const projectSelectionValue = canonicalProjectSelection ?? project;
-  const milestoneSelectionValue = resolveMilestoneToId(milestone);
+  const milestoneSelectionValue = resolveMilestoneSelection(milestone, milestoneEntities ?? [], archivedMilestoneEntities ?? []);
   const hasMilestoneSelection = (milestoneEntities ?? []).some((milestoneEntity) => milestoneEntity.id === milestoneSelectionValue);
 
   // Both derived at read time and delivered with the task itself, so there is nothing to resolve
@@ -448,31 +188,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
     [task, availableTasks, availableStatuses],
   );
 
-  // Keep a baseline for dirty-check
-  const baseline = useMemo(() => ({
-    title: task?.title || "",
-    description: task?.description || "",
-    plan: task?.implementationPlan || "",
-    notes: task?.implementationNotes || "",
-    finalSummary: task?.finalSummary || "",
-    dueDate: task?.dueDate || "",
-    criteria: JSON.stringify(task?.acceptanceCriteriaItems || []),
-    definitionOfDone: JSON.stringify(task?.definitionOfDoneItems || (isCreateMode ? defaultDefinitionOfDone : [])),
-  }), [task, defaultDefinitionOfDone, isCreateMode]);
-
-  const isDirty = useMemo(() => {
-    return (
-      title !== baseline.title ||
-      description !== baseline.description ||
-      plan !== baseline.plan ||
-      notes !== baseline.notes ||
-      finalSummary !== baseline.finalSummary ||
-      dueDate !== baseline.dueDate ||
-      JSON.stringify(criteria) !== baseline.criteria ||
-      JSON.stringify(definitionOfDone) !== baseline.definitionOfDone
-    );
-  }, [title, description, plan, notes, finalSummary, dueDate, criteria, definitionOfDone, baseline]);
-
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
@@ -489,154 +204,20 @@ export const TaskDetailsModal: React.FC<Props> = ({
     setDemoting(false);
   }, [demotionIdentity]);
 
-  // Intercept Escape to cancel edit (not close modal) when in edit mode
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (mode === "edit" && (e.key === "Escape")) {
-        e.preventDefault();
-        e.stopPropagation();
-        handleCancelEdit();
-      }
-      if (mode === "edit" && ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s")) {
-        e.preventDefault();
-        e.stopPropagation();
-        void handleSave();
-      }
-      if (mode !== "preview" || isEditableKeyboardTarget(e.target)) {
-        return;
-      }
-      if (e.key.toLowerCase() === "e" && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        setMode("edit");
-      }
-      if (isFinalStatus && (e.key.toLowerCase() === "c") && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        void handleComplete();
-      }
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true } as any);
-  }, [mode, title, description, plan, notes, finalSummary, criteria, definitionOfDone, status, availableStatuses]);
-
-  // Reset local state when task changes or modal opens
-  useEffect(() => {
-    const nextTaskId = task?.id ?? "";
-    const modalIdentityChanged = previousTaskId.current !== nextTaskId || previousIsOpen.current !== isOpen;
-    if (modalIdentityChanged) {
-      typeUpdateRequestRef.current += 1;
-      typeUpdateInFlightRef.current = false;
-      setIsTypeUpdating(false);
-      setTypeUpdateError(null);
-    }
-    const nextFormState = buildTaskDetailsFormState({
-      task,
-      isCreateMode,
-      isDraftMode,
-      availableStatuses,
-      defaultDefinitionOfDone,
-      createModeAssignee,
-    });
-    const previousFormState = formBaselineRef.current;
-    const sameOpenModalRefresh =
-      Boolean(previousFormState) && isOpen && previousIsOpen.current && previousTaskId.current === nextTaskId;
-    const shouldPreserveEditMode =
-      !isCreateMode &&
-      sameOpenModalRefresh &&
-      (modeRef.current === "edit" || preserveEditModeAfterCommentRefresh.current);
-
-    if (sameOpenModalRefresh && previousFormState) {
-      setTitle((current) => preserveDirtyRefreshValue(current, previousFormState.title, nextFormState.title));
-      setDescription((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.description, nextFormState.description),
-      );
-      setPlan((current) => preserveDirtyRefreshValue(current, previousFormState.plan, nextFormState.plan));
-      setNotes((current) => preserveDirtyRefreshValue(current, previousFormState.notes, nextFormState.notes));
-      setDisplayComments(nextFormState.displayComments);
-      setCommentSaving(false);
-      setCommentsChanged(false);
-      setFinalSummary((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.finalSummary, nextFormState.finalSummary),
-      );
-      setCriteria((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.criteria, nextFormState.criteria, areJsonEqual),
-      );
-      setDefinitionOfDone((current) =>
-        preserveDirtyRefreshValue(
-          current,
-          previousFormState.definitionOfDone,
-          nextFormState.definitionOfDone,
-          areJsonEqual,
-        ),
-      );
-      setStatus((current) => preserveDirtyRefreshValue(current, previousFormState.status, nextFormState.status));
-      setAssignee((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.assignee, nextFormState.assignee, areJsonEqual),
-      );
-      setLabels((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.labels, nextFormState.labels, areJsonEqual),
-      );
-      setPriority((current) => preserveDirtyRefreshValue(current, previousFormState.priority, nextFormState.priority));
-      setTaskType((current) => preserveDirtyRefreshValue(current, previousFormState.taskType, nextFormState.taskType));
-      setProject((current) => preserveDirtyRefreshValue(current, previousFormState.project, nextFormState.project));
-      setDependencies((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.dependencies, nextFormState.dependencies, areJsonEqual),
-      );
-      setReferences((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.references, nextFormState.references, areJsonEqual),
-      );
-      setModifiedFiles((current) =>
-        preserveDirtyRefreshValue(
-          current,
-          previousFormState.modifiedFiles,
-          nextFormState.modifiedFiles,
-          areJsonEqual,
-        ),
-      );
-      setMilestone((current) =>
-        preserveDirtyRefreshValue(current, previousFormState.milestone, nextFormState.milestone),
-      );
-      setDueDate((current) => preserveDirtyRefreshValue(current, previousFormState.dueDate, nextFormState.dueDate));
-      setMode(shouldPreserveEditMode ? "edit" : isCreateMode ? "create" : modeRef.current);
-      preserveEditModeAfterCommentRefresh.current = false;
-      previousTaskId.current = nextTaskId;
-      previousIsOpen.current = isOpen;
-      formBaselineRef.current = nextFormState;
-      setError(null);
-      return;
-    }
-
-    setTitle(nextFormState.title);
-    setDescription(nextFormState.description);
-    setPlan(nextFormState.plan);
-    setNotes(nextFormState.notes);
-    setDisplayComments(nextFormState.displayComments);
-    setCommentBody("");
-    setCommentAuthor("");
-    setCommentSaving(false);
-    setCommentsChanged(false);
-    setFinalSummary(nextFormState.finalSummary);
-    setCriteria(nextFormState.criteria);
-    setDefinitionOfDone(nextFormState.definitionOfDone);
-    setStatus(nextFormState.status);
-    setAssignee(nextFormState.assignee);
-    setLabels(nextFormState.labels);
-    setPriority(nextFormState.priority);
-    setTaskType(nextFormState.taskType);
-    setProject(nextFormState.project);
-    setDependencies(nextFormState.dependencies);
-    setReferences(nextFormState.references);
-    setModifiedFiles(nextFormState.modifiedFiles);
-    setMilestone(nextFormState.milestone);
-    setDueDate(nextFormState.dueDate);
-    setMode(isCreateMode ? "create" : "preview");
-    preserveEditModeAfterCommentRefresh.current = false;
-    previousTaskId.current = nextTaskId;
-    previousIsOpen.current = isOpen;
-    formBaselineRef.current = nextFormState;
-    setError(null);
-  }, [task, isOpen, isCreateMode, isDraftMode, availableStatuses, defaultDefinitionOfDone, createModeAssignee]);
+  useTaskDetailsModalLifecycle({
+    task,
+    isOpen,
+    isCreateMode,
+    modeRef,
+    previousTaskId,
+    previousIsOpen,
+    preserveEditModeAfterCommentRefresh,
+    syncForm,
+    setCommentSaving,
+    setCommentsChanged,
+    setMode,
+    setError,
+  });
 
   const refreshAfterCommentChange = useCallback(() => {
     if (!commentsChanged) return;
@@ -646,22 +227,9 @@ export const TaskDetailsModal: React.FC<Props> = ({
 
   const hasCommentDraft = commentBody.trim() !== "" || commentAuthor.trim() !== "";
   // Nothing is persisted while creating, so any entered field is unsaved work.
-  const hasCreateModeEntries =
-    isCreateMode &&
-    (title.trim() !== "" ||
-      taskType.trim() !== "" ||
-      priority.trim() !== "" ||
-      project.trim() !== "" ||
-      milestone.trim() !== "" ||
-      dueDate.trim() !== "" ||
-      // The prefilled default is not the user's work, but removing or replacing it is.
-      !areJsonEqual(assignee, createModeAssignee) ||
-      labels.length > 0 ||
-      dependencies.length > 0 ||
-      references.length > 0 ||
-      modifiedFiles.length > 0);
+  const hasCreateEntries = isCreateMode && hasCreateModeEntries(form.state, createModeAssignee);
   const hasUnsavedEdits =
-    (mode === "edit" || mode === "create") && (isDirty || hasCommentDraft || hasCreateModeEntries);
+    (mode === "edit" || mode === "create") && (isDirty || hasCommentDraft || hasCreateEntries);
 
   // Links inside the modal (dependency chips, auto-linked task IDs in markdown) leave this
   // task behind, so they ask the same question closing does before the navigation happens.
@@ -690,113 +258,10 @@ export const TaskDetailsModal: React.FC<Props> = ({
       // In create mode, close the modal on cancel
       onClose();
     } else {
-      setTitle(task?.title || "");
-      setDescription(task?.description || "");
-      setPlan(task?.implementationPlan || "");
-      setNotes(task?.implementationNotes || "");
-      setCommentBody("");
-      setCommentAuthor("");
-      setFinalSummary(task?.finalSummary || "");
-      setDueDate(task?.dueDate || "");
-      setCriteria(task?.acceptanceCriteriaItems || []);
-      setDefinitionOfDone(task?.definitionOfDoneItems || []);
+      resetEditableContent();
       setMode("preview");
       refreshAfterCommentChange();
     }
-  };
-
-  const normalizeChecklistItems = (items: AcceptanceCriterion[]): AcceptanceCriterion[] => {
-    return items
-      .map((item) => ({ ...item, text: item.text.trim() }))
-      .filter((item) => item.text.length > 0);
-  };
-
-  const buildDefinitionOfDoneCreatePayload = (): TaskUpdatePayload => {
-    const cleanedCurrent = normalizeChecklistItems(definitionOfDone);
-    const defaults = (definitionOfDoneDefaults ?? []).map((item) => item.trim()).filter((item) => item.length > 0);
-    const defaultItems = defaults.map((text, index) => ({ index: index + 1, text, checked: false }));
-    const defaultsMatch =
-      cleanedCurrent.length >= defaultItems.length &&
-      defaultItems.every(
-        (item, index) =>
-          cleanedCurrent[index]?.text === item.text && cleanedCurrent[index]?.checked === false,
-      );
-
-    const disableDefaults = !defaultsMatch;
-    const definitionOfDoneAdd = disableDefaults
-      ? cleanedCurrent.map((item) => item.text)
-      : cleanedCurrent.slice(defaultItems.length).map((item) => item.text);
-
-    const payload: TaskUpdatePayload = {};
-    if (definitionOfDoneAdd.length > 0) {
-      payload.definitionOfDoneAdd = definitionOfDoneAdd;
-    }
-    if (disableDefaults) {
-      payload.disableDefinitionOfDoneDefaults = true;
-    }
-    return payload;
-  };
-
-  const buildDefinitionOfDoneEditPayload = (): TaskUpdatePayload => {
-    const original = task?.definitionOfDoneItems ?? [];
-    const cleanedCurrent = normalizeChecklistItems(definitionOfDone);
-    const originalByIndex = new Map(original.map((item) => [item.index, item]));
-    const currentByIndex = new Map(cleanedCurrent.map((item) => [item.index, item]));
-    const removals = new Set<number>();
-    const additions: string[] = [];
-    const checks: number[] = [];
-    const unchecks: number[] = [];
-
-    let nextIndex = original.reduce((max, item) => Math.max(max, item.index), 0);
-
-    for (const item of cleanedCurrent) {
-      const originalItem = originalByIndex.get(item.index);
-      if (!originalItem) {
-        additions.push(item.text);
-        nextIndex += 1;
-        if (item.checked) {
-          checks.push(nextIndex);
-        }
-        continue;
-      }
-      if (originalItem.text !== item.text) {
-        removals.add(item.index);
-        additions.push(item.text);
-        nextIndex += 1;
-        if (item.checked) {
-          checks.push(nextIndex);
-        }
-        continue;
-      }
-      if (originalItem.checked !== item.checked) {
-        if (item.checked) {
-          checks.push(item.index);
-        } else {
-          unchecks.push(item.index);
-        }
-      }
-    }
-
-    for (const originalItem of original) {
-      if (!currentByIndex.has(originalItem.index)) {
-        removals.add(originalItem.index);
-      }
-    }
-
-    const payload: TaskUpdatePayload = {};
-    if (additions.length > 0) {
-      payload.definitionOfDoneAdd = additions;
-    }
-    if (removals.size > 0) {
-      payload.definitionOfDoneRemove = Array.from(removals);
-    }
-    if (checks.length > 0) {
-      payload.definitionOfDoneCheck = checks;
-    }
-    if (unchecks.length > 0) {
-      payload.definitionOfDoneUncheck = unchecks;
-    }
-    return payload;
   };
 
   const handleSave = async () => {
@@ -842,13 +307,13 @@ export const TaskDetailsModal: React.FC<Props> = ({
       }
 
       if (isCreateMode && onSubmit) {
-        Object.assign(taskData, buildDefinitionOfDoneCreatePayload());
+        Object.assign(taskData, buildDefinitionOfDonePayload({ task, definitionOfDone, definitionOfDoneDefaults, isCreateMode }));
         // Create new task
         await onSubmit({ ...taskData, dueDate: taskData.dueDate ?? undefined } as Partial<Task>);
         // Only close if successful (no error thrown)
         onClose();
       } else if (task) {
-        Object.assign(taskData, buildDefinitionOfDoneEditPayload());
+        Object.assign(taskData, buildDefinitionOfDonePayload({ task, definitionOfDone, definitionOfDoneDefaults, isCreateMode }));
         // Update existing task
         await apiClient.updateTask(task.id, taskData);
         setMode("preview");
@@ -873,112 +338,14 @@ export const TaskDetailsModal: React.FC<Props> = ({
     }
   };
 
-  const handleToggleCriterion = async (index: number, checked: boolean) => {
-    if (demoting) return;
-    if (!task) return; // Can't toggle in create mode
-    if (isFromOtherBranch) return; // Can't toggle for cross-branch tasks
-    // Optimistic update
-    const next = (criteria || []).map((c) => (c.index === index ? { ...c, checked } : c));
-    setCriteria(next);
-    try {
-      await apiClient.updateTask(task.id, { acceptanceCriteriaItems: next });
-      if (onSaved) await onSaved();
-    } catch (err) {
-      // rollback
-      setCriteria(criteria);
-      console.error("Failed to update criterion", err);
-    }
-  };
-
-  const handleToggleDefinitionOfDone = async (index: number, checked: boolean) => {
-    if (demoting) return;
-    if (!task) return; // Can't toggle in create mode
-    if (isFromOtherBranch) return; // Can't toggle for cross-branch tasks
-    const next = (definitionOfDone || []).map((c) => (c.index === index ? { ...c, checked } : c));
-    setDefinitionOfDone(next);
-    try {
-      const updates: TaskUpdatePayload = checked
-        ? { definitionOfDoneCheck: [index] }
-        : { definitionOfDoneUncheck: [index] };
-      await apiClient.updateTask(task.id, updates);
-      if (onSaved) await onSaved();
-    } catch (err) {
-      setDefinitionOfDone(definitionOfDone);
-      console.error("Failed to update Definition of Done item", err);
-    }
-  };
-
-  const handleInlineMetaUpdate = async (updates: InlineMetaUpdatePayload) => {
-    if (demoting) return;
-    // Don't allow updates for cross-branch tasks
-    if (isFromOtherBranch) return;
-
-    setError(null);
-
-    // Optimistic UI
-    if (updates.status !== undefined) setStatus(String(updates.status));
-    if (updates.assignee !== undefined) setAssignee(updates.assignee as string[]);
-    if (updates.labels !== undefined) setLabels(updates.labels as string[]);
-    if (updates.priority !== undefined) setPriority(String(updates.priority));
-    if (updates.type !== undefined) setTaskType(String(updates.type));
-    if (updates.project !== undefined) setProject(String(updates.project));
-    if (updates.dependencies !== undefined) setDependencies(updates.dependencies as string[]);
-    if (updates.references !== undefined) setReferences(updates.references as string[]);
-    if (updates.modifiedFiles !== undefined) setModifiedFiles(updates.modifiedFiles as string[]);
-    if (updates.milestone !== undefined) setMilestone((updates.milestone ?? "") as string);
-
-    // Only update server if editing existing task
-    if (task) {
-      try {
-        await apiClient.updateTask(task.id, updates);
-        if (onSaved) await onSaved();
-      } catch (err) {
-        console.error("Failed to update task metadata", err);
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    }
-  };
-
-  const handleTaskTypeChange = async (nextType: string) => {
-    if (demoting) return;
-    if (isFromOtherBranch) return;
-    if (!task) {
-      setTaskType(nextType);
-      setTypeUpdateError(null);
-      return;
-    }
-    if (typeUpdateInFlightRef.current) return;
-
-    const previousType = taskType;
-    const requestId = typeUpdateRequestRef.current + 1;
-    typeUpdateRequestRef.current = requestId;
-    typeUpdateInFlightRef.current = true;
-    setIsTypeUpdating(true);
-    setTypeUpdateError(null);
-    setTaskType(nextType);
-
-    try {
-      const updatedTask = await apiClient.updateTask(task.id, { type: nextType });
-      if (typeUpdateRequestRef.current !== requestId) return;
-      setTaskType(updatedTask.type ?? "");
-      if (onSaved) {
-        try {
-          await onSaved();
-        } catch (refreshError) {
-          console.error("Task type was saved, but refreshing task data failed", refreshError);
-        }
-      }
-    } catch (updateError) {
-      if (typeUpdateRequestRef.current !== requestId) return;
-      setTaskType(previousType);
-      setTypeUpdateError(updateError instanceof Error ? updateError.message : String(updateError));
-    } finally {
-      if (typeUpdateRequestRef.current === requestId) {
-        typeUpdateInFlightRef.current = false;
-        setIsTypeUpdating(false);
-      }
-    }
-  };
+  const { update: handleInlineMetaUpdate, toggleCriterion: handleToggleCriterion, toggleDefinitionOfDone: handleToggleDefinitionOfDone, updateType: handleTaskTypeChange, typeError: typeUpdateError, typeUpdating: isTypeUpdating } = useOptimisticTaskUpdates({
+    task: task as Task | undefined,
+    disabled: demoting || isFromOtherBranch,
+    fields: { criteria, definitionOfDone, status, assignee, labels, priority, taskType, project, dependencies, references, modifiedFiles, milestone, title },
+    setters: { criteria: setCriteria, definitionOfDone: setDefinitionOfDone, status: setStatus, assignee: setAssignee, labels: setLabels, priority: setPriority, taskType: setTaskType, project: setProject, dependencies: setDependencies, references: setReferences, modifiedFiles: setModifiedFiles, milestone: setMilestone, title: setTitle },
+    onSaved,
+    setError,
+  });
 
   const handleAddComment = async () => {
     if (demoting) return;
@@ -1107,18 +474,20 @@ export const TaskDetailsModal: React.FC<Props> = ({
     await onArchive();
   };
 
-  const checkedCount = (criteria || []).filter((c) => c.checked).length;
-  const totalCount = (criteria || []).length;
-  const definitionCheckedCount = (definitionOfDone || []).filter((c) => c.checked).length;
-  const definitionTotalCount = (definitionOfDone || []).length;
 	const isFinalStatus = isTerminalStatus(status, availableStatuses.length ? availableStatuses : DEFAULT_STATUSES);
 	const canDemote = Boolean(
 		task && !isDraftMode && !isOpenDraft && isLocalEditableTask(task) && task.source !== "completed" && !isFromOtherBranch,
 	);
-  const comments = displayComments;
-
   const displayId = task?.id ?? "";
-  const documentation = task?.documentation ?? [];
+
+  useTaskDetailsModalShortcuts({
+    mode,
+    isFinalStatus,
+    onCancel: handleCancelEdit,
+    onSave: () => void handleSave(),
+    onEdit: () => setMode("edit"),
+    onComplete: () => void handleComplete(),
+  });
 
   return (
     <Modal
@@ -1135,75 +504,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
       title={isCreateMode ? (isDraftMode ? "Create New Draft" : "Create New Task") : `${displayId} — ${task.title}`}
       maxWidthClass="max-w-5xl"
       disableEscapeClose={mode === "edit" || mode === "create" || demoting}
-      actions={
-		<div className="flex flex-nowrap items-center justify-end gap-2">
-		          {isFinalStatus && mode === "preview" && !isCreateMode && !isFromOtherBranch && (
-		            <button
-		              onClick={handleComplete}
-		              disabled={demoting}
-		              className="inline-flex items-center px-3 py-2 sm:px-4 rounded-lg text-sm font-medium text-white bg-emerald-600 dark:bg-emerald-700 hover:bg-emerald-700 dark:hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:focus:ring-emerald-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-		              title="Move off the board, preserving the record and dependency links"
-		            >
-		              <span className="sm:hidden">Complete</span>
-		              <span className="hidden sm:inline">Move to completed</span>
-		            </button>
-		          )}
-		          {canDemote && mode === "preview" && (
-		            <button
-		              onClick={() => void handleDemote()}
-		              disabled={demoting}
-		              className="inline-flex items-center px-3 py-2 sm:px-4 rounded-lg text-sm font-medium text-white bg-amber-500 dark:bg-amber-600 hover:bg-amber-600 dark:hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:focus:ring-amber-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50"
-		              title="Move task to drafts"
-		            >
-		              {demoting ? "Demoting…" : (
-		                <>
-		                  <span className="sm:hidden">Demote</span>
-		                  <span className="hidden sm:inline">Demote to draft</span>
-		                </>
-		              )}
-		            </button>
-		          )}
-		          {mode === "preview" && !isCreateMode && !isFromOtherBranch ? (
-		            <button
-		              onClick={() => setMode("edit")}
-		              disabled={demoting}
-		              className="inline-flex items-center px-3 py-2 sm:px-4 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-		              title="Edit"
-		            >
-              <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-              Edit
-            </button>
-          ) : (mode === "edit" || mode === "create") ? (
-            <div className="flex items-center gap-2">
-	              <button
-		                onClick={handleCancelEdit}
-		                disabled={demoting}
-		                className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-		                title="Cancel"
-		              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-                Cancel
-              </button>
-	              <button
-		                onClick={() => void handleSave()}
-		                disabled={saving || demoting}
-		                className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 dark:bg-blue-700 hover:bg-blue-700 dark:hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200 disabled:opacity-50"
-		                title="Save"
-		              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-                {saving ? "Saving…" : (isCreateMode ? "Create" : "Save")}
-              </button>
-            </div>
-          ) : null}
-        </div>
-      }
+      actions={<TaskDetailsModalActions mode={mode} isCreateMode={isCreateMode} isFromOtherBranch={isFromOtherBranch} isFinalStatus={isFinalStatus} canDemote={canDemote} saving={saving} demoting={demoting} onComplete={() => void handleComplete()} onDemote={() => void handleDemote()} onEdit={() => setMode("edit")} onCancel={handleCancelEdit} onSave={() => void handleSave()} />}
     >
       {error && (
         <div role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</div>
@@ -1261,716 +562,61 @@ export const TaskDetailsModal: React.FC<Props> = ({
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6" onClickCapture={confirmNavigationAwayFromEdits}>
-        {/* Main content */}
-        <div className="md:col-span-2 space-y-6">
-          {/* Title field for create mode */}
-          {isCreateMode && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-              <SectionHeader title="Title" />
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Enter task title"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
-              />
-            </div>
-          )}
-          {/* Description */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="Description" />
-            {mode === "preview" ? (
-              description ? (
-                <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
-                  <MermaidMarkdown source={description} />
-                </div>
-              ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No description</div>
-              )
-            ) : (
-              <div className="border border-gray-200 dark:border-gray-700 rounded-md">
-                <MDEditor
-                  value={description}
-                  onChange={(val) => setDescription(val || "")}
-                  preview="edit"
-                  height={320}
-                  data-color-mode={theme}
-                />
-              </div>
-            )}
-          </div>
+        <TaskDetailsContent
+          task={task}
+          mode={mode}
+          isCreateMode={isCreateMode}
+          isFromOtherBranch={isFromOtherBranch}
+          theme={theme}
+          state={{ title, description, plan, notes, finalSummary, criteria, definitionOfDone, references, modifiedFiles, displayComments, commentAuthor, commentBody }}
+          availableTasks={availableTasks}
+          availableStatuses={availableStatuses}
+          dependencyGraph={dependencyGraph}
+          subtasks={subtasks}
+          subtaskProgress={subtaskProgress}
+          onNavigateToTask={onNavigateToTask}
+          onInlineMetaUpdate={handleInlineMetaUpdate}
+          onChange={{ title: setTitle, description: setDescription, plan: setPlan, notes: setNotes, finalSummary: setFinalSummary, criteria: setCriteria, definitionOfDone: setDefinitionOfDone, commentAuthor: setCommentAuthor, commentBody: setCommentBody }}
+          onToggleCriterion={(index, checked) => void handleToggleCriterion(index, checked)}
+          onToggleDefinitionOfDone={(index, checked) => void handleToggleDefinitionOfDone(index, checked)}
+          onAddComment={() => void handleAddComment()}
+          commentSaving={commentSaving}
+          dateFormat={dateFormat}
+        />
 
-          {subtasks.length > 0 && (
-            <section className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-              <SectionHeader
-                title="Subtasks"
-                right={
-                  subtaskProgress
-                    ? `${subtaskProgress.completed} of ${subtaskProgress.total} complete`
-                    : undefined
-                }
-              />
-              <div className="divide-y divide-gray-100 dark:divide-gray-700" data-subtask-list>
-                {subtasks.map((subtask) => {
-                  const nested = summarizeSubtaskProgress(subtask, availableTasks, availableStatuses);
-                  return (
-                    <button
-                      key={subtask.id}
-                      type="button"
-                      onClick={() => onNavigateToTask?.(subtask)}
-                      disabled={!onNavigateToTask}
-                      data-subtask-id={subtask.id}
-                      data-subtask-href={createUrlPath('/tasks', subtask.id, subtask.title)}
-                      className="group flex w-full items-center gap-3 rounded-md px-2 py-3 text-left transition-colors duration-200 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-default disabled:hover:bg-transparent dark:hover:bg-gray-700/50"
-                      aria-label={`Open subtask ${subtask.id}: ${subtask.title} (${subtask.status})`}
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="flex flex-wrap items-center gap-2">
-                          <span className="shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400">
-                            {subtask.id}
-                          </span>
-                          <HierarchyStatusBadge status={subtask.status} statuses={availableStatuses} />
-                          {nested && (
-                            <span
-                              className="text-xs text-gray-500 dark:text-gray-400"
-                              data-nested-progress={`${nested.completed}/${nested.total}`}
-                            >
-                              {nested.completed} of {nested.total} complete
-                            </span>
-                          )}
-                        </span>
-                        <span className="mt-1 block break-words text-sm font-medium text-gray-900 dark:text-gray-100">
-                          {subtask.title}
-                        </span>
-                      </span>
-                      <HierarchyChevron />
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-          )}
-
-          {/* References */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="References" />
-            <div className="space-y-3">
-              {references.length > 0 ? (
-                <ul className="space-y-2">
-                  {references.map((ref, idx) => (
-                    <li key={idx} className="flex items-center gap-3 group">
-                      <span className="flex-1 min-w-0">
-                        {ref.startsWith("http://") || ref.startsWith("https://") ? (
-                          <a
-                            href={ref}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-sm text-blue-600 dark:text-blue-400 hover:underline break-all"
-                          >
-                            {ref}
-                          </a>
-                        ) : (
-                          <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
-                            {ref}
-                          </code>
-                        )}
-                      </span>
-                      {!isFromOtherBranch && (
-                        <button
-                          onClick={() => {
-                            const newRefs = references.filter((_, i) => i !== idx);
-                            handleInlineMetaUpdate({ references: newRefs });
-                          }}
-                          className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0"
-                          title="Remove reference"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">No references</p>
-              )}
-              {mode === "preview" && !isFromOtherBranch && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const input = e.currentTarget.elements.namedItem("newRef") as HTMLInputElement;
-                    const value = input.value.trim();
-                    if (value && !references.includes(value)) {
-                      handleInlineMetaUpdate({ references: [...references, value] });
-                      input.value = "";
-                    }
-                  }}
-                  className="flex gap-2"
-                >
-                  <input
-                    name="newRef"
-                    type="text"
-                    placeholder="URL or file path..."
-                    className="flex-1 text-sm px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
-                  >
-                    Add
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
-
-          {/* Modified files */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title={`Modified files${modifiedFiles.length ? ` (${modifiedFiles.length})` : ""}`} />
-            <div className="space-y-3">
-              {modifiedFiles.length > 0 ? (
-                // A finished task can list hundreds of paths, so the list scrolls inside the
-                // section instead of pushing the sections below it out of reach.
-                <ul className="space-y-2 max-h-64 overflow-y-auto overscroll-contain pr-1">
-                  {modifiedFiles.map((file, idx) => (
-                    <li key={idx} className="flex items-start gap-3 group">
-                      <span className="flex-1 min-w-0">
-                        <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
-                          {file}
-                        </code>
-                      </span>
-                      {!isFromOtherBranch && (
-                        <button
-                          onClick={() => {
-                            const newFiles = modifiedFiles.filter((_, i) => i !== idx);
-                            handleInlineMetaUpdate({ modifiedFiles: newFiles });
-                          }}
-                          className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0 mt-0.5"
-                          title="Remove modified file"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">No modified files</p>
-              )}
-              {mode === "preview" && !isFromOtherBranch && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const input = e.currentTarget.elements.namedItem("newModifiedFile") as HTMLInputElement;
-                    const value = input.value.trim();
-                    if (value && !modifiedFiles.includes(value)) {
-                      handleInlineMetaUpdate({ modifiedFiles: [...modifiedFiles, value] });
-                      input.value = "";
-                    }
-                  }}
-                  className="flex gap-2"
-                >
-                  <input
-                    name="newModifiedFile"
-                    type="text"
-                    placeholder="Path from project root..."
-                    className="flex-1 text-sm px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
-                  >
-                    Add
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
-
-          {/* Documentation */}
-          {documentation.length > 0 && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-              <SectionHeader title="Documentation" />
-              <div className="space-y-2">
-                <ul className="space-y-2">
-                  {documentation.map((doc, idx) => (
-                    <li key={idx} className="flex items-center gap-3">
-                      <span className="flex-1 min-w-0">
-                        {doc.startsWith("http://") || doc.startsWith("https://") ? (
-                          <a
-                            href={doc}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-sm text-blue-600 dark:text-blue-400 hover:underline break-all"
-                          >
-                            {doc}
-                          </a>
-                        ) : (
-                          <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
-                            {doc}
-                          </code>
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
-
-          {/* Acceptance Criteria */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader
-              title={`Acceptance Criteria ${totalCount ? `(${checkedCount}/${totalCount})` : ""}`}
-              right={mode === "preview" ? (
-                <span>Toggle to update</span>
-              ) : null}
-            />
-            {mode === "preview" ? (
-              <ul className="space-y-2">
-                {(criteria || []).map((c) => (
-                  <li key={c.index} className="flex items-start gap-2 rounded-md px-2 py-1">
-                    <input
-                      type="checkbox"
-                      checked={c.checked}
-                      onChange={(e) => void handleToggleCriterion(c.index, e.target.checked)}
-                      className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <span className="mt-0.5 w-8 shrink-0 text-right font-mono text-xs font-semibold text-gray-500 dark:text-gray-400">
-                      {`#${c.index}`}
-                    </span>
-                    <div className="text-sm text-gray-800 dark:text-gray-100">{c.text}</div>
-                  </li>
-                ))}
-                {totalCount === 0 && (
-                  <li className="text-sm text-gray-500 dark:text-gray-400">No acceptance criteria</li>
-                )}
-              </ul>
-            ) : (
-              <AcceptanceCriteriaEditor criteria={criteria} onChange={setCriteria} />
-            )}
-          </div>
-
-          {/* Definition of Done */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader
-              title={`Definition of Done ${definitionTotalCount ? `(${definitionCheckedCount}/${definitionTotalCount})` : ""}`}
-              right={mode === "preview" ? (
-                <span>Toggle to update</span>
-              ) : null}
-            />
-            {mode === "preview" ? (
-              <ul className="space-y-2">
-                {(definitionOfDone || []).map((item) => (
-                  <li key={item.index} className="flex items-start gap-2 rounded-md px-2 py-1">
-                    <input
-                      type="checkbox"
-                      checked={item.checked}
-                      onChange={(e) => void handleToggleDefinitionOfDone(item.index, e.target.checked)}
-                      className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <div className="text-sm text-gray-800 dark:text-gray-100">{item.text}</div>
-                  </li>
-                ))}
-                {definitionTotalCount === 0 && (
-                  <li className="text-sm text-gray-500 dark:text-gray-400">No Definition of Done items</li>
-                )}
-              </ul>
-            ) : (
-              <AcceptanceCriteriaEditor
-                criteria={definitionOfDone}
-                onChange={setDefinitionOfDone}
-                label="Definition of Done"
-                preserveIndices
-                disableToggle={isCreateMode}
-              />
-            )}
-          </div>
-
-          {dependencyGraph && dependencyGraph.nodes.length > 1 && (
-            <section className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-              <SectionHeader title="Dependency Graph" />
-              <DependencyGraphSection graph={dependencyGraph} />
-            </section>
-          )}
-
-          {/* Implementation Plan */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="Implementation Plan" />
-            {mode === "preview" ? (
-              plan ? (
-                <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
-                  <MermaidMarkdown source={plan} />
-                </div>
-              ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No plan</div>
-              )
-            ) : (
-              <div className="border border-gray-200 dark:border-gray-700 rounded-md">
-                <MDEditor
-                  value={plan}
-                  onChange={(val) => setPlan(val || "")}
-                  preview="edit"
-                  height={280}
-                  data-color-mode={theme}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* Implementation Notes */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="Implementation Notes" />
-            {mode === "preview" ? (
-              notes ? (
-                <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
-                  <MermaidMarkdown source={notes} />
-                </div>
-              ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No notes</div>
-              )
-            ) : (
-              <div className="border border-gray-200 dark:border-gray-700 rounded-md">
-                <MDEditor
-                  value={notes}
-                  onChange={(val) => setNotes(val || "")}
-                  preview="edit"
-                  height={280}
-                  data-color-mode={theme}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* Comments */}
-          {!isCreateMode && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-              <SectionHeader title={`Comments${comments.length ? ` (${comments.length})` : ""}`} />
-              {comments.length > 0 ? (
-                <div className="space-y-4">
-                  {comments.map((comment) => (
-                    <article key={`${comment.index}-${comment.createdDate}`} className="border-l-2 border-gray-200 dark:border-gray-700 pl-3">
-                      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                        <span className="font-semibold text-gray-700 dark:text-gray-200">#{comment.index}</span>
-                        {comment.author ? <span>{comment.author}</span> : null}
-                        {comment.createdDate ? <StoredDate value={comment.createdDate} dateFormat={dateFormat} /> : null}
-                      </div>
-                      <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
-                        <MermaidMarkdown source={comment.body} />
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No comments</div>
-              )}
-              {mode === "edit" && !isFromOtherBranch && (
-                <div className="mt-4 space-y-2">
-                  <input
-                    type="text"
-                    value={commentAuthor}
-                    onChange={(e) => setCommentAuthor(e.target.value)}
-                    placeholder="Author"
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
-                  />
-                  <textarea
-                    value={commentBody}
-                    onChange={(e) => setCommentBody(e.target.value)}
-                    rows={4}
-                    placeholder="Add a comment..."
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-                  />
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={() => void handleAddComment()}
-                      disabled={commentSaving || commentBody.trim().length === 0}
-                      className="px-4 py-2 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors disabled:opacity-50"
-                    >
-                      {commentSaving ? "Adding..." : "Add comment"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Final Summary */}
-          {(mode !== "preview" || finalSummary.trim().length > 0) && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-              <SectionHeader title="Final Summary" right="Completion summary" />
-              {mode === "preview" ? (
-                <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
-                  <MermaidMarkdown source={finalSummary} />
-                </div>
-              ) : (
-                <div className="border border-gray-200 dark:border-gray-700 rounded-md">
-                  <MDEditor
-                    value={finalSummary}
-                    onChange={(val) => setFinalSummary(val || "")}
-                    preview="edit"
-                    height={220}
-                    data-color-mode={theme}
-                    textareaProps={{
-                      placeholder: "PR-style summary of what was implemented (write when task is complete)",
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Sidebar */}
-        <div className="md:col-span-1 space-y-4">
-          {/* Dates */}
-	          {task && (
-	            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-	              <div><span className="font-semibold text-gray-800 dark:text-gray-100">Created:</span> <StoredDate value={task.createdDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
-	              {task.updatedDate && (
-	                <div><span className="font-semibold text-gray-800 dark:text-gray-100">Updated:</span> <StoredDate value={task.updatedDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
-	              )}
-	              {task.dueDate && mode === "preview" && (
-	                <div><span className="font-semibold text-gray-800 dark:text-gray-100">Due:</span> <StoredDate value={task.dueDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
-	              )}
-	            </div>
-	          )}
-          {mode !== "preview" && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-              <SectionHeader title="Due" />
-              <input
-                type="date"
-                value={dueDate}
-                onChange={(event) => setDueDate(event.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-              />
-            </div>
-          )}
-          {/* Title (editable for existing tasks) */}
-          {task && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-              <SectionHeader title="Title" />
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                }}
-                onBlur={() => {
-                  if (title.trim() && title !== task.title) {
-                    void handleInlineMetaUpdate({ title: title.trim() });
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.currentTarget.blur();
-                  }
-                }}
-                disabled={isFromOtherBranch}
-                className={`w-full h-10 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-              />
-            </div>
-          )}
-
-          {/* Status */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Status" />
-            <StatusSelect current={status} onChange={(val) => handleInlineMetaUpdate({ status: val })} disabled={isFromOtherBranch || isOpenDraft} />
-          </div>
-
-          {/* Type */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Type" />
-            <select
-              aria-label="Task type"
-              aria-invalid={typeUpdateError ? true : undefined}
-              aria-describedby={typeUpdateError ? "task-type-update-error" : undefined}
-              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch || isTypeUpdating ? 'opacity-60 cursor-not-allowed' : ''}`}
-              value={typeSelectionValue}
-              onChange={(event) => void handleTaskTypeChange(event.target.value)}
-              disabled={isFromOtherBranch || isTypeUpdating}
-            >
-              <option value="">No type</option>
-              {!canonicalTypeSelection && taskType.trim() ? (
-                <option value={taskType}>{taskType} (not configured)</option>
-              ) : null}
-              {typeOptions.map((typeOption) => (
-                <option key={typeOption} value={typeOption}>
-                  {typeOption}
-                </option>
-              ))}
-            </select>
-            {typeUpdateError ? (
-              <p id="task-type-update-error" role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
-                {typeUpdateError}
-              </p>
-            ) : null}
-          </div>
-
-          {/* Assignee */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Assignee" />
-            <ChipInput
-              name="assignee"
-              label=""
-              value={assignee}
-              onChange={(value) => handleInlineMetaUpdate({ assignee: value })}
-              placeholder="Type name and press Enter"
-              disabled={isFromOtherBranch}
-            />
-          </div>
-
-          {/* Labels */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Labels" />
-            <ChipInput
-              name="labels"
-              label=""
-              value={labels}
-              onChange={(value) => handleInlineMetaUpdate({ labels: value })}
-              placeholder="Type label and press Enter or comma"
-              disabled={isFromOtherBranch}
-            />
-          </div>
-
-          {/* Priority */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Priority" />
-            <select
-              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-              value={priority}
-              onChange={(e) => handleInlineMetaUpdate({ priority: e.target.value as any })}
-              disabled={isFromOtherBranch}
-            >
-              <option value="">No Priority</option>
-              {priorityOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Project */}
-          {projectOptions.length > 0 && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-              <SectionHeader title="Project" />
-              <select
-                className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-                aria-label="Task project"
-                value={projectSelectionValue}
-                onChange={(e) => handleInlineMetaUpdate({ project: e.target.value })}
-                disabled={isFromOtherBranch}
-              >
-                <option value="">No Project</option>
-                {!canonicalProjectSelection && project.trim() ? (
-                  <option value={project}>{project} (not configured)</option>
-                ) : null}
-                {projectOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Milestone */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Milestone" />
-            <select
-              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-              value={milestoneSelectionValue}
-				onChange={(e) => {
-					const value = e.target.value;
-					setMilestone(value);
-					handleInlineMetaUpdate({ milestone: value.trim().length > 0 ? value : null });
-				}}
-              disabled={isFromOtherBranch}
-            >
-              <option value="">No milestone</option>
-              {!hasMilestoneSelection && milestoneSelectionValue ? (
-                <option value={milestoneSelectionValue}>{resolveMilestoneLabel(milestoneSelectionValue)}</option>
-              ) : null}
-              {(milestoneEntities ?? []).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.title}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Dependencies */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Dependencies" />
-            <DependencyInput
-              value={dependencies}
-              onChange={(value) => handleInlineMetaUpdate({ dependencies: value })}
-              availableTasks={availableTasks}
-              suggestableTasks={localAvailableTasks}
-              currentTaskId={task?.id}
-              label=""
-              disabled={isFromOtherBranch}
-            />
-            {shownReadiness && (
-              <div
-                className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium ${
-                  shownReadiness.isReady
-                    ? 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300'
-                    : 'bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300'
-                }`}
-              >
-                <span aria-hidden="true">{shownReadiness.isReady ? '✓' : '⏳'}</span>
-                <span>{shownReadiness.isReady ? 'Ready to start' : formatReadinessBlockers(shownReadiness)}</span>
-              </div>
-            )}
-          </div>
-
-          {/* Archive button at bottom of sidebar */}
-		          {task && onArchive && !isFromOtherBranch && (
-		            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-		              <button
-		                onClick={handleArchive}
-		                title="Archive canceled, duplicate, or invalid work"
-		                disabled={demoting}
-		                className="w-full inline-flex items-center justify-center px-4 py-2 bg-red-500 dark:bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-600 dark:hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 focus:ring-red-400 dark:focus:ring-red-500 transition-colors duration-200"
-		              >
-		                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-		                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-                </svg>
-                Archive Task
-              </button>
-            </div>
-          )}
-        </div>
+        <TaskDetailsMetadata
+          task={task as Task | undefined}
+          mode={mode}
+          isFromOtherBranch={isFromOtherBranch}
+          isOpenDraft={isOpenDraft}
+          state={{ title, status, assignee, labels, priority, taskType, project, milestone, dueDate, dependencies }}
+          availableTasks={availableTasks}
+          localAvailableTasks={localAvailableTasks}
+          priorityOptions={priorityOptions}
+          typeOptions={typeOptions}
+          projectOptions={projectOptions}
+          typeSelectionValue={typeSelectionValue}
+          canonicalTypeSelection={canonicalTypeSelection}
+          projectSelectionValue={projectSelectionValue}
+          canonicalProjectSelection={canonicalProjectSelection}
+          milestoneSelectionValue={milestoneSelectionValue}
+          hasMilestoneSelection={hasMilestoneSelection}
+          milestoneEntities={milestoneEntities}
+          archivedMilestoneEntities={archivedMilestoneEntities}
+          shownReadiness={shownReadiness}
+          typeUpdateError={typeUpdateError}
+          isTypeUpdating={isTypeUpdating}
+          demoting={demoting}
+          onChange={{ title: setTitle, milestone: setMilestone, dueDate: setDueDate }}
+          onInlineMetaUpdate={handleInlineMetaUpdate}
+          onTaskTypeChange={(value) => void handleTaskTypeChange(value)}
+          onArchive={() => void handleArchive()}
+          hasArchiveAction={Boolean(onArchive)}
+          dateFormat={dateFormat}
+        />
 	      </div>
 		</fieldset>
     </Modal>
-  );
-};
-
-const StatusSelect: React.FC<{ current: string; onChange: (v: string) => void; disabled?: boolean }> = ({ current, onChange, disabled }) => {
-  const [statuses, setStatuses] = useState<string[]>([]);
-  useEffect(() => {
-    apiClient.fetchStatuses().then(setStatuses).catch(() => setStatuses(["To Do", "In Progress", "Done"]));
-  }, []);
-  // A draft is on status Draft, and a completed record can hold a historical status, neither of
-  // which is configured. Showing the value the record actually has beats showing the first option.
-  const options = !current || statuses.includes(current) ? statuses : [current, ...statuses];
-  return (
-    <select
-      className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
-      value={current}
-      onChange={(e) => onChange(e.target.value)}
-      disabled={disabled}
-    >
-      {options.map((s) => (
-        <option key={s} value={s}>{s}</option>
-      ))}
-    </select>
   );
 };
 

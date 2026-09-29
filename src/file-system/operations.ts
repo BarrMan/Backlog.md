@@ -1,15 +1,8 @@
 import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
-import { DEFAULT_DIRECTORIES, DEFAULT_FILES, DEFAULT_STATUSES, FALLBACK_STATUS } from "../constants/index.ts";
-import { parseFrontmatter } from "../markdown/frontmatter.ts";
-import {
-	parseDecision,
-	parseDocument,
-	parseMilestone,
-	parseTask,
-	TaskDependenciesParseError,
-} from "../markdown/parser.ts";
+import { DEFAULT_DIRECTORIES, DEFAULT_FILES, FALLBACK_STATUS } from "../constants/index.ts";
+import { parseDecision, parseDocument, parseTask, TaskDependenciesParseError } from "../markdown/parser.ts";
 import { serializeDecision, serializeDocument, serializeTask } from "../markdown/serializer.ts";
 import type { BacklogConfig, Decision, Document, Milestone, Task, TaskListFilter } from "../types/index.ts";
 import type { BacklogConfigSource } from "../utils/backlog-directory.ts";
@@ -21,7 +14,6 @@ import {
 import { findDecisionById } from "../utils/decision-id.ts";
 import { documentIdsEqual, findDocumentById, normalizeDocumentId } from "../utils/document-id.ts";
 import { normalizeDocumentRelativePath, normalizeDocumentSubPath } from "../utils/document-path.ts";
-import { normalizeDueDate } from "../utils/due-date.ts";
 import type { DraftIdentityFindings } from "../utils/duplicate-detection.ts";
 import { AmbiguousIdError, isAmbiguousIdError } from "../utils/entity-id.ts";
 import {
@@ -32,8 +24,6 @@ import {
 	idForFilename,
 	normalizeId,
 } from "../utils/prefix-config.ts";
-import { matchesProjectFilter } from "../utils/project-config.ts";
-import { normalizeStatusSet, statusMatchesSet } from "../utils/status-filter.ts";
 import { withoutVacatedTaskLinks } from "../utils/task-links.ts";
 import {
 	AmbiguousTaskIdError,
@@ -46,8 +36,10 @@ import {
 	normalizeTaskIdentity,
 	taskIdsEqual,
 } from "../utils/task-path.ts";
+import { applyTaskFilters } from "../utils/task-search.ts";
 import { sortByTaskId } from "../utils/task-sorting.ts";
-import { matchesTaskTypeFilter } from "../utils/task-type-config.ts";
+import { isConfigValueError, normalizedDefinitionOfDone, parseConfig, serializeConfig } from "./config.ts";
+import { MilestoneStore } from "./milestones.ts";
 
 // Interface for task path resolution context
 interface TaskPathContext {
@@ -74,162 +66,8 @@ interface LockAttemptSettings {
 	retryDelayMs: number;
 }
 
-/** Config keys stored as YAML lists. `default_assignee` also accepts a single scalar. */
-type ConfigListKey = "statuses" | "labels" | "types" | "priorities" | "projects" | "default_assignee";
-
-/**
- * A mapping key line, whatever characters the name uses. Keys Backlog does not read still end the
- * previous key's block, so an unrelated `custom-setting:` cannot fold its value into the block being
- * extracted. A sequence item is not a key even when its text contains a colon.
- */
-const CONFIG_KEY_LINE_PATTERN = /^\s*(?!-\s)[^\s#][^:]*:/;
-
-/**
- * Extract the YAML block that carries one config key's value: its `key:` line plus the lines that
- * continue it, stopping at the next key written at the same or lower indentation. Returns nothing
- * when the key is absent. The last occurrence wins, which is what YAML does with a repeated key.
- *
- * A config key belongs at column 0, so an unindented line always outranks an indented look-alike:
- * without that rule a `statuses:` line nested inside another key's mapping or block scalar would
- * hijack the real key. Indented matches are used only when the key appears nowhere at column 0.
- */
-function extractConfigKeyYaml(content: string, key: string): string | undefined {
-	const lines = content.split(/\r?\n/);
-	const keyPattern = new RegExp(`^(\\s*)${key}\\s*:`);
-	const keyIndent = (line: string) => line.match(keyPattern)?.[1]?.length;
-	const startIndex = lines.some((line) => keyIndent(line) === 0)
-		? lines.findLastIndex((line) => keyIndent(line) === 0)
-		: lines.findLastIndex((line) => keyIndent(line) !== undefined);
-	if (startIndex === -1) {
-		return undefined;
-	}
-
-	const startIndent = keyIndent(lines[startIndex] ?? "") ?? 0;
-	const collected: string[] = [];
-
-	for (let index = startIndex; index < lines.length; index++) {
-		const line = lines[index] ?? "";
-		const trimmed = line.trim();
-		const indent = line.length - line.trimStart().length;
-		const isNextKey =
-			index > startIndex && trimmed.length > 0 && indent <= startIndent && CONFIG_KEY_LINE_PATTERN.test(line);
-
-		if (isNextKey) {
-			break;
-		}
-
-		collected.push(line);
-	}
-
-	return collected.join("\n");
-}
-
-const CONFIG_VALUE_ERROR_NAME = "ConfigValueError";
-
-/** Reports a config value Backlog refuses to guess at, naming the file and the offending key. */
-function configValueError(configPath: string, key: string, problem: string, remedy: string): Error {
-	const error = new Error(
-		`Backlog could not start because ${configPath} has an invalid value for "${key}"${problem ? `: ${problem}` : ""}. ${remedy}`,
-	);
-	error.name = CONFIG_VALUE_ERROR_NAME;
-	return error;
-}
-
-/** Reports a value YAML could not read at all. */
-function configSyntaxError(configPath: string, key: string, reason: unknown): Error {
-	const detail = (reason instanceof Error ? reason.message : String(reason)).split("\n")[0]?.trim();
-	return configValueError(
-		configPath,
-		key,
-		detail ?? "",
-		"Edit that key so its value is valid YAML, then run the command again.",
-	);
-}
-
-/** Names the shape a rejected value turned out to have, for an error a person has to act on. */
-function describeConfigValue(value: unknown): string {
-	if (value === undefined) return "no value Backlog could read";
-	switch (typeof value) {
-		case "string":
-			return "a scalar";
-		case "number":
-			return "a number";
-		case "boolean":
-			return "a boolean";
-		default:
-			return "a mapping";
-	}
-}
-
-/** Reports a value YAML read fine but the key cannot hold, such as a scalar where a list belongs. */
-function configTypeError(configPath: string, key: ConfigListKey, value: unknown): Error {
-	const expected = key === "default_assignee" ? "a list or a single name" : "a list";
-	return configValueError(
-		configPath,
-		key,
-		`expected ${expected}, got ${describeConfigValue(value)}`,
-		`Edit that key so its value is ${expected}, then run the command again.`,
-	);
-}
-
 /** True when an error already explains an unreadable config value, so it needs no extra framing. */
-export function isConfigValueError(error: unknown): error is Error {
-	return error instanceof Error && error.name === CONFIG_VALUE_ERROR_NAME;
-}
-
-/** Read one key from a YAML document, reporting the parse error instead of a value when invalid. */
-function readYamlKey(document: string, key: string): { value: unknown } | { error: unknown } {
-	try {
-		return { value: (Bun.YAML.parse(document) as Record<string, unknown> | null)?.[key] };
-	} catch (error) {
-		return { error };
-	}
-}
-
-/**
- * Parse one list-valued config key as YAML, so quoting, escapes, block sequences, and trailing
- * comments are handled by the parser instead of by hand. The key's own block is what gets parsed, so a
- * malformed value for one key cannot change how another key reads; only a block YAML rejects outright
- * is reread in document context, where aliases resolve. Throws when neither read succeeds, and when the
- * value YAML read is not a shape the key can hold, so callers fail fast rather than proceed with a
- * guessed value. Returns nothing when the key is absent or carries no value; `default_assignee` also
- * accepts a single scalar name.
- */
-function parseConfigListValue(content: string, key: ConfigListKey, configPath: string): string[] | undefined {
-	const block = extractConfigKeyYaml(content, key);
-	if (block === undefined) {
-		return undefined;
-	}
-
-	const fromBlock = readYamlKey(block, key);
-	let parsed: unknown;
-	if ("value" in fromBlock) {
-		parsed = fromBlock.value;
-	} else {
-		// An alias resolves only against the anchors defined elsewhere in the file, so a block YAML
-		// rejects on its own gets one more read in document context before it counts as broken. The
-		// document is never read first: doing that is what let one broken key change how another reads.
-		const fromDocument = readYamlKey(content, key);
-		if (!("value" in fromDocument)) {
-			throw configSyntaxError(configPath, key, fromBlock.error);
-		}
-		parsed = fromDocument.value;
-	}
-
-	// `key:` with no value, including the first line of a block sequence.
-	if (parsed === null) {
-		return key === "default_assignee" ? [] : undefined;
-	}
-	if (Array.isArray(parsed)) {
-		return parsed.map((item) => String(item).trim()).filter((item) => item.length > 0);
-	}
-	// A single name is the legacy spelling of a one-entry default_assignee.
-	if (typeof parsed === "string" && key === "default_assignee") {
-		const assignee = parsed.trim();
-		return assignee ? [assignee] : [];
-	}
-	throw configTypeError(configPath, key, parsed);
-}
+export { isConfigValueError };
 
 const DEFAULT_CREATE_LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_CREATE_LOCK_RETRY_DELAY_MS = 100;
@@ -241,7 +79,7 @@ interface ParsedTaskFile {
 	task: Task;
 }
 
-export const CREATE_LOCK_ERROR_CODE = "ECREATELOCK";
+const CREATE_LOCK_ERROR_CODE = "ECREATELOCK";
 export const CREATE_LOCK_ERROR_MESSAGE =
 	"Another task create/promote/demote operation is already in progress. Please try again.";
 
@@ -335,6 +173,7 @@ export class FileSystem {
 	private readonly taskFileReadGenerations = new Map<string, number>();
 	private activeTaskFileReads = 0;
 	private readonly pendingTaskFileReads: Array<() => void> = [];
+	private readonly milestones: MilestoneStore;
 
 	constructor(projectRoot: string) {
 		this.projectRoot = projectRoot;
@@ -343,6 +182,12 @@ export class FileSystem {
 		this.resolvedBacklogDir = resolution.backlogPath ?? join(projectRoot, DEFAULT_DIRECTORIES.BACKLOG);
 		this.resolvedConfigPath = resolution.configPath ?? join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG);
 		this.configSource = resolution.configSource ?? "folder";
+		this.milestones = new MilestoneStore({
+			activeDirectory: () => this.getMilestonesDir(),
+			archiveDirectory: () => this.getArchiveMilestonesDir(),
+			ensureDirectory: (directory) => this.ensureDirectoryExists(directory),
+			withCreateLock: (operation) => this.withCreateLock(operation),
+		});
 	}
 
 	private async getBacklogDir(): Promise<string> {
@@ -945,6 +790,14 @@ export class FileSystem {
 		return tasks.filter((task): task is Task => task !== undefined);
 	}
 
+	private async listConfiguredTaskFiles(directory: string): Promise<string[]> {
+		const config = await this.loadConfig();
+		const taskPrefix = (config?.prefixes?.task ?? "task").toLowerCase();
+		return await Array.fromAsync(
+			new Bun.Glob(buildGlobPattern(taskPrefix)).scan({ cwd: directory, followSymlinks: true }),
+		);
+	}
+
 	async listTasks(filter?: TaskListFilter): Promise<Task[]> {
 		const cacheEpoch = this.taskParseCacheEpoch;
 		let tasksDir: string;
@@ -954,14 +807,9 @@ export class FileSystem {
 			return [];
 		}
 
-		// Get configured task prefix
-		const config = await this.loadConfig();
-		const taskPrefix = (config?.prefixes?.task ?? "task").toLowerCase();
-		const globPattern = buildGlobPattern(taskPrefix);
-
 		let taskFiles: string[];
 		try {
-			taskFiles = await Array.fromAsync(new Bun.Glob(globPattern).scan({ cwd: tasksDir, followSymlinks: true }));
+			taskFiles = await this.listConfiguredTaskFiles(tasksDir);
 		} catch (_error) {
 			return [];
 		}
@@ -976,30 +824,7 @@ export class FileSystem {
 			cacheEpoch,
 		);
 
-		if (filter?.status) {
-			// Any of the given statuses, matching the content store.
-			const wanted = normalizeStatusSet(filter.status);
-			if (wanted.size > 0) {
-				tasks = tasks.filter((t) => statusMatchesSet(wanted, t.status));
-			}
-		}
-		if (filter?.excludeStatus) {
-			const excluded = normalizeStatusSet(filter.excludeStatus);
-			if (excluded.size > 0) {
-				tasks = tasks.filter((t) => !statusMatchesSet(excluded, t.status));
-			}
-		}
-		if (filter?.type) {
-			tasks = tasks.filter((task) => matchesTaskTypeFilter(task.type, filter.type));
-		}
-		if (filter?.project) {
-			tasks = tasks.filter((task) => matchesProjectFilter(task.project, filter.project));
-		}
-
-		if (filter?.assignee) {
-			const assignee = filter.assignee;
-			tasks = tasks.filter((t) => t.assignee.includes(assignee));
-		}
+		if (filter) tasks = applyTaskFilters(tasks, filter);
 
 		return sortByTaskId(tasks);
 	}
@@ -1013,14 +838,9 @@ export class FileSystem {
 			return [];
 		}
 
-		// Get configured task prefix
-		const config = await this.loadConfig();
-		const taskPrefix = (config?.prefixes?.task ?? "task").toLowerCase();
-		const globPattern = buildGlobPattern(taskPrefix);
-
 		let taskFiles: string[];
 		try {
-			taskFiles = await Array.fromAsync(new Bun.Glob(globPattern).scan({ cwd: completedDir, followSymlinks: true }));
+			taskFiles = await this.listConfiguredTaskFiles(completedDir);
 		} catch (_error) {
 			return [];
 		}
@@ -1046,31 +866,17 @@ export class FileSystem {
 			return [];
 		}
 
-		// Get configured task prefix
-		const config = await this.loadConfig();
-		const taskPrefix = (config?.prefixes?.task ?? "task").toLowerCase();
-		const globPattern = buildGlobPattern(taskPrefix);
-
 		let taskFiles: string[];
 		try {
-			taskFiles = await Array.fromAsync(new Bun.Glob(globPattern).scan({ cwd: archiveTasksDir, followSymlinks: true }));
+			taskFiles = await this.listConfiguredTaskFiles(archiveTasksDir);
 		} catch (_error) {
 			return [];
 		}
 
-		const tasks: Task[] = [];
-		for (const file of taskFiles) {
-			const filepath = join(archiveTasksDir, file);
-			try {
-				const content = await Bun.file(filepath).text();
-				const task = parseTask(content);
-				tasks.push({ ...task, filePath: filepath });
-			} catch (error) {
-				if (process.env.DEBUG) {
-					console.error(`Failed to parse archived task file ${filepath}`, error);
-				}
-			}
-		}
+		const tasks = await this.readTaskFiles(archiveTasksDir, taskFiles, {
+			normalizeIdentity: false,
+			debugLabel: "archived task file",
+		});
 
 		return sortByTaskId(tasks);
 	}
@@ -1264,6 +1070,16 @@ export class FileSystem {
 	}
 
 	// Draft operations
+	private async listDraftFiles(draftsDir: string): Promise<string[]> {
+		return await Array.fromAsync(
+			new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }),
+		);
+	}
+
+	private async readDraftFile(filepath: string): Promise<Task> {
+		return { ...normalizeTaskIdentity(parseTask(await Bun.file(filepath).text())), filePath: filepath };
+	}
+
 	async saveDraft(task: Task): Promise<string> {
 		const { id: draftId, filename, filePath: filepath } = await this.resolveTaskWriteTarget(task, true);
 		const draftsDir = await this.getDraftsDir();
@@ -1279,9 +1095,7 @@ export class FileSystem {
 		// and its content may be a real draft only its filename proclaims. A candidate that
 		// cannot be removed aborts the save: writing past it would mint a duplicate identity.
 		const filenameId = idForFilename(draftId);
-		const existingFiles = await Array.fromAsync(
-			new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }),
-		);
+		const existingFiles = await this.listDraftFiles(draftsDir);
 		for (const existingFile of existingFiles.filter(
 			(f) => f !== filename && (filenameMatchesId(f, filenameId) || draftIdsMatchLoosely(draftId, f)),
 		)) {
@@ -1316,16 +1130,11 @@ export class FileSystem {
 	async listDrafts(): Promise<Task[]> {
 		try {
 			const draftsDir = await this.getDraftsDir();
-			const taskFiles = await Array.fromAsync(
-				new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }),
-			);
+			const taskFiles = await this.listDraftFiles(draftsDir);
 
 			const tasks: Task[] = [];
 			for (const file of taskFiles) {
-				const filepath = join(draftsDir, file);
-				const content = await Bun.file(filepath).text();
-				const task = normalizeTaskIdentity(parseTask(content));
-				tasks.push({ ...task, filePath: filepath });
+				tasks.push(await this.readDraftFile(join(draftsDir, file)));
 			}
 
 			return sortByTaskId(tasks);
@@ -1341,17 +1150,12 @@ export class FileSystem {
 	async listHealthyDrafts(): Promise<Task[]> {
 		try {
 			const draftsDir = await this.getDraftsDir();
-			const taskFiles = (
-				await Array.fromAsync(new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }))
-			).sort();
+			const taskFiles = (await this.listDraftFiles(draftsDir)).sort();
 
 			const tasks: Task[] = [];
 			for (const file of taskFiles) {
 				try {
-					const filepath = join(draftsDir, file);
-					const content = await Bun.file(filepath).text();
-					const task = normalizeTaskIdentity(parseTask(content));
-					tasks.push({ ...task, filePath: filepath });
+					tasks.push(await this.readDraftFile(join(draftsDir, file)));
 				} catch {}
 			}
 
@@ -1438,9 +1242,7 @@ export class FileSystem {
 	async listDraftFilenames(unreadable?: string[]): Promise<string[]> {
 		const draftsDir = await this.getDraftsDir();
 		try {
-			return (
-				await Array.fromAsync(new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }))
-			).sort();
+			return (await this.listDraftFiles(draftsDir)).sort();
 		} catch {
 			// A directory that cannot be scanned is a finding, not an empty store: surface it so
 			// doctor never reports draft identities as healthy without having checked them.
@@ -1644,209 +1446,25 @@ export class FileSystem {
 		return document;
 	}
 
-	private buildMilestoneIdentifierKeys(identifier: string): Set<string> {
-		const normalized = identifier.trim().toLowerCase();
-		const keys = new Set<string>();
-		if (!normalized) {
-			return keys;
-		}
-
-		keys.add(normalized);
-
-		if (/^\d+$/.test(normalized)) {
-			const numeric = String(Number.parseInt(normalized, 10));
-			keys.add(numeric);
-			keys.add(`m-${numeric}`);
-			return keys;
-		}
-
-		const milestoneIdMatch = normalized.match(/^m-(\d+)$/);
-		if (milestoneIdMatch?.[1]) {
-			const numeric = String(Number.parseInt(milestoneIdMatch[1], 10));
-			keys.add(numeric);
-			keys.add(`m-${numeric}`);
-		}
-
-		return keys;
-	}
-
-	private buildMilestoneFilename(id: string, title: string): string {
-		const safeTitle = title
-			.replace(/[<>:"/\\|?*]/g, "")
-			.replace(/\s+/g, "-")
-			.toLowerCase()
-			.slice(0, 50);
-		return `${id} - ${safeTitle}.md`;
-	}
-
-	private serializeMilestoneContent(id: string, title: string, rawContent: string, dueDate?: string): string {
-		return `---
-id: ${id}
-title: "${title.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
-${dueDate ? `due_date: "${dueDate}"\n` : ""}---
-
-${rawContent.trim()}
-`;
-	}
-
-	private rewriteDefaultMilestoneDescription(rawContent: string, previousTitle: string, nextTitle: string): string {
-		const defaultDescription = `Milestone: ${previousTitle}`;
-		const descriptionSectionPattern = /(##\s+Description\s*(?:\r?\n)+)([\s\S]*?)(?=(?:\r?\n)##\s+|$)/i;
-
-		return rawContent.replace(descriptionSectionPattern, (fullSection, heading: string, body: string) => {
-			if (body.trim() !== defaultDescription) {
-				return fullSection;
-			}
-			const trailingWhitespace = body.match(/\s*$/)?.[0] ?? "";
-			return `${heading}Milestone: ${nextTitle}${trailingWhitespace}`;
-		});
-	}
-
-	private async findMilestoneFile(
-		identifier: string,
-		scope: "active" | "archived" = "active",
-	): Promise<{
-		file: string;
-		filepath: string;
-		content: string;
-		milestone: Milestone;
-	} | null> {
-		const normalizedInput = identifier.trim().toLowerCase();
-		const candidateKeys = this.buildMilestoneIdentifierKeys(identifier);
-		if (candidateKeys.size === 0) {
-			return null;
-		}
-		const variantKeys = new Set<string>(candidateKeys);
-		variantKeys.delete(normalizedInput);
-		const canonicalInputId =
-			/^\d+$/.test(normalizedInput) || /^m-\d+$/.test(normalizedInput)
-				? `m-${String(Number.parseInt(normalizedInput.replace(/^m-/, ""), 10))}`
-				: null;
-
-		const milestonesDir = scope === "archived" ? await this.getArchiveMilestonesDir() : await this.getMilestonesDir();
-		const milestoneFiles = await Array.fromAsync(
-			new Bun.Glob("m-*.md").scan({ cwd: milestonesDir, followSymlinks: true }),
-		);
-
-		const rawExactIdMatches: Array<{ file: string; filepath: string; content: string; milestone: Milestone }> = [];
-		const canonicalRawIdMatches: Array<{ file: string; filepath: string; content: string; milestone: Milestone }> = [];
-		const exactAliasIdMatches: Array<{ file: string; filepath: string; content: string; milestone: Milestone }> = [];
-		const exactTitleMatches: Array<{ file: string; filepath: string; content: string; milestone: Milestone }> = [];
-		const variantIdMatches: Array<{ file: string; filepath: string; content: string; milestone: Milestone }> = [];
-		const variantTitleMatches: Array<{ file: string; filepath: string; content: string; milestone: Milestone }> = [];
-
-		for (const file of milestoneFiles) {
-			if (file.toLowerCase() === "readme.md") {
-				continue;
-			}
-			const filepath = join(milestonesDir, file);
-			const content = await Bun.file(filepath).text();
-			let milestone: Milestone;
-			try {
-				milestone = parseMilestone(content);
-			} catch {
-				continue;
-			}
-			const idKey = milestone.id.trim().toLowerCase();
-			const idKeys = this.buildMilestoneIdentifierKeys(milestone.id);
-			const titleKey = milestone.title.trim().toLowerCase();
-
-			if (idKey === normalizedInput) {
-				rawExactIdMatches.push({ file, filepath, content, milestone });
-				continue;
-			}
-			if (canonicalInputId && idKey === canonicalInputId) {
-				canonicalRawIdMatches.push({ file, filepath, content, milestone });
-				continue;
-			}
-			if (idKeys.has(normalizedInput)) {
-				exactAliasIdMatches.push({ file, filepath, content, milestone });
-				continue;
-			}
-			if (titleKey === normalizedInput) {
-				exactTitleMatches.push({ file, filepath, content, milestone });
-				continue;
-			}
-			if (Array.from(idKeys).some((key) => variantKeys.has(key))) {
-				variantIdMatches.push({ file, filepath, content, milestone });
-				continue;
-			}
-			if (variantKeys.has(titleKey)) {
-				variantTitleMatches.push({ file, filepath, content, milestone });
-			}
-		}
-
-		const preferIdMatches = /^\d+$/.test(normalizedInput) || /^m-\d+$/.test(normalizedInput);
-		const exactTitleMatch = exactTitleMatches.length === 1 ? exactTitleMatches[0] : null;
-		const variantTitleMatch = variantTitleMatches.length === 1 ? variantTitleMatches[0] : null;
-		const exactAliasIdMatch = exactAliasIdMatches.length === 1 ? exactAliasIdMatches[0] : null;
-		const variantIdMatch = variantIdMatches.length === 1 ? variantIdMatches[0] : null;
-		if (preferIdMatches) {
-			return (
-				rawExactIdMatches[0] ??
-				canonicalRawIdMatches[0] ??
-				exactAliasIdMatch ??
-				variantIdMatch ??
-				exactTitleMatch ??
-				variantTitleMatch ??
-				null
-			);
-		}
-		return (
-			rawExactIdMatches[0] ?? exactTitleMatch ?? canonicalRawIdMatches[0] ?? variantIdMatch ?? variantTitleMatch ?? null
-		);
-	}
-
-	// Milestone operations
-	private async listMilestonesInDirectory(milestonesDir: string): Promise<Milestone[]> {
-		const milestoneFiles = await Array.fromAsync(
-			new Bun.Glob("m-*.md").scan({ cwd: milestonesDir, followSymlinks: true }),
-		);
-		const milestones: Milestone[] = [];
-		for (const file of milestoneFiles) {
-			if (file.toLowerCase() === "readme.md") continue;
-			try {
-				const content = await Bun.file(join(milestonesDir, file)).text();
-				milestones.push(parseMilestone(content));
-			} catch {
-				// Match task loading: one malformed file must not hide every valid item.
-			}
-		}
-		return milestones.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-	}
-
 	async listMilestones(): Promise<Milestone[]> {
-		try {
-			return await this.listMilestonesInDirectory(await this.getMilestonesDir());
-		} catch {
-			return [];
-		}
+		return this.milestones.listActive();
 	}
 
 	async listArchivedMilestones(): Promise<Milestone[]> {
-		try {
-			return await this.listMilestonesInDirectory(await this.getArchiveMilestonesDir());
-		} catch {
-			return [];
-		}
+		return this.milestones.listArchived();
 	}
 
 	async getMilestoneFilePath(identifier: string): Promise<string | null> {
-		const match = await this.findMilestoneFile(identifier, "active");
-		return match?.filepath ?? null;
+		return this.milestones.filePath(identifier);
 	}
 
 	async loadMilestone(id: string): Promise<Milestone | null> {
-		try {
-			const milestoneMatch = await this.findMilestoneFile(id, "active");
-			return milestoneMatch?.milestone ?? null;
-		} catch (_error) {
-			return null;
-		}
+		return this.milestones.load(id);
 	}
 
 	async createMilestone(title: string, description?: string, dueDate?: string): Promise<Milestone> {
-		const normalizedDueDate = normalizeDueDate(dueDate, "Due date");
+		return this.milestones.create(title, description, dueDate);
+		/*
 		return await this.withCreateLock(async () => {
 			const milestonesDir = await this.getMilestonesDir();
 
@@ -1905,7 +1523,7 @@ ${description || `Milestone: ${title}`}`,
 			await Bun.write(filepath, content);
 
 			return parseMilestone(content);
-		});
+		}); */
 	}
 
 	async renameMilestone(
@@ -1920,6 +1538,8 @@ ${description || `Milestone: ${title}`}`,
 		previousTitle?: string;
 		previousDueDate?: string;
 	}> {
+		return this.milestones.rename(identifier, title, dueDate);
+		/*
 		const normalizedTitle = title.trim();
 		if (!normalizedTitle) {
 			return { success: false };
@@ -1986,6 +1606,7 @@ ${description || `Milestone: ${title}`}`,
 			}
 			return { success: false };
 		}
+		*/
 	}
 
 	async archiveMilestone(identifier: string): Promise<{
@@ -1994,6 +1615,8 @@ ${description || `Milestone: ${title}`}`,
 		targetPath?: string;
 		milestone?: Milestone;
 	}> {
+		return this.milestones.archive(identifier);
+		/*
 		const normalized = identifier.trim();
 		if (!normalized) {
 			return { success: false };
@@ -2019,6 +1642,7 @@ ${description || `Milestone: ${title}`}`,
 		} catch (_error) {
 			return { success: false };
 		}
+		*/
 	}
 
 	// Config operations
@@ -2043,7 +1667,7 @@ ${description || `Milestone: ${title}`}`,
 
 		// A value Backlog cannot read is reported, not swallowed: callers must not silently
 		// fall back to defaults while the config file says something else.
-		const config = this.parseConfig(content);
+		const config = parseConfig(content, this.resolvedConfigPath);
 		this.cachedConfig = config;
 		this.cachedConfigSnapshot = { path: configPath, content };
 		return config;
@@ -2053,13 +1677,13 @@ ${description || `Milestone: ${title}`}`,
 		const normalizedConfig: BacklogConfig = {
 			...config,
 			...(this.configSource === "root" ? { backlogDirectory: this.resolvedBacklogDirName } : {}),
-			definitionOfDone: this.normalizeDefinitionOfDone(config.definitionOfDone),
+			definitionOfDone: normalizedDefinitionOfDone(config.definitionOfDone),
 		};
 		if (this.configSource === "folder") {
 			delete normalizedConfig.backlogDirectory;
 		}
 		const configPath = this.resolvedConfigPath;
-		const content = this.serializeConfig(normalizedConfig);
+		const content = serializeConfig(normalizedConfig);
 		await Bun.write(configPath, content);
 		this.cachedConfig = normalizedConfig;
 		this.cachedConfigSnapshot = { path: configPath, content };
@@ -2088,271 +1712,6 @@ ${description || `Milestone: ${title}`}`,
 	}
 
 	parseConfig(content: string): BacklogConfig {
-		const config: Partial<BacklogConfig> = {};
-		const parsedDefinitionOfDone = this.parseDefinitionOfDone(content);
-		// Every list key goes through the same strict parse, which throws rather than guess.
-		const parseListValue = (key: ConfigListKey) => parseConfigListValue(content, key, this.resolvedConfigPath);
-		config.statuses = parseListValue("statuses");
-		config.labels = parseListValue("labels");
-		config.types = parseListValue("types");
-		config.priorities = parseListValue("priorities");
-		config.projects = parseListValue("projects");
-		config.defaultAssignee = parseListValue("default_assignee");
-		const lines = content.split("\n");
-
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed || trimmed.startsWith("#")) continue;
-
-			const colonIndex = trimmed.indexOf(":");
-			if (colonIndex === -1) continue;
-
-			const key = trimmed.substring(0, colonIndex).trim();
-			const value = trimmed.substring(colonIndex + 1).trim();
-
-			switch (key) {
-				case "project_name":
-					config.projectName = value.replace(/['"]/g, "");
-					break;
-				case "default_reporter":
-					config.defaultReporter = value.replace(/['"]/g, "");
-					break;
-				case "default_status":
-					config.defaultStatus = value.replace(/['"]/g, "");
-					break;
-				case "definition_of_done":
-					if (parsedDefinitionOfDone !== undefined) {
-						config.definitionOfDone = parsedDefinitionOfDone;
-					}
-					break;
-				case "date_format":
-					config.dateFormat = value.replace(/['"]/g, "");
-					break;
-				case "max_column_width":
-					config.maxColumnWidth = Number.parseInt(value, 10);
-					break;
-				case "default_editor":
-					config.defaultEditor = value.replace(/["']/g, "");
-					break;
-				case "auto_open_browser":
-					config.autoOpenBrowser = value.toLowerCase() === "true";
-					break;
-				case "hide_empty_columns":
-					config.hideEmptyColumns = value.toLowerCase() === "true";
-					break;
-				case "default_port":
-					config.defaultPort = Number.parseInt(value, 10);
-					break;
-				case "remote_operations":
-					config.remoteOperations = value.toLowerCase() === "true";
-					break;
-				case "auto_commit":
-					config.autoCommit = value.toLowerCase() === "true";
-					break;
-				case "filesystem_only":
-				case "filesystemOnly":
-					config.filesystemOnly = value.toLowerCase() === "true";
-					break;
-				case "zero_padded_ids":
-					config.zeroPaddedIds = Number.parseInt(value, 10);
-					break;
-				case "bypass_git_hooks":
-					config.bypassGitHooks = value.toLowerCase() === "true";
-					break;
-				case "check_active_branches":
-					config.checkActiveBranches = value.toLowerCase() === "true";
-					break;
-				case "active_branch_days":
-					config.activeBranchDays = Number.parseInt(value, 10);
-					break;
-				case "onStatusChange":
-				case "on_status_change":
-					// Remove surrounding quotes if present, but preserve inner content
-					config.onStatusChange = value.replace(/^['"]|['"]$/g, "");
-					break;
-				case "task_prefix":
-					config.prefixes = { task: value.replace(/['"]/g, "") };
-					break;
-				case "backlog_directory":
-				case "backlogDirectory":
-					config.backlogDirectory = value.replace(/['"]/g, "");
-					break;
-			}
-		}
-
-		return {
-			projectName: config.projectName || "",
-			defaultAssignee: config.defaultAssignee,
-			defaultReporter: config.defaultReporter,
-			statuses: config.statuses || [...DEFAULT_STATUSES],
-			labels: config.labels || [],
-			types: config.types,
-			priorities: config.priorities,
-			projects: config.projects,
-			definitionOfDone: config.definitionOfDone,
-			defaultStatus: config.defaultStatus,
-			dateFormat: config.dateFormat || "yyyy-mm-dd",
-			maxColumnWidth: config.maxColumnWidth,
-			defaultEditor: config.defaultEditor,
-			autoOpenBrowser: config.autoOpenBrowser,
-			hideEmptyColumns: config.hideEmptyColumns,
-			defaultPort: config.defaultPort,
-			remoteOperations: config.remoteOperations,
-			autoCommit: config.autoCommit,
-			filesystemOnly: config.filesystemOnly,
-			zeroPaddedIds: config.zeroPaddedIds,
-			bypassGitHooks: config.bypassGitHooks,
-			checkActiveBranches: config.checkActiveBranches,
-			activeBranchDays: config.activeBranchDays,
-			onStatusChange: config.onStatusChange,
-			prefixes: config.prefixes,
-			backlogDirectory: config.backlogDirectory,
-		};
-	}
-
-	private serializeConfig(config: BacklogConfig): string {
-		const normalizedDefinitionOfDone = this.normalizeDefinitionOfDone(config.definitionOfDone);
-		const lines = [
-			`project_name: "${config.projectName}"`,
-			...(config.defaultAssignee?.length
-				? [`default_assignee: [${config.defaultAssignee.map((assignee) => JSON.stringify(assignee)).join(", ")}]`]
-				: []),
-			...(config.defaultReporter ? [`default_reporter: "${config.defaultReporter}"`] : []),
-			...(config.defaultStatus ? [`default_status: "${config.defaultStatus}"`] : []),
-			`statuses: [${config.statuses.map((s) => `"${s}"`).join(", ")}]`,
-			`labels: [${config.labels.map((l) => `"${l}"`).join(", ")}]`,
-			...(config.types && config.types.length > 0 ? [`types: [${config.types.map((t) => `"${t}"`).join(", ")}]`] : []),
-			...(config.priorities && config.priorities.length > 0
-				? [`priorities: [${config.priorities.map((p) => `"${p}"`).join(", ")}]`]
-				: []),
-			...(config.projects && config.projects.length > 0
-				? [`projects: [${config.projects.map((p) => `"${p}"`).join(", ")}]`]
-				: []),
-			...(Array.isArray(normalizedDefinitionOfDone)
-				? [`definition_of_done: [${normalizedDefinitionOfDone.map((item) => JSON.stringify(item)).join(", ")}]`]
-				: []),
-			`date_format: ${config.dateFormat}`,
-			...(config.maxColumnWidth ? [`max_column_width: ${config.maxColumnWidth}`] : []),
-			...(config.defaultEditor ? [`default_editor: "${config.defaultEditor}"`] : []),
-			...(typeof config.autoOpenBrowser === "boolean" ? [`auto_open_browser: ${config.autoOpenBrowser}`] : []),
-			...(typeof config.hideEmptyColumns === "boolean" ? [`hide_empty_columns: ${config.hideEmptyColumns}`] : []),
-			...(config.defaultPort ? [`default_port: ${config.defaultPort}`] : []),
-			...(typeof config.remoteOperations === "boolean" ? [`remote_operations: ${config.remoteOperations}`] : []),
-			...(typeof config.autoCommit === "boolean" ? [`auto_commit: ${config.autoCommit}`] : []),
-			...(typeof config.filesystemOnly === "boolean" ? [`filesystem_only: ${config.filesystemOnly}`] : []),
-			...(typeof config.zeroPaddedIds === "number" ? [`zero_padded_ids: ${config.zeroPaddedIds}`] : []),
-			...(typeof config.bypassGitHooks === "boolean" ? [`bypass_git_hooks: ${config.bypassGitHooks}`] : []),
-			...(typeof config.checkActiveBranches === "boolean"
-				? [`check_active_branches: ${config.checkActiveBranches}`]
-				: []),
-			...(typeof config.activeBranchDays === "number" ? [`active_branch_days: ${config.activeBranchDays}`] : []),
-			...(config.onStatusChange ? [`onStatusChange: '${config.onStatusChange}'`] : []),
-			...(config.prefixes?.task ? [`task_prefix: "${config.prefixes.task}"`] : []),
-			...(config.backlogDirectory ? [`backlog_directory: "${config.backlogDirectory}"`] : []),
-		];
-
-		return `${lines.join("\n")}\n`;
-	}
-
-	private parseDefinitionOfDone(content: string): string[] | undefined {
-		const definitionOfDoneYaml = extractConfigKeyYaml(content, "definition_of_done");
-		const legacyEscapedDefinitionOfDoneYaml = definitionOfDoneYaml
-			? this.escapeLegacyDefinitionOfDoneBackslashes(definitionOfDoneYaml)
-			: undefined;
-		if (legacyEscapedDefinitionOfDoneYaml) {
-			const parsedLegacyDefinitionOfDone = this.parseDefinitionOfDoneFromYaml(legacyEscapedDefinitionOfDoneYaml);
-			if (parsedLegacyDefinitionOfDone !== undefined) {
-				return parsedLegacyDefinitionOfDone;
-			}
-		}
-
-		const parsedFromDocument = this.parseDefinitionOfDoneFromYaml(content);
-		if (parsedFromDocument !== undefined) {
-			return parsedFromDocument;
-		}
-
-		// Some legacy config values are accepted by the line parser but are not valid YAML.
-		return definitionOfDoneYaml ? this.parseDefinitionOfDoneFromYaml(definitionOfDoneYaml) : undefined;
-	}
-
-	private parseDefinitionOfDoneFromYaml(content: string): string[] | undefined {
-		try {
-			const { data } = parseFrontmatter(`---\n${content.trimEnd()}\n---\n`);
-			if (!Object.hasOwn(data, "definition_of_done")) {
-				return undefined;
-			}
-
-			const definitionOfDone = data.definition_of_done;
-			if (definitionOfDone === null) {
-				return [];
-			}
-
-			return this.normalizeDefinitionOfDone(definitionOfDone);
-		} catch {
-			return undefined;
-		}
-	}
-
-	private escapeLegacyDefinitionOfDoneBackslashes(content: string): string | undefined {
-		let escaped = "";
-		let quote: "'" | '"' | undefined;
-		let changed = false;
-
-		for (let index = 0; index < content.length; index++) {
-			const char = content[index];
-
-			if (quote) {
-				if (quote === '"' && char === "\\") {
-					let slashCount = 1;
-					while (content[index + slashCount] === "\\") {
-						slashCount++;
-					}
-
-					const nextChar = content[index + slashCount];
-					if (nextChar === '"' && slashCount % 2 === 1) {
-						escaped += "\\".repeat(slashCount);
-						escaped += nextChar;
-						index += slashCount;
-						continue;
-					}
-
-					const escapedSlashCount = slashCount % 2 === 1 ? slashCount + 1 : slashCount;
-					escaped += "\\".repeat(escapedSlashCount);
-					changed ||= escapedSlashCount !== slashCount;
-					index += slashCount - 1;
-					continue;
-				}
-
-				if (char === quote) {
-					escaped += char;
-					quote = undefined;
-					continue;
-				}
-
-				escaped += char;
-				continue;
-			}
-
-			if (char === "'" || char === '"') {
-				escaped += char;
-				quote = char;
-				continue;
-			}
-
-			escaped += char;
-		}
-
-		return changed ? escaped : undefined;
-	}
-
-	private normalizeDefinitionOfDone(definitionOfDone: unknown): string[] | undefined {
-		if (!Array.isArray(definitionOfDone)) {
-			return undefined;
-		}
-
-		return definitionOfDone
-			.filter((item): item is string => typeof item === "string")
-			.map((item) => item.trim())
-			.filter((item) => item.length > 0);
+		return parseConfig(content, this.resolvedConfigPath);
 	}
 }

@@ -77,7 +77,7 @@ export function withTimeout<T>(operation: Promise<T>, label: string, timeoutMs: 
 	});
 }
 
-export type ChildCloseResult = { code: number | null; signal: NodeJS.Signals | null };
+type ChildCloseResult = { code: number | null; signal: NodeJS.Signals | null };
 
 /**
  * Observes a child process immediately so close/error events cannot be missed,
@@ -237,14 +237,6 @@ export async function waitUntil(
 		await sleep(25);
 	}
 	throw new Error(`Timed out waiting for ${label}`);
-}
-
-/**
- * Gets the exit code from a spawnSync result, handling Windows quirks
- * On Windows, result.status can be undefined even for successful processes
- */
-export function getExitCode(result: { status: number | null; error?: Error }): number {
-	return result.status ?? (result.error ? 1 : 0);
 }
 
 export async function listenOnEphemeralPort(): Promise<{ server: net.Server; port: number }> {

@@ -1,14 +1,12 @@
 import { DEFAULT_STATUSES } from "../constants/index.ts";
-import { type Core, createRuntimeCore } from "../core/backlog.ts";
 
-type StatusConfigReader = Pick<Core, "filesystem">;
+type StatusConfigReader = { filesystem: { loadConfig(): Promise<{ statuses?: string[] } | null> } };
 
 /**
  * Load valid statuses from project configuration.
  */
-export async function getValidStatuses(core?: StatusConfigReader): Promise<string[]> {
-	const c = core ?? (await createRuntimeCore());
-	const config = await c.filesystem.loadConfig();
+export async function getValidStatuses(core: StatusConfigReader): Promise<string[]> {
+	const config = await core.filesystem.loadConfig();
 	return config?.statuses && config.statuses.length > 0 ? config.statuses : [...DEFAULT_STATUSES];
 }
 
@@ -25,7 +23,7 @@ export async function getValidStatuses(core?: StatusConfigReader): Promise<strin
  */
 export async function getCanonicalStatus(
 	input: string | undefined,
-	core?: StatusConfigReader,
+	core: StatusConfigReader,
 	allowedStatuses?: string[],
 ): Promise<string | null> {
 	if (!input) return null;
@@ -43,7 +41,7 @@ export async function getCanonicalStatus(
 
 export async function getCanonicalStatuses(
 	inputs: readonly string[],
-	core?: StatusConfigReader,
+	core: StatusConfigReader,
 	options: { extraStatuses?: readonly string[] } = {},
 ): Promise<{ values: string[]; invalid: string[]; validStatuses: string[] }> {
 	const configuredStatuses = await getValidStatuses(core);

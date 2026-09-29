@@ -65,26 +65,3 @@ export async function findBacklogRoot(startDir: string): Promise<string | null> 
 
 	return null;
 }
-
-// Cache for the project root within a single CLI execution
-let cachedProjectRoot: string | null | undefined;
-
-/**
- * Gets the Backlog.md project root, with caching for performance.
- * Call clearProjectRootCache() to reset the cache if needed.
- */
-export async function getProjectRoot(startDir: string): Promise<string | null> {
-	if (cachedProjectRoot !== undefined) {
-		return cachedProjectRoot;
-	}
-
-	cachedProjectRoot = await findBacklogRoot(startDir);
-	return cachedProjectRoot;
-}
-
-/**
- * Clears the cached project root. Useful for testing.
- */
-export function clearProjectRootCache(): void {
-	cachedProjectRoot = undefined;
-}

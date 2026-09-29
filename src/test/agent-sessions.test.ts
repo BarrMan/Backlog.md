@@ -95,6 +95,18 @@ describe("AgentSessionService", () => {
 		expect((await service.list("task-1")).activeSessionId).toBeDefined();
 	});
 
+	it("creates worktree sessions on their task-owned branch", async () => {
+		await upsertAgentConfiguration(core, "project", {
+			selectedPreset: "test",
+			presets: {
+				test: { command: "agent {prompt}", env: {}, prepare: "", worktree: true, bootstrap: "prompt" },
+			},
+		});
+		const service = new AgentSessionService(core, { runner });
+		const session = await service.start("task-1");
+		expect(runner.commands).toContainEqual(["git", "worktree", "add", "-b", "backlog/session/task-1", session.cwd]);
+	});
+
 	it("keeps one handoff document and starts exactly one replacement", async () => {
 		const service = new AgentSessionService(core, { runner });
 		const first = await service.start("task-1");

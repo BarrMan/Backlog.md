@@ -7,6 +7,7 @@ import { stdout as output } from "node:process";
 import type { ElementInterface, ListInterface, ScreenInterface } from "neo-neo-bblessed";
 import { list } from "neo-neo-bblessed";
 import { formatHeading } from "../heading.ts";
+import { formatKey, keymapKeys } from "../keymap.ts";
 import { createScreen } from "../tui.ts";
 import { stripBlessedFgTags } from "../utils/strip-tags.ts";
 
@@ -95,6 +96,17 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 	private highlightedDisplayByFilteredIndex = new Map<number, string>();
 	private highlightedIndex: number | null = null;
 	private updatingListSelection = false;
+
+	private registerDisplayItem(
+		filteredIndex: number,
+		displayIndex: number,
+		content: { normal: string; highlighted: string },
+	): void {
+		this.displayIndexByFilteredIndex.set(filteredIndex, displayIndex);
+		this.filteredIndexByDisplayIndex.set(displayIndex, filteredIndex);
+		this.normalDisplayByFilteredIndex.set(filteredIndex, content.normal);
+		this.highlightedDisplayByFilteredIndex.set(filteredIndex, content.highlighted);
+	}
 
 	constructor(options: GenericListOptions<T>) {
 		this.options = options;
@@ -239,10 +251,7 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 				for (const { item, filteredIndex } of groupItems) {
 					const content = this.buildDisplayContent(item, filteredIndex, true);
 					displayItems.push(content.normal);
-					this.displayIndexByFilteredIndex.set(filteredIndex, displayIndex);
-					this.filteredIndexByDisplayIndex.set(displayIndex, filteredIndex);
-					this.normalDisplayByFilteredIndex.set(filteredIndex, content.normal);
-					this.highlightedDisplayByFilteredIndex.set(filteredIndex, content.highlighted);
+					this.registerDisplayItem(filteredIndex, displayIndex, content);
 					displayIndex += 1;
 				}
 			}
@@ -252,10 +261,7 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 				if (!item) continue;
 				const content = this.buildDisplayContent(item, filteredIndex, false);
 				displayItems.push(content.normal);
-				this.displayIndexByFilteredIndex.set(filteredIndex, displayIndex);
-				this.filteredIndexByDisplayIndex.set(displayIndex, filteredIndex);
-				this.normalDisplayByFilteredIndex.set(filteredIndex, content.normal);
-				this.highlightedDisplayByFilteredIndex.set(filteredIndex, content.highlighted);
+				this.registerDisplayItem(filteredIndex, displayIndex, content);
 				displayIndex += 1;
 			}
 		}
@@ -276,20 +282,25 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 	}
 
 	private buildHelpText(): string {
-		const parts = ["↑/↓ navigate"];
+		const keys = this.options.keys || {};
+		const label = (configured: string[] | undefined, fallback: string[]) =>
+			formatKey(configured?.[0] ?? fallback[0] ?? "");
+		const parts = [
+			`${label(keys.up, keymapKeys("list", "up"))}/${label(keys.down, keymapKeys("list", "down"))} navigate`,
+		];
 
 		if (this.isMultiSelect) {
-			parts.push("Space toggle");
-			parts.push("Enter confirm");
+			parts.push(`${label(keys.toggle, keymapKeys("list", "toggle"))} toggle`);
+			parts.push(`${label(keys.select, keymapKeys("list", "select"))} confirm`);
 		} else {
-			parts.push("Enter select");
+			parts.push(`${label(keys.select, keymapKeys("list", "select"))} select`);
 		}
 
 		if (this.options.searchable) {
-			parts.push("/ search");
+			parts.push(`${label(keys.search, keymapKeys("list", "search"))} search`);
 		}
 
-		parts.push("Esc/q quit");
+		parts.push(`${label(keys.cancel, keymapKeys("list", "cancel"))} quit`);
 		return `{gray-fg}${parts.join(" · ")}{/gray-fg}`;
 	}
 
@@ -335,20 +346,20 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 			return height > 0 ? Math.max(1, height - 3) : 5;
 		};
 
-		this.listBox.key(["up"], () => moveUp("arrow"));
-		this.listBox.key(["k"], () => moveUp("vim"));
-		this.listBox.key(["down"], () => moveDown("arrow"));
-		this.listBox.key(["j"], () => moveDown("vim"));
-		this.listBox.key(["pageup", "C-u"], () => {
+		this.listBox.key(keys.up || keymapKeys("list", "up"), () => moveUp("arrow"));
+		this.listBox.key(keymapKeys("list", "upVim"), () => moveUp("vim"));
+		this.listBox.key(keys.down || keymapKeys("list", "down"), () => moveDown("arrow"));
+		this.listBox.key(keymapKeys("list", "downVim"), () => moveDown("vim"));
+		this.listBox.key(keymapKeys("list", "pageUp"), () => {
 			const sel = typeof this.selectedIndex === "number" ? this.selectedIndex : 0;
 			moveTo(sel - pageAmount());
 		});
-		this.listBox.key(["pagedown", "C-d"], () => {
+		this.listBox.key(keymapKeys("list", "pageDown"), () => {
 			const sel = typeof this.selectedIndex === "number" ? this.selectedIndex : 0;
 			moveTo(sel + pageAmount());
 		});
-		this.listBox.key(["home"], () => moveTo(0));
-		this.listBox.key(["end"], () => moveTo(this.filteredItems.length - 1));
+		this.listBox.key(keymapKeys("list", "first"), () => moveTo(0));
+		this.listBox.key(keymapKeys("list", "last"), () => moveTo(this.filteredItems.length - 1));
 
 		this.listBox.on("select item", (_item: unknown, displayIndex: unknown) => {
 			if (this.updatingListSelection) return;
@@ -360,17 +371,17 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 
 		// Selection/Toggle
 		if (this.isMultiSelect) {
-			this.listBox.key(keys.toggle || ["space"], () => {
+			this.listBox.key(keys.toggle || keymapKeys("list", "toggle"), () => {
 				const filteredIndex = this.getFilteredIndexFromSelection();
 				if (filteredIndex === null) return;
 				this.toggleSelection(filteredIndex);
 			});
 
-			this.listBox.key(keys.select || ["enter"], () => {
+			this.listBox.key(keys.select || keymapKeys("list", "select"), () => {
 				this.confirmSelection();
 			});
 		} else {
-			this.listBox.key(keys.select || ["enter"], () => {
+			this.listBox.key(keys.select || keymapKeys("list", "select"), () => {
 				const filteredIndex = this.getFilteredIndexFromSelection();
 				if (filteredIndex === null) return;
 				this.selectedIndex = filteredIndex;
@@ -380,11 +391,11 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 
 		// Search
 		if (this.options.searchable) {
-			this.listBox.key(keys.search || ["/"], () => {
+			this.listBox.key(keys.search || keymapKeys("list", "search"), () => {
 				this.enterSearchMode();
 			});
 
-			this.listBox.key(["escape"], () => {
+			this.listBox.key(keymapKeys("shared", "escape"), () => {
 				if (this.isSearchMode) {
 					this.exitSearchMode();
 				} else {
@@ -394,7 +405,7 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 		}
 
 		// Cancel
-		this.listBox.key(keys.cancel || ["escape", "q", "C-c"], () => {
+		this.listBox.key(keys.cancel || keymapKeys("list", "cancel"), () => {
 			this.cancel();
 		});
 
@@ -613,30 +624,6 @@ export async function genericSelectList<T extends GenericListItem>(
 			onSelect: (selected) => {
 				list.destroy();
 				resolve(selected as T | null);
-			},
-			...options,
-		});
-	});
-}
-
-export async function genericMultiSelect<T extends GenericListItem>(
-	title: string,
-	items: T[],
-	options?: Partial<GenericListOptions<T>>,
-): Promise<T[]> {
-	if (output.isTTY === false) {
-		return [];
-	}
-
-	return new Promise<T[]>((resolve) => {
-		const list = new GenericList<T>({
-			title,
-			items,
-			multiSelect: true,
-			showHelp: true,
-			onSelect: (selected) => {
-				list.destroy();
-				resolve(selected as T[]);
 			},
 			...options,
 		});

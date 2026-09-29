@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import { matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
 
 interface ModalProps {
 	isOpen: boolean;
@@ -44,7 +45,7 @@ const Modal: React.FC<ModalProps> = ({
 		const previouslyFocused = activeElement && "focus" in activeElement ? (activeElement as HTMLElement) : null;
 		const previousOverflow = ownerDocument.body.style.overflow;
 		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
+			if (matchesBrowserShortcut(event, "closeModal")) {
 				event.preventDefault();
 				event.stopPropagation();
 				if (!disableEscapeCloseRef.current) {
@@ -53,7 +54,7 @@ const Modal: React.FC<ModalProps> = ({
 				return;
 			}
 
-			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+			if (matchesBrowserShortcut(event, "focusSearch")) {
 				event.preventDefault();
 				event.stopPropagation();
 				if (!dialog.contains(ownerDocument.activeElement)) {

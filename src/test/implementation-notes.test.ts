@@ -4,7 +4,7 @@ import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import { extractStructuredSection } from "../markdown/structured-sections.ts";
 import type { Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -14,11 +14,11 @@ async function editTaskViaCli(
 	options: { taskId: string; notes: string; status?: string },
 	testDir: string,
 ): Promise<{ exitCode: number }> {
-	const args = [CLI_PATH, "task", "edit", options.taskId, "--notes", options.notes];
+	const args = ["task", "edit", options.taskId, "--notes", options.notes];
 	if (options.status) {
 		args.push("--status", options.status);
 	}
-	return await $`bun ${args}`.cwd(testDir).quiet().nothrow();
+	return await runTestCli(args, { cwd: testDir });
 }
 
 describe("Implementation Notes CLI", () => {
@@ -35,8 +35,7 @@ describe("Implementation Notes CLI", () => {
 	});
 
 	describe("task create with implementation notes", () => {
-		it("should handle all task creation scenarios with implementation notes", async () => {
-			// Test 1: create task with implementation notes using --notes
+		it("creates a task with implementation notes", async () => {
 			const result1 =
 				await $`bun ${[CLI_PATH, "task", "create", "Test Task 1", "--notes", "Initial implementation completed"]}`
 					.cwd(TEST_DIR)
@@ -45,14 +44,15 @@ describe("Implementation Notes CLI", () => {
 			expect(result1.exitCode).toBe(0);
 
 			const core = new Core(TEST_DIR);
-			let task = await core.filesystem.loadTask("task-1");
+			const task = await core.filesystem.loadTask("task-1");
 			expect(task).not.toBeNull();
 			expect(task?.rawContent).toContain("<!-- SECTION:NOTES:BEGIN -->");
 			expect(extractStructuredSection(task?.rawContent || "", "implementationNotes")).toContain(
 				"Initial implementation completed",
 			);
+		});
 
-			// Test 2: create task with multi-line implementation notes
+		it("creates a task with multi-line implementation notes", async () => {
 			const result2 =
 				await $`bun ${[CLI_PATH, "task", "create", "Test Task 2", "--notes", "Step 1: Analysis completed\nStep 2: Implementation in progress"]}`
 					.cwd(TEST_DIR)
@@ -60,13 +60,15 @@ describe("Implementation Notes CLI", () => {
 					.nothrow();
 			expect(result2.exitCode).toBe(0);
 
-			task = await core.filesystem.loadTask("task-2");
+			const core = new Core(TEST_DIR);
+			const task = await core.filesystem.loadTask("task-1");
 			expect(task).not.toBeNull();
 			const notes2 = extractStructuredSection(task?.rawContent || "", "implementationNotes") || "";
 			expect(notes2).toContain("Step 1: Analysis completed");
 			expect(notes2).toContain("Step 2: Implementation in progress");
+		});
 
-			// Test 3: create task with both plan and notes (notes should come after plan)
+		it("places implementation notes after an implementation plan", async () => {
 			const result3 =
 				await $`bun ${[CLI_PATH, "task", "create", "Test Task 3", "--plan", "1. Design\n2. Build\n3. Test", "--notes", "Following the plan step by step"]}`
 					.cwd(TEST_DIR)
@@ -74,7 +76,8 @@ describe("Implementation Notes CLI", () => {
 					.nothrow();
 			expect(result3.exitCode).toBe(0);
 
-			task = await core.filesystem.loadTask("task-3");
+			const core = new Core(TEST_DIR);
+			const task = await core.filesystem.loadTask("task-1");
 			expect(task).not.toBeNull();
 			expect(extractStructuredSection(task?.rawContent || "", "implementationPlan")).toContain("1. Design");
 			expect(extractStructuredSection(task?.rawContent || "", "implementationNotes")).toContain(
@@ -86,8 +89,9 @@ describe("Implementation Notes CLI", () => {
 			const planIndex = desc.indexOf("## Implementation Plan");
 			const notesIndex = desc.indexOf("## Implementation Notes");
 			expect(notesIndex).toBeGreaterThan(planIndex);
+		});
 
-			// Test 4: create task with multiple options including notes
+		it("creates a task with description, acceptance criteria, and notes", async () => {
 			const result4 =
 				await $`bun ${[CLI_PATH, "task", "create", "Test Task 4", "-d", "Complex task description", "--ac", "Must work correctly,Must be tested", "--notes", "Using TDD approach"]}`
 					.cwd(TEST_DIR)
@@ -95,16 +99,19 @@ describe("Implementation Notes CLI", () => {
 					.nothrow();
 			expect(result4.exitCode).toBe(0);
 
-			task = await core.filesystem.loadTask("task-4");
+			const core = new Core(TEST_DIR);
+			const task = await core.filesystem.loadTask("task-1");
 			expect(task).not.toBeNull();
 			expect(task?.rawContent).toContain("Complex task description");
 			expect(extractStructuredSection(task?.rawContent || "", "implementationNotes")).toContain("Using TDD approach");
+		});
 
-			// Test 5: create task without notes should not add the section
+		it("does not add implementation notes when none are provided", async () => {
 			const result5 = await $`bun ${[CLI_PATH, "task", "create", "Test Task 5"]}`.cwd(TEST_DIR).quiet().nothrow();
 			expect(result5.exitCode).toBe(0);
 
-			task = await core.filesystem.loadTask("task-5");
+			const core = new Core(TEST_DIR);
+			const task = await core.filesystem.loadTask("task-1");
 			expect(task).not.toBeNull();
 			// Should not add Implementation Notes section for empty notes
 			expect(task?.rawContent).not.toContain("## Implementation Notes");
@@ -112,10 +119,9 @@ describe("Implementation Notes CLI", () => {
 	});
 
 	describe("task edit with implementation notes", () => {
-		it("should handle all implementation notes scenarios", async () => {
+		it("adds implementation notes to an existing task", async () => {
 			const core = new Core(TEST_DIR);
 
-			// Test 1: add implementation notes to existing task
 			const task1: Task = {
 				id: "task-1",
 				title: "Test Task 1",
@@ -128,7 +134,7 @@ describe("Implementation Notes CLI", () => {
 			};
 			await core.createTask(task1, false);
 
-			let result = await editTaskViaCli(
+			const result = await editTaskViaCli(
 				{
 					taskId: "1",
 					notes: "Fixed the bug by updating the validation logic",
@@ -137,12 +143,14 @@ describe("Implementation Notes CLI", () => {
 			);
 			expect(result.exitCode).toBe(0);
 
-			let updatedTask = await core.filesystem.loadTask("task-1");
+			const updatedTask = await core.filesystem.loadTask("task-1");
 			expect(updatedTask).not.toBeNull();
 			expect(updatedTask?.rawContent).toContain("## Implementation Notes");
 			expect(updatedTask?.rawContent).toContain("Fixed the bug by updating the validation logic");
+		});
 
-			// Test 2: overwrite existing implementation notes
+		it("overwrites existing implementation notes", async () => {
+			const core = new Core(TEST_DIR);
 			const task2: Task = {
 				id: "task-2",
 				title: "Test Task 2",
@@ -156,7 +164,7 @@ describe("Implementation Notes CLI", () => {
 			};
 			await core.createTask(task2, false);
 
-			result = await editTaskViaCli(
+			const result = await editTaskViaCli(
 				{
 					taskId: "2",
 					notes: "Added error handling",
@@ -165,13 +173,15 @@ describe("Implementation Notes CLI", () => {
 			);
 			expect(result.exitCode).toBe(0);
 
-			updatedTask = await core.filesystem.loadTask("task-2");
+			const updatedTask = await core.filesystem.loadTask("task-2");
 			expect(updatedTask).not.toBeNull();
 			const notesSection = updatedTask?.rawContent?.match(/## Implementation Notes\s*\n([\s\S]*?)(?=\n## |$)/i);
 			expect(notesSection?.[1]).not.toContain("Initial implementation completed");
 			expect(notesSection?.[1]).toContain("Added error handling");
+		});
 
-			// Test 3: work together with status update when marking as Done
+		it("updates notes with status when marking a task done", async () => {
+			const core = new Core(TEST_DIR);
 			const task3: Task = {
 				id: "task-3",
 				title: "Feature Implementation",
@@ -188,7 +198,7 @@ describe("Implementation Notes CLI", () => {
 			};
 			await core.createTask(task3, false);
 
-			result = await editTaskViaCli(
+			const result = await editTaskViaCli(
 				{
 					taskId: "3",
 					status: "Done",
@@ -198,15 +208,17 @@ describe("Implementation Notes CLI", () => {
 			);
 			expect(result.exitCode).toBe(0);
 
-			updatedTask = await core.filesystem.loadTask("task-3");
+			const updatedTask = await core.filesystem.loadTask("task-3");
 			expect(updatedTask).not.toBeNull();
 			expect(updatedTask?.status).toBe("Done");
 			expect(updatedTask?.rawContent).toContain("## Implementation Notes");
 			expect(updatedTask?.rawContent).toContain("Implemented using the factory pattern");
 			expect(updatedTask?.rawContent).toContain("Added unit tests");
 			expect(updatedTask?.rawContent).toContain("Updated documentation");
+		});
 
-			// Test 4: handle multi-line notes with proper formatting
+		it("preserves multi-line implementation notes", async () => {
+			const core = new Core(TEST_DIR);
 			const task4: Task = {
 				id: "task-4",
 				title: "Complex Task",
@@ -228,7 +240,7 @@ Technical decisions:
 - Used memoization for expensive calculations
 - Implemented lazy loading`;
 
-			result = await editTaskViaCli(
+			const result = await editTaskViaCli(
 				{
 					taskId: "4",
 					notes: multiLineNotes,
@@ -237,13 +249,15 @@ Technical decisions:
 			);
 			expect(result.exitCode).toBe(0);
 
-			updatedTask = await core.filesystem.loadTask("task-4");
+			const updatedTask = await core.filesystem.loadTask("task-4");
 			expect(updatedTask).not.toBeNull();
 			expect(updatedTask?.rawContent).toContain("Refactored the main module");
 			expect(updatedTask?.rawContent).toContain("Technical decisions:");
 			expect(updatedTask?.rawContent).toContain("Implemented lazy loading");
+		});
 
-			// Test 5: position implementation notes after implementation plan if present
+		it("places implementation notes after an existing implementation plan", async () => {
+			const core = new Core(TEST_DIR);
 			const task5: Task = {
 				id: "task-5",
 				title: "Planned Task",
@@ -257,7 +271,7 @@ Technical decisions:
 			};
 			await core.createTask(task5, false);
 
-			result = await editTaskViaCli(
+			const result = await editTaskViaCli(
 				{
 					taskId: "5",
 					notes: "Followed the plan successfully",
@@ -266,7 +280,7 @@ Technical decisions:
 			);
 			expect(result.exitCode).toBe(0);
 
-			updatedTask = await core.filesystem.loadTask("task-5");
+			const updatedTask = await core.filesystem.loadTask("task-5");
 			expect(updatedTask).not.toBeNull();
 			const desc = updatedTask?.rawContent || "";
 
@@ -275,8 +289,10 @@ Technical decisions:
 			const notesIndex = desc.indexOf("## Implementation Notes");
 			expect(planIndex).toBeGreaterThan(0);
 			expect(notesIndex).toBeGreaterThan(planIndex);
+		});
 
-			// Test 6: handle empty notes gracefully
+		it("does not add implementation notes for an empty update", async () => {
+			const core = new Core(TEST_DIR);
 			const task6: Task = {
 				id: "task-6",
 				title: "Test Task 6",
@@ -289,7 +305,7 @@ Technical decisions:
 			};
 			await core.createTask(task6, false);
 
-			result = await editTaskViaCli(
+			const result = await editTaskViaCli(
 				{
 					taskId: "6",
 					notes: "",
@@ -298,7 +314,7 @@ Technical decisions:
 			);
 			expect(result.exitCode).toBe(0);
 
-			updatedTask = await core.filesystem.loadTask("task-6");
+			const updatedTask = await core.filesystem.loadTask("task-6");
 			expect(updatedTask).not.toBeNull();
 			// Should not add Implementation Notes section for empty notes
 			expect(updatedTask?.rawContent).not.toContain("## Implementation Notes");

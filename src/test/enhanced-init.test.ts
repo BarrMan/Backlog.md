@@ -133,6 +133,7 @@ describe("Enhanced init command", () => {
 			maxColumnWidth: 30,
 			backlogDirectory: "backlog",
 			autoCommit: true,
+			prefixes: { task: "WORK" },
 		};
 
 		await core.filesystem.ensureBacklogStructure();
@@ -141,10 +142,26 @@ describe("Enhanced init command", () => {
 		// Simulate re-initialization by loading existing config
 		const existingConfig = await core.filesystem.loadConfig();
 		expect(existingConfig).toBeTruthy();
-		expect(existingConfig?.statuses).toEqual(["Backlog", "In Progress", "Review", "Done"]);
-		expect(existingConfig?.labels).toEqual(["bug", "feature", "enhancement"]);
-		expect(existingConfig?.dateFormat).toBe("dd/mm/yyyy");
-		expect(existingConfig?.maxColumnWidth).toBe(30);
+
+		const result = await initializeProject(core, {
+			projectName: "Custom Project Updated",
+			integrationMode: "none",
+			existingConfig,
+			advancedConfig: { taskPrefix: "IGNORED" },
+		});
+
+		expect(result.config.projectName).toBe("Custom Project Updated");
+		expect(result.config.statuses).toEqual(["Backlog", "In Progress", "Review", "Done"]);
+		expect(result.config.labels).toEqual(["bug", "feature", "enhancement"]);
+		expect(result.config.dateFormat).toBe("dd/mm/yyyy");
+		expect(result.config.maxColumnWidth).toBe(30);
+		expect(result.config.prefixes?.task).toBe("WORK");
+
+		const reloaded = await core.filesystem.loadConfig();
+		expect(reloaded?.statuses).toEqual(["Backlog", "In Progress", "Review", "Done"]);
+		expect(reloaded?.labels).toEqual(["bug", "feature", "enhancement"]);
+		expect(reloaded?.dateFormat).toBe("dd/mm/yyyy");
+		expect(reloaded?.maxColumnWidth).toBe(30);
 	});
 
 	test("should preserve non-init-managed config fields during re-initialization", async () => {

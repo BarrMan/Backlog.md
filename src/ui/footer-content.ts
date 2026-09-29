@@ -1,3 +1,5 @@
+import { formatKeymap } from "./keymap.ts";
+
 /**
  * Footer shortcut hints for the two task views.
  *
@@ -8,18 +10,36 @@
  * The project filter (`V`) is only bound when the project configures `projects:`, so it is
  * listed only when it is actually available, matching the help popup.
  */
-function filterKeys(before: string[], after: string[], hasProjects: boolean): string {
-	return [...before, ...(hasProjects ? ["V"] : []), ...after].join("/");
+function filterKeys(before: string[], projectKey: string, after: string[], hasProjects: boolean): string {
+	return [...before, ...(hasProjects ? [projectKey] : []), ...after].join("/");
 }
 
 export function getBoardFooterContent(options: { hasProjects?: boolean } = {}): string {
-	const keys = filterKeys(["T"], ["P", "I", "F"], options.hasProjects ?? false);
-	return ` {cyan-fg}[Tab]{/} View | {cyan-fg}[Shift+B]{/} Workspace | {cyan-fg}[N]{/} New | {cyan-fg}[/]{/} Search | {cyan-fg}[${keys}]{/} Filter | {cyan-fg}[←→/↑↓]{/} Nav | {cyan-fg}[Enter]{/} Details | {cyan-fg}[E/M/C/A]{/} Edit/Move/Comp/Arch | {cyan-fg}[Y]{/} Yank | {cyan-fg}[?]{/} Help | {cyan-fg}[q]{/} Quit`;
+	const keys = filterKeys(
+		[formatKeymap("board", "filterType")],
+		formatKeymap("board", "filterProject"),
+		[
+			formatKeymap("board", "filterPriority"),
+			formatKeymap("board", "filterMilestone"),
+			formatKeymap("board", "filterLabels"),
+		],
+		options.hasProjects ?? false,
+	);
+	return ` {cyan-fg}[${formatKeymap("board", "switchView")}]{/} View | {cyan-fg}[${formatKeymap("board", "workspace")}]{/} Workspace | {cyan-fg}[${formatKeymap("board", "create")}]{/} New | {cyan-fg}[${formatKeymap("board", "search")}]{/} Search | {cyan-fg}[${keys}]{/} Filter | {cyan-fg}[${formatKeymap("board", "navPrevious")}/${formatKeymap("board", "navNext")}/${formatKeymap("board", "navUp")}${formatKeymap("board", "navDown")}]{/} Nav | {cyan-fg}[${formatKeymap("board", "open")}]{/} Details | {cyan-fg}[${formatKeymap("board", "edit")}/${formatKeymap("board", "move")}/${formatKeymap("board", "complete")}/${formatKeymap("board", "archive")}]{/} Edit/Move/Comp/Arch | {cyan-fg}[${formatKeymap("board", "copy")}]{/} Yank | {cyan-fg}[${formatKeymap("shared", "help")}]{/} Help | {cyan-fg}[${formatKeymap("shared", "quitWithoutEscape")}]{/} Quit`;
 }
 
 export function getTaskListFooterContent(options: { hasProjects?: boolean } = {}): string {
-	const keys = filterKeys(["S", "T"], ["P", "I", "L"], options.hasProjects ?? false);
-	return ` {cyan-fg}[Tab]{/} View | {cyan-fg}[/]{/} Search | {cyan-fg}[${keys}]{/} Filter | {cyan-fg}[↑↓]{/} Nav | {cyan-fg}[E/C/A]{/} Edit/Comp/Arch | {cyan-fg}[Y]{/} Yank | {cyan-fg}[?]{/} Help | {cyan-fg}[q]{/} Quit`;
+	const keys = filterKeys(
+		[formatKeymap("taskList", "filterStatus"), formatKeymap("taskList", "filterType")],
+		formatKeymap("taskList", "filterProject"),
+		[
+			formatKeymap("taskList", "filterPriority"),
+			formatKeymap("taskList", "filterMilestone"),
+			formatKeymap("taskList", "filterLabels"),
+		],
+		options.hasProjects ?? false,
+	);
+	return ` {cyan-fg}[${formatKeymap("shared", "tab")}]{/} View | {cyan-fg}[${formatKeymap("shared", "search")}]{/} Search | {cyan-fg}[${keys}]{/} Filter | {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}]{/} Nav | {cyan-fg}[${formatKeymap("taskList", "edit")}/${formatKeymap("taskList", "complete")}/${formatKeymap("taskList", "archive")}]{/} Edit/Comp/Arch | {cyan-fg}[${formatKeymap("taskList", "copy")}]{/} Yank | {cyan-fg}[${formatKeymap("shared", "help")}]{/} Help | {cyan-fg}[${formatKeymap("shared", "quitWithoutEscape")}]{/} Quit`;
 }
 
 function visibleLength(value: string): number {

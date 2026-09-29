@@ -5,10 +5,7 @@ import type {
 	ListResourcesResult,
 	ListResourceTemplatesResult,
 	ListToolsResult,
-	Prompt,
 	ReadResourceResult,
-	Resource,
-	Tool,
 	ToolAnnotations,
 } from "@modelcontextprotocol/sdk/types.js";
 
@@ -28,17 +25,6 @@ export interface McpResourceHandler {
 	handler: (uri: string) => Promise<ReadResourceResult>;
 }
 
-export interface McpPromptHandler {
-	name: string;
-	description?: string;
-	arguments?: Array<{
-		name: string;
-		description?: string;
-		required?: boolean;
-	}>;
-	handler: (args: Record<string, unknown>) => Promise<GetPromptResult>;
-}
-
 export type {
 	CallToolResult,
 	GetPromptResult,
@@ -46,8 +32,5 @@ export type {
 	ListResourcesResult,
 	ListResourceTemplatesResult,
 	ListToolsResult,
-	Prompt,
 	ReadResourceResult,
-	Resource,
-	Tool,
 };

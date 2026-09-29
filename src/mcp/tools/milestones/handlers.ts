@@ -1,5 +1,6 @@
-import { rename as moveFile } from "node:fs/promises";
 import type { Core } from "../../../core/backlog.ts";
+import { MilestoneWorkflow, MilestoneWorkflowError } from "../../../core/milestone-workflow.ts";
+import { collectArchivedMilestoneKeys } from "../../../core/milestones.ts";
 import type { Milestone, Task } from "../../../types/index.ts";
 import { normalizeDueDate } from "../../../utils/due-date.ts";
 import { formatUtcDateForDisplay } from "../../../utils/utc-date-display.ts";
@@ -10,7 +11,6 @@ import {
 	keySetsIntersect,
 	milestoneKey,
 	normalizeMilestoneName,
-	resolveMilestoneStorageValue,
 } from "../../utils/milestone-resolution.ts";
 
 export type MilestoneAddArgs = {
@@ -36,24 +36,6 @@ export type MilestoneArchiveArgs = {
 	name: string;
 };
 
-function collectArchivedMilestoneKeys(archivedMilestones: Milestone[], activeMilestones: Milestone[]): string[] {
-	const keys = new Set<string>();
-	const activeTitleKeys = new Set(activeMilestones.map((milestone) => milestoneKey(milestone.title)).filter(Boolean));
-
-	for (const milestone of archivedMilestones) {
-		const idKey = milestoneKey(milestone.id);
-		if (idKey) {
-			keys.add(idKey);
-		}
-		const titleKey = milestoneKey(milestone.title);
-		if (titleKey && !activeTitleKeys.has(titleKey)) {
-			keys.add(titleKey);
-		}
-	}
-
-	return Array.from(keys);
-}
-
 function formatListBlock(title: string, items: string[]): string {
 	if (items.length === 0) {
 		return `${title}\n  (none)`;
@@ -68,42 +50,6 @@ function formatTaskIdList(taskIds: string[], limit = 20): string {
 	return `${shown.join(", ")}${suffix}`;
 }
 
-function findActiveMilestoneByAlias(name: string, milestones: Milestone[]): Milestone | undefined {
-	const normalized = normalizeMilestoneName(name);
-	const key = milestoneKey(normalized);
-	if (!key) {
-		return undefined;
-	}
-	const resolvedId = resolveMilestoneStorageValue(normalized, milestones);
-	const resolvedKey = milestoneKey(resolvedId);
-	const idMatch = milestones.find((milestone) => milestoneKey(milestone.id) === resolvedKey);
-	if (idMatch) {
-		return idMatch;
-	}
-	const titleMatches = milestones.filter((milestone) => milestoneKey(milestone.title) === key);
-	return titleMatches.length === 1 ? titleMatches[0] : undefined;
-}
-
-function buildTaskMatchKeysForMilestone(name: string, milestone?: Milestone, includeTitleMatch = true): Set<string> {
-	if (!milestone) {
-		return buildMilestoneMatchKeys(name, []);
-	}
-	const baseValue = includeTitleMatch ? name : milestone.id;
-	const keys = buildMilestoneMatchKeys(baseValue, [milestone]);
-	for (const key of buildMilestoneMatchKeys(milestone.id, [milestone])) {
-		keys.add(key);
-	}
-	const titleKey = milestoneKey(milestone.title);
-	if (titleKey) {
-		if (includeTitleMatch) {
-			keys.add(titleKey);
-		} else {
-			keys.delete(titleKey);
-		}
-	}
-	return keys;
-}
-
 function buildMilestoneRecordMatchKeys(milestone: Milestone): Set<string> {
 	const keys = buildMilestoneMatchKeys(milestone.id, [milestone]);
 	const titleKey = milestoneKey(milestone.title);
@@ -113,106 +59,148 @@ function buildMilestoneRecordMatchKeys(milestone: Milestone): Set<string> {
 	return keys;
 }
 
-function hasMilestoneTitleAliasCollision(sourceMilestone: Milestone, candidates: Milestone[]): boolean {
-	const sourceMilestoneIdKey = milestoneKey(sourceMilestone.id);
-	const sourceTitleKey = milestoneKey(sourceMilestone.title);
-	if (!sourceTitleKey) {
-		return false;
-	}
-	return candidates.some((candidate) => {
-		if (milestoneKey(candidate.id) === sourceMilestoneIdKey) {
-			return false;
-		}
-		return buildMilestoneRecordMatchKeys(candidate).has(sourceTitleKey);
-	});
+function resolveMilestoneValueForReporting(value: string, active: Milestone[], archived: Milestone[]): string {
+	const normalized = normalizeMilestoneName(value);
+	if (!normalized) return "";
+	const inputKey = milestoneKey(normalized);
+	const titles = active.filter((milestone) => milestoneKey(milestone.title) === inputKey);
+	return isMilestoneId(normalized)
+		? resolveIdLikeMilestoneValue(normalized, inputKey, titles, active, archived)
+		: resolveTitleLikeMilestoneValue(normalized, inputKey, titles, active, archived);
 }
 
-function resolveMilestoneValueForReporting(
+function isMilestoneId(value: string): boolean {
+	return /^\d+$/.test(value) || /^m-\d+$/i.test(value);
+}
+
+function resolveIdLikeMilestoneValue(
 	value: string,
-	activeMilestones: Milestone[],
-	archivedMilestones: Milestone[],
+	key: string,
+	titles: Milestone[],
+	active: Milestone[],
+	archived: Milestone[],
 ): string {
-	const normalized = normalizeMilestoneName(value);
-	if (!normalized) {
-		return "";
-	}
-	const inputKey = milestoneKey(normalized);
-	const looksLikeMilestoneId = /^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized);
-	const canonicalInputId = looksLikeMilestoneId
-		? `m-${String(Number.parseInt(normalized.replace(/^m-/i, ""), 10))}`
-		: null;
-	const aliasKeys = new Set<string>([inputKey]);
-	if (canonicalInputId) {
-		const numericAlias = canonicalInputId.replace(/^m-/, "");
-		aliasKeys.add(canonicalInputId);
-		aliasKeys.add(numericAlias);
-	}
+	const id = firstMilestoneId("", findReportingId(active, key, value), findReportingId(archived, key, value));
+	if (id) return id;
+	const title = uniqueMilestone(titles);
+	if (title) return title.id;
+	if (titles.length > 1) return value;
+	return uniqueTitle(archived, key)?.id ?? value;
+}
 
-	const idMatchesAlias = (milestoneId: string): boolean => {
-		const idKey = milestoneKey(milestoneId);
-		if (aliasKeys.has(idKey)) {
-			return true;
-		}
-		const idMatch = milestoneId.trim().match(/^m-(\d+)$/i);
-		if (!idMatch?.[1]) {
-			return false;
-		}
-		const numericAlias = String(Number.parseInt(idMatch[1], 10));
-		return aliasKeys.has(`m-${numericAlias}`) || aliasKeys.has(numericAlias);
-	};
-	const findIdMatch = (milestones: Milestone[]): Milestone | undefined => {
-		const rawExactMatch = milestones.find((milestone) => milestoneKey(milestone.id) === inputKey);
-		if (rawExactMatch) {
-			return rawExactMatch;
-		}
-		if (canonicalInputId) {
-			const canonicalRawMatch = milestones.find((milestone) => milestoneKey(milestone.id) === canonicalInputId);
-			if (canonicalRawMatch) {
-				return canonicalRawMatch;
-			}
-		}
-		return milestones.find((milestone) => idMatchesAlias(milestone.id));
-	};
-	const findUniqueTitleMatch = (milestones: Milestone[]): Milestone | undefined => {
-		const titleMatches = milestones.filter((milestone) => milestoneKey(milestone.title) === inputKey);
-		return titleMatches.length === 1 ? titleMatches[0] : undefined;
-	};
+function resolveTitleLikeMilestoneValue(
+	value: string,
+	key: string,
+	titles: Milestone[],
+	active: Milestone[],
+	archived: Milestone[],
+): string {
+	const title = uniqueMilestone(titles);
+	if (title) return title.id;
+	if (titles.length > 1) return value;
+	return firstMilestoneId(
+		value,
+		findReportingId(active, key, value),
+		uniqueTitle(archived, key),
+		findReportingId(archived, key, value),
+	);
+}
 
-	const activeTitleMatches = activeMilestones.filter((milestone) => milestoneKey(milestone.title) === inputKey);
-	if (looksLikeMilestoneId) {
-		const activeIdMatch = findIdMatch(activeMilestones);
-		if (activeIdMatch) {
-			return activeIdMatch.id;
-		}
-		const archivedIdMatch = findIdMatch(archivedMilestones);
-		if (archivedIdMatch) {
-			return archivedIdMatch.id;
-		}
-		if (activeTitleMatches.length === 1) {
-			return activeTitleMatches[0]?.id ?? normalized;
-		}
-		if (activeTitleMatches.length > 1) {
-			return normalized;
-		}
-		return findUniqueTitleMatch(archivedMilestones)?.id ?? normalized;
+function firstMilestoneId(fallback: string, ...milestones: Array<Milestone | undefined>): string {
+	for (const milestone of milestones) {
+		if (milestone) return milestone.id;
 	}
+	return fallback;
+}
 
-	const activeTitleMatch = findUniqueTitleMatch(activeMilestones);
-	if (activeTitleMatch) {
-		return activeTitleMatch.id;
+function textResult(text: string): CallToolResult {
+	return { content: [{ type: "text", text }] };
+}
+
+function collectConfiguredMilestoneKeys(active: Milestone[], archived: Milestone[]) {
+	const reservedIds = new Set<string>();
+	for (const milestone of [...active, ...archived]) {
+		for (const key of buildMilestoneMatchKeys(milestone.id, [])) reservedIds.add(key);
 	}
-	if (activeTitleMatches.length > 1) {
-		return normalized;
+	const titleCounts = new Map<string, number>();
+	for (const milestone of active) {
+		const key = milestoneKey(milestone.title);
+		if (key) titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
 	}
-	const activeIdMatch = findIdMatch(activeMilestones);
-	if (activeIdMatch) {
-		return activeIdMatch.id;
+	const keys = new Set<string>();
+	for (const milestone of active) {
+		for (const key of buildMilestoneMatchKeys(milestone.id, [])) keys.add(key);
+		const titleKey = milestoneKey(milestone.title);
+		if (titleKey && !reservedIds.has(titleKey) && titleCounts.get(titleKey) === 1) keys.add(titleKey);
 	}
-	const archivedTitleMatch = findUniqueTitleMatch(archivedMilestones);
-	if (archivedTitleMatch) {
-		return archivedTitleMatch.id;
+	return keys;
+}
+
+function collectTaskMilestoneValues(tasks: Task[], active: Milestone[], archived: Milestone[]): Map<string, string> {
+	const values = new Map<string, string>();
+	for (const task of tasks) {
+		const value = normalizeMilestoneName(task.milestone ?? "");
+		if (!value) continue;
+		const resolved = resolveMilestoneValueForReporting(value, active, archived);
+		const key = milestoneKey(resolved);
+		if (!values.has(key)) values.set(key, resolved);
 	}
-	return findIdMatch(archivedMilestones)?.id ?? normalized;
+	return values;
+}
+
+function milestoneListText(active: Milestone[], archived: Milestone[], tasks: Task[]): string {
+	const configuredKeys = collectConfiguredMilestoneKeys(active, archived);
+	const archivedKeys = new Set(collectArchivedMilestoneKeys(archived, active));
+	const values = collectTaskMilestoneValues(tasks, active, archived);
+	const valuesFor = (predicate: (key: string) => boolean) =>
+		Array.from(values.entries())
+			.filter(([key]) => predicate(key))
+			.map(([, value]) => value)
+			.sort((left, right) => left.localeCompare(right));
+	const milestones = active.map((milestone) =>
+		milestone.dueDate
+			? `${milestone.id}: ${milestone.title} (due ${formatUtcDateForDisplay(milestone.dueDate)})`
+			: `${milestone.id}: ${milestone.title}`,
+	);
+	return [
+		formatListBlock(`Milestones (${active.length}):`, milestones),
+		formatListBlock(
+			`Milestones found on tasks without files (${valuesFor((key) => !configuredKeys.has(key) && !archivedKeys.has(key)).length}):`,
+			valuesFor((key) => !configuredKeys.has(key) && !archivedKeys.has(key)),
+		),
+		formatListBlock(
+			`Archived milestone values still on tasks (${valuesFor((key) => !configuredKeys.has(key) && archivedKeys.has(key)).length}):`,
+			valuesFor((key) => !configuredKeys.has(key) && archivedKeys.has(key)),
+		),
+		"Hint: use milestone_add to create milestone files, milestone_rename / milestone_remove to manage, milestone_archive to archive.",
+	].join("\n\n");
+}
+
+function uniqueMilestone(milestones: Milestone[]): Milestone | undefined {
+	return milestones.length === 1 ? milestones[0] : undefined;
+}
+
+function uniqueTitle(milestones: Milestone[], key: string): Milestone | undefined {
+	return uniqueMilestone(milestones.filter((milestone) => milestoneKey(milestone.title) === key));
+}
+
+function findReportingId(milestones: Milestone[], inputKey: string, value: string): Milestone | undefined {
+	const canonical =
+		/^\d+$/.test(value) || /^m-\d+$/i.test(value) ? `m-${Number.parseInt(value.replace(/^m-/i, ""), 10)}` : null;
+	const exact = milestones.find((milestone) => milestoneKey(milestone.id) === inputKey);
+	if (exact) return exact;
+	const canonicalMatch = canonical
+		? milestones.find((milestone) => milestoneKey(milestone.id) === canonical)
+		: undefined;
+	if (canonicalMatch) return canonicalMatch;
+	const aliases = new Set([inputKey, ...(canonical ? [canonical, canonical.replace(/^m-/, "")] : [])]);
+	return milestones.find((milestone) => reportingIdMatches(milestone.id, aliases));
+}
+
+function reportingIdMatches(id: string, aliases: Set<string>): boolean {
+	if (aliases.has(milestoneKey(id))) return true;
+	const match = id.trim().match(/^m-(\d+)$/i);
+	return Boolean(match?.[1] && aliases.has(`m-${Number.parseInt(match[1], 10)}`));
 }
 
 export class MilestoneHandlers {
@@ -220,18 +208,6 @@ export class MilestoneHandlers {
 
 	private async listLocalTasks(): Promise<Task[]> {
 		return await this.core.filesystem.listTasks();
-	}
-
-	private async rollbackTaskMilestones(previousMilestones: Map<string, string | undefined>): Promise<string[]> {
-		const failedTaskIds: string[] = [];
-		for (const [taskId, milestone] of previousMilestones.entries()) {
-			try {
-				await this.core.editTask(taskId, { milestone: milestone ?? null }, false);
-			} catch {
-				failedTaskIds.push(taskId);
-			}
-		}
-		return failedTaskIds.sort((a, b) => a.localeCompare(b));
 	}
 
 	private async commitMilestoneMutation(
@@ -274,76 +250,12 @@ export class MilestoneHandlers {
 	}
 
 	async listMilestones(): Promise<CallToolResult> {
-		// Get file-based milestones
-		const fileMilestones = await this.listFileMilestones();
-		const archivedMilestones = await this.listArchivedMilestones();
-		const reservedIdKeys = new Set<string>();
-		for (const milestone of [...fileMilestones, ...archivedMilestones]) {
-			for (const key of buildMilestoneMatchKeys(milestone.id, [])) {
-				reservedIdKeys.add(key);
-			}
-		}
-		const activeTitleCounts = new Map<string, number>();
-		for (const milestone of fileMilestones) {
-			const titleKey = milestoneKey(milestone.title);
-			if (!titleKey) continue;
-			activeTitleCounts.set(titleKey, (activeTitleCounts.get(titleKey) ?? 0) + 1);
-		}
-		const fileMilestoneKeys = new Set<string>();
-		for (const milestone of fileMilestones) {
-			for (const key of buildMilestoneMatchKeys(milestone.id, [])) {
-				fileMilestoneKeys.add(key);
-			}
-			const titleKey = milestoneKey(milestone.title);
-			if (titleKey && !reservedIdKeys.has(titleKey) && activeTitleCounts.get(titleKey) === 1) {
-				fileMilestoneKeys.add(titleKey);
-			}
-		}
-		const archivedKeys = new Set<string>(collectArchivedMilestoneKeys(archivedMilestones, fileMilestones));
-
-		// Get milestones discovered from tasks
-		const tasks = await this.listLocalTasks();
-		const discoveredByKey = new Map<string, string>();
-		for (const task of tasks) {
-			const normalized = normalizeMilestoneName(task.milestone ?? "");
-			if (!normalized) continue;
-			const canonicalValue = resolveMilestoneValueForReporting(normalized, fileMilestones, archivedMilestones);
-			const key = milestoneKey(canonicalValue);
-			if (!discoveredByKey.has(key)) {
-				discoveredByKey.set(key, canonicalValue);
-			}
-		}
-
-		const unconfigured = Array.from(discoveredByKey.entries())
-			.filter(([key]) => !fileMilestoneKeys.has(key) && !archivedKeys.has(key))
-			.map(([, value]) => value)
-			.sort((a, b) => a.localeCompare(b));
-		const archivedTaskValues = Array.from(discoveredByKey.entries())
-			.filter(([key]) => !fileMilestoneKeys.has(key) && archivedKeys.has(key))
-			.map(([, value]) => value)
-			.sort((a, b) => a.localeCompare(b));
-
-		const blocks: string[] = [];
-		const milestoneLines = fileMilestones.map((m) =>
-			m.dueDate ? `${m.id}: ${m.title} (due ${formatUtcDateForDisplay(m.dueDate)})` : `${m.id}: ${m.title}`,
-		);
-		blocks.push(formatListBlock(`Milestones (${fileMilestones.length}):`, milestoneLines));
-		blocks.push(formatListBlock(`Milestones found on tasks without files (${unconfigured.length}):`, unconfigured));
-		blocks.push(
-			formatListBlock(`Archived milestone values still on tasks (${archivedTaskValues.length}):`, archivedTaskValues),
-		);
-		blocks.push(
-			"Hint: use milestone_add to create milestone files, milestone_rename / milestone_remove to manage, milestone_archive to archive.",
-		);
-
-		return {
-			content: [
-				{
-					type: "text",
-					text: blocks.join("\n\n"),
-				},
-			],
-		};
+		const [active, archived, tasks] = await Promise.all([
+			this.listFileMilestones(),
+			this.listArchivedMilestones(),
+			this.listLocalTasks(),
+		]);
+		return textResult(milestoneListText(active, archived, tasks));
 	}
 
 	async addMilestone(args: MilestoneAddArgs): Promise<CallToolResult> {
@@ -383,317 +295,62 @@ export class MilestoneHandlers {
 			taskFilePaths: milestonePath ? [milestonePath] : [],
 		});
 
-		return {
-			content: [
-				{
-					type: "text",
-					text: `Created milestone "${milestone.title}" (${milestone.id}).${milestone.dueDate ? `\nDue: ${formatUtcDateForDisplay(milestone.dueDate)}` : ""}`,
-				},
-			],
-		};
+		return textResult(
+			`Created milestone "${milestone.title}" (${milestone.id}).${milestone.dueDate ? `\nDue: ${formatUtcDateForDisplay(milestone.dueDate)}` : ""}`,
+		);
 	}
 
 	async renameMilestone(args: MilestoneRenameArgs): Promise<CallToolResult> {
-		const fromName = normalizeMilestoneName(args.from);
-		const toName = normalizeMilestoneName(args.to);
-		if (!fromName || !toName) {
-			throw new BacklogToolError("Both 'from' and 'to' milestone names are required.", "VALIDATION_ERROR");
-		}
-
-		const fileMilestones = await this.listFileMilestones();
-		const archivedMilestones = await this.listArchivedMilestones();
-		const sourceMilestone = findActiveMilestoneByAlias(fromName, fileMilestones);
-		if (!sourceMilestone) {
-			throw new BacklogToolError(`Milestone not found: "${fromName}"`, "NOT_FOUND");
-		}
-		let requestedDueDate: string | undefined;
 		try {
-			requestedDueDate =
-				args.dueDate === undefined
-					? sourceMilestone.dueDate
-					: args.dueDate === null
-						? undefined
-						: normalizeDueDate(args.dueDate, "Due date");
+			const result = await new MilestoneWorkflow(this.core).rename(args);
+			if (!result.titleChanged && !result.dueDateChanged)
+				return textResult(
+					`Milestone "${result.source.title}" (${result.source.id}) is already named "${result.source.title}". No changes made.`,
+				);
+			const lines: string[] = [];
+			if (result.titleChanged)
+				lines.push(
+					`Renamed milestone "${result.source.title}" (${result.source.id}) → "${result.milestone.title}" (${result.milestone.id}).`,
+				);
+			if (result.dueDateChanged)
+				lines.push(
+					result.milestone.dueDate
+						? `Due: ${formatUtcDateForDisplay(result.milestone.dueDate)}`
+						: "Cleared milestone due date.",
+				);
+			if (result.skippedTaskUpdate) lines.push("Skipped updating tasks (updateTasks=false).");
+			else if (result.titleChanged)
+				lines.push(
+					`Updated ${result.updatedTaskIds.length} local task${result.updatedTaskIds.length === 1 ? "" : "s"}: ${formatTaskIdList(result.updatedTaskIds)}`,
+				);
+			if (result.sourcePath && result.targetPath && result.sourcePath !== result.targetPath)
+				lines.push(`Renamed milestone file: ${result.sourcePath} -> ${result.targetPath}`);
+			return textResult(lines.join("\n"));
 		} catch (error) {
-			throw new BacklogToolError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR");
+			if (error instanceof MilestoneWorkflowError) throw new BacklogToolError(error.message, error.code);
+			throw error;
 		}
-		const titleChanged = toName !== sourceMilestone.title.trim();
-		const dueDateChanged = requestedDueDate !== sourceMilestone.dueDate;
-		if (!titleChanged && !dueDateChanged) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Milestone "${sourceMilestone.title}" (${sourceMilestone.id}) is already named "${sourceMilestone.title}". No changes made.`,
-					},
-				],
-			};
-		}
-		const hasTitleCollision = hasMilestoneTitleAliasCollision(sourceMilestone, [
-			...fileMilestones,
-			...archivedMilestones,
-		]);
-
-		const targetKeys = buildMilestoneMatchKeys(toName, fileMilestones);
-		const aliasConflict = fileMilestones.find(
-			(milestone) =>
-				milestoneKey(milestone.id) !== milestoneKey(sourceMilestone.id) &&
-				keySetsIntersect(targetKeys, buildMilestoneRecordMatchKeys(milestone)),
-		);
-		if (aliasConflict) {
-			throw new BacklogToolError(
-				`Milestone alias conflict: "${toName}" matches existing milestone "${aliasConflict.title}" (${aliasConflict.id}).`,
-				"VALIDATION_ERROR",
-			);
-		}
-
-		const targetMilestone = sourceMilestone.id;
-		const shouldUpdateTasks = titleChanged && (args.updateTasks ?? true);
-		const tasks = shouldUpdateTasks ? await this.listLocalTasks() : [];
-		const matchKeys = shouldUpdateTasks
-			? buildTaskMatchKeysForMilestone(fromName, sourceMilestone, !hasTitleCollision)
-			: new Set<string>();
-		const matches = shouldUpdateTasks ? tasks.filter((task) => matchKeys.has(milestoneKey(task.milestone ?? ""))) : [];
-		let updatedTaskIds: string[] = [];
-		const updatedTaskFilePaths = new Set<string>();
-
-		const renameResult = await this.core.renameMilestone(sourceMilestone.id, toName, false, args.dueDate);
-		if (!renameResult.success || !renameResult.milestone) {
-			throw new BacklogToolError(`Failed to rename milestone "${sourceMilestone.title}".`, "INTERNAL_ERROR");
-		}
-
-		const renamedMilestone = renameResult.milestone;
-		const previousMilestones = new Map<string, string | undefined>();
-		if (shouldUpdateTasks) {
-			try {
-				for (const task of matches) {
-					previousMilestones.set(task.id, task.milestone);
-					const updatedTask = await this.core.editTask(task.id, { milestone: targetMilestone }, false);
-					const taskFilePath = updatedTask.filePath ?? task.filePath;
-					if (taskFilePath) {
-						updatedTaskFilePaths.add(taskFilePath);
-					}
-					updatedTaskIds.push(task.id);
-				}
-				updatedTaskIds = updatedTaskIds.sort((a, b) => a.localeCompare(b));
-			} catch {
-				const rollbackTaskFailures = await this.rollbackTaskMilestones(previousMilestones);
-				const rollbackRenameResult = await this.core.renameMilestone(
-					sourceMilestone.id,
-					sourceMilestone.title,
-					false,
-					sourceMilestone.dueDate ?? null,
-				);
-				const rollbackDetails: string[] = [];
-				if (!rollbackRenameResult.success) {
-					rollbackDetails.push("failed to rollback milestone file rename");
-				}
-				if (rollbackTaskFailures.length > 0) {
-					rollbackDetails.push(`failed to rollback task milestones for: ${rollbackTaskFailures.join(", ")}`);
-				}
-				const detailSuffix = rollbackDetails.length > 0 ? ` (${rollbackDetails.join("; ")})` : "";
-				throw new BacklogToolError(
-					`Failed to update task milestones after renaming "${sourceMilestone.title}"${detailSuffix}.`,
-					"INTERNAL_ERROR",
-				);
-			}
-		}
-		try {
-			const commitAction = titleChanged ? "Rename" : "Update";
-			await this.commitMilestoneMutation(`backlog: ${commitAction} milestone ${sourceMilestone.id}`, {
-				sourcePath: renameResult.sourcePath,
-				targetPath: renameResult.targetPath,
-				taskFilePaths: updatedTaskFilePaths,
-			});
-		} catch {
-			const rollbackTaskFailures = await this.rollbackTaskMilestones(previousMilestones);
-			const rollbackRenameResult = await this.core.renameMilestone(
-				sourceMilestone.id,
-				sourceMilestone.title,
-				false,
-				sourceMilestone.dueDate ?? null,
-			);
-			const rollbackDetails: string[] = [];
-			if (!rollbackRenameResult.success) {
-				rollbackDetails.push("failed to rollback milestone file rename");
-			}
-			if (rollbackTaskFailures.length > 0) {
-				rollbackDetails.push(`failed to rollback task milestones for: ${rollbackTaskFailures.join(", ")}`);
-			}
-			const detailSuffix = rollbackDetails.length > 0 ? ` (${rollbackDetails.join("; ")})` : "";
-			throw new BacklogToolError(
-				`Failed while finalizing milestone rename "${sourceMilestone.title}"${detailSuffix}.`,
-				"INTERNAL_ERROR",
-			);
-		}
-
-		const summaryLines: string[] = [];
-		if (titleChanged) {
-			summaryLines.push(
-				`Renamed milestone "${sourceMilestone.title}" (${sourceMilestone.id}) → "${renamedMilestone.title}" (${renamedMilestone.id}).`,
-			);
-		}
-		if (dueDateChanged) {
-			summaryLines.push(
-				renamedMilestone.dueDate
-					? `Due: ${formatUtcDateForDisplay(renamedMilestone.dueDate)}`
-					: "Cleared milestone due date.",
-			);
-		}
-		if (shouldUpdateTasks) {
-			summaryLines.push(
-				`Updated ${updatedTaskIds.length} local task${updatedTaskIds.length === 1 ? "" : "s"}: ${formatTaskIdList(updatedTaskIds)}`,
-			);
-		} else if (titleChanged) {
-			summaryLines.push("Skipped updating tasks (updateTasks=false).");
-		}
-		if (renameResult.sourcePath && renameResult.targetPath && renameResult.sourcePath !== renameResult.targetPath) {
-			summaryLines.push(`Renamed milestone file: ${renameResult.sourcePath} -> ${renameResult.targetPath}`);
-		}
-
-		return {
-			content: [
-				{
-					type: "text",
-					text: summaryLines.join("\n"),
-				},
-			],
-		};
 	}
 
 	async removeMilestone(args: MilestoneRemoveArgs): Promise<CallToolResult> {
-		const name = normalizeMilestoneName(args.name);
-		if (!name) {
-			throw new BacklogToolError("Milestone name cannot be empty.", "VALIDATION_ERROR");
-		}
-
-		const fileMilestones = await this.listFileMilestones();
-		const archivedMilestones = await this.listArchivedMilestones();
-		const sourceMilestone = findActiveMilestoneByAlias(name, fileMilestones);
-		if (!sourceMilestone) {
-			throw new BacklogToolError(`Milestone not found: "${name}"`, "NOT_FOUND");
-		}
-		const hasTitleCollision = hasMilestoneTitleAliasCollision(sourceMilestone, [
-			...fileMilestones,
-			...archivedMilestones,
-		]);
-		const removeKeys = buildTaskMatchKeysForMilestone(name, sourceMilestone, !hasTitleCollision);
-		const taskHandling = args.taskHandling ?? "clear";
-		const reassignTo = normalizeMilestoneName(args.reassignTo ?? "");
-		const targetMilestone =
-			taskHandling === "reassign" ? findActiveMilestoneByAlias(reassignTo, fileMilestones) : undefined;
-		const reassignedMilestone = targetMilestone?.id ?? "";
-
-		if (taskHandling === "reassign") {
-			if (!reassignTo) {
-				throw new BacklogToolError("reassignTo is required when taskHandling is reassign.", "VALIDATION_ERROR");
-			}
-			if (!targetMilestone) {
-				throw new BacklogToolError(`Target milestone not found: "${reassignTo}"`, "VALIDATION_ERROR");
-			}
-			if (milestoneKey(targetMilestone.id) === milestoneKey(sourceMilestone.id)) {
-				throw new BacklogToolError("reassignTo must be different from the removed milestone.", "VALIDATION_ERROR");
-			}
-		}
-
-		const tasks = taskHandling !== "keep" ? await this.listLocalTasks() : [];
-		const matches =
-			taskHandling !== "keep" ? tasks.filter((task) => removeKeys.has(milestoneKey(task.milestone ?? ""))) : [];
-		const previousMilestones = new Map<string, string | undefined>();
-		let updatedTaskIds: string[] = [];
-		const updatedTaskFilePaths = new Set<string>();
-		if (taskHandling !== "keep") {
-			try {
-				for (const task of matches) {
-					previousMilestones.set(task.id, task.milestone);
-					const updatedTask = await this.core.editTask(
-						task.id,
-						{ milestone: taskHandling === "reassign" ? reassignedMilestone : null },
-						false,
-					);
-					const taskFilePath = updatedTask.filePath ?? task.filePath;
-					if (taskFilePath) {
-						updatedTaskFilePaths.add(taskFilePath);
-					}
-					updatedTaskIds.push(task.id);
-				}
-				updatedTaskIds = updatedTaskIds.sort((a, b) => a.localeCompare(b));
-			} catch {
-				const rollbackFailures = await this.rollbackTaskMilestones(previousMilestones);
-				const detailSuffix =
-					rollbackFailures.length > 0 ? ` (failed rollback for: ${rollbackFailures.join(", ")})` : "";
-				throw new BacklogToolError(
-					`Failed while updating tasks for milestone removal "${sourceMilestone.title}"${detailSuffix}.`,
-					"INTERNAL_ERROR",
-				);
-			}
-		}
-
-		const archiveResult = await this.core.archiveMilestone(sourceMilestone.id, false);
-		if (!archiveResult.success) {
-			let detailSuffix = "";
-			if (taskHandling !== "keep") {
-				const rollbackFailures = await this.rollbackTaskMilestones(previousMilestones);
-				if (rollbackFailures.length > 0) {
-					detailSuffix = ` (failed rollback for: ${rollbackFailures.join(", ")})`;
-				}
-			}
-			throw new BacklogToolError(
-				`Failed to archive milestone "${sourceMilestone.title}" before removal.${detailSuffix}`,
-				"INTERNAL_ERROR",
-			);
-		}
 		try {
-			await this.commitMilestoneMutation(`backlog: Remove milestone ${sourceMilestone.id}`, {
-				sourcePath: archiveResult.sourcePath,
-				targetPath: archiveResult.targetPath,
-				taskFilePaths: updatedTaskFilePaths,
-			});
-		} catch {
-			const rollbackDetails: string[] = [];
-			if (archiveResult.sourcePath && archiveResult.targetPath) {
-				try {
-					await moveFile(archiveResult.targetPath, archiveResult.sourcePath);
-				} catch {
-					rollbackDetails.push("failed to rollback milestone archive");
-				}
-			}
-			if (taskHandling !== "keep") {
-				const rollbackFailures = await this.rollbackTaskMilestones(previousMilestones);
-				if (rollbackFailures.length > 0) {
-					rollbackDetails.push(`failed rollback for: ${rollbackFailures.join(", ")}`);
-				}
-			}
-			const detailSuffix = rollbackDetails.length > 0 ? ` (${rollbackDetails.join("; ")})` : "";
-			throw new BacklogToolError(
-				`Failed while finalizing milestone removal "${sourceMilestone.title}"${detailSuffix}.`,
-				"INTERNAL_ERROR",
-			);
+			const result = await new MilestoneWorkflow(this.core).remove(args);
+			const lines = [`Removed milestone "${result.milestone.title}" (${result.milestone.id}).`];
+			if (result.taskHandling === "keep") lines.push("Kept task milestone values unchanged (taskHandling=keep).");
+			else if (result.taskHandling === "reassign")
+				lines.push(
+					`Reassigned ${result.updatedTaskIds.length} local task${result.updatedTaskIds.length === 1 ? "" : "s"} to "${result.reassignedMilestone?.title}" (${result.reassignedMilestone?.id}): ${formatTaskIdList(result.updatedTaskIds)}`,
+				);
+			else
+				lines.push(
+					`Cleared milestone for ${result.updatedTaskIds.length} local task${result.updatedTaskIds.length === 1 ? "" : "s"}: ${formatTaskIdList(result.updatedTaskIds)}`,
+				);
+			return textResult(lines.join("\n"));
+		} catch (error) {
+			if (error instanceof MilestoneWorkflowError) throw new BacklogToolError(error.message, error.code);
+			throw error;
 		}
-
-		const summaryLines: string[] = [`Removed milestone "${sourceMilestone.title}" (${sourceMilestone.id}).`];
-		if (taskHandling === "keep") {
-			summaryLines.push("Kept task milestone values unchanged (taskHandling=keep).");
-		} else if (taskHandling === "reassign") {
-			const targetSummary = `"${targetMilestone?.title}" (${reassignedMilestone})`;
-			summaryLines.push(
-				`Reassigned ${updatedTaskIds.length} local task${updatedTaskIds.length === 1 ? "" : "s"} to ${targetSummary}: ${formatTaskIdList(updatedTaskIds)}`,
-			);
-		} else {
-			summaryLines.push(
-				`Cleared milestone for ${updatedTaskIds.length} local task${updatedTaskIds.length === 1 ? "" : "s"}: ${formatTaskIdList(updatedTaskIds)}`,
-			);
-		}
-		return {
-			content: [
-				{
-					type: "text",
-					text: summaryLines.join("\n"),
-				},
-			],
-		};
 	}
-
 	async archiveMilestone(args: MilestoneArchiveArgs): Promise<CallToolResult> {
 		const name = normalizeMilestoneName(args.name);
 		if (!name) {
@@ -708,13 +365,6 @@ export class MilestoneHandlers {
 		const label = result.milestone?.title ?? name;
 		const id = result.milestone?.id;
 
-		return {
-			content: [
-				{
-					type: "text",
-					text: `Archived milestone "${label}"${id ? ` (${id})` : ""}.`,
-				},
-			],
-		};
+		return textResult(`Archived milestone "${label}"${id ? ` (${id})` : ""}.`);
 	}
 }

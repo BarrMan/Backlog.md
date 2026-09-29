@@ -16,11 +16,11 @@ import {
 import { formatDependencyGraphLines, formatDependencyNodeTuiLabel } from "../formatters/dependency-graph-text.ts";
 import {
 	buildAcceptanceCriteriaItems,
-	buildDefinitionOfDoneItems,
 	formatDateForDisplay,
+	formatDefinitionOfDoneChecklist,
 	formatTaskPlainText,
 } from "../formatters/task-plain-text.ts";
-import type { LabelMatchMode, Milestone, Task } from "../types/index.ts";
+import type { BacklogConfig, LabelMatchMode, Milestone, Task } from "../types/index.ts";
 import { copyToClipboard } from "../utils/clipboard.ts";
 import { areLabelSelectionsEqual, collectAvailableLabels } from "../utils/label-filter.ts";
 import {
@@ -30,7 +30,12 @@ import {
 	NO_MILESTONE_FILTER_VALUE,
 } from "../utils/milestone-filter.ts";
 import { hasAnyPrefix } from "../utils/prefix-config.ts";
-import { formatPriorityLabel, getPriorityOptions, normalizePriorityValue } from "../utils/priority-config.ts";
+import {
+	formatPriorityLabel,
+	getPriorityOptions,
+	normalizePriorityValue,
+	type PriorityOption,
+} from "../utils/priority-config.ts";
 import { getProjectValues, resolveProjectValues } from "../utils/project-config.ts";
 import { formatReadinessBlockers } from "../utils/readiness.ts";
 import { canonicalTaskId, taskIdsEqual } from "../utils/task-id.ts";
@@ -51,16 +56,24 @@ import { type BoundaryNavigationKey, createGenericList, type GenericList } from 
 import { openHelpPopup } from "./components/help-popup.ts";
 import { formatFooterContent, getTaskListFooterContent } from "./footer-content.ts";
 import { formatHeading } from "./heading.ts";
+import { formatKeymap, keymapKeys } from "./keymap.ts";
 import { createLoadingScreen } from "./loading.ts";
 import { formatProjectBadge } from "./project.ts";
 import { formatStatusWithIcon, getStatusColor, getStatusIcon, wrapStatusColor } from "./status-icon.ts";
-import { openTaskFilterPicker, taskFilterHeaderControls, taskFilterOptions } from "./task-filter-wiring.ts";
+import {
+	focusTaskFilterControl,
+	openTaskFilterPicker,
+	taskFilterHeaderControls,
+	taskFilterOptions,
+} from "./task-filter-wiring.ts";
 import {
 	completeTaskFromTui,
+	confirmTaskLifecycleAction,
 	formatTaskArchivedMessage,
 	formatTaskCompletionBlockedMessage,
 } from "./task-lifecycle.ts";
 import { formatTaskTypeBadge } from "./task-type.ts";
+import { TaskViewerSession } from "./task-viewer-session.ts";
 import { addScrollKeys, createScreen, formatTuiTitle } from "./tui.ts";
 
 function getPriorityDisplay(priority?: string): string {
@@ -73,6 +86,55 @@ function getPriorityDisplay(priority?: string): string {
 			return " {green-fg}●{/}";
 		default:
 			return "";
+	}
+}
+
+function applyTaskViewerConfig(config: BacklogConfig | null): {
+	statuses: string[];
+	labels: string[];
+	priorityOptions: PriorityOption[];
+	configuredTaskTypes: string[];
+	configuredProjects: string[];
+	dateFormat: string | undefined;
+	projectName: string | undefined;
+} {
+	return {
+		statuses: config?.statuses || ["To Do", "In Progress", "Done"],
+		labels: config?.labels || [],
+		priorityOptions: getPriorityOptions(config),
+		configuredTaskTypes: getTaskTypeValues(config),
+		configuredProjects: getProjectValues(config),
+		dateFormat: config?.dateFormat,
+		projectName: config?.projectName,
+	};
+}
+
+async function loadTaskViewerConfig(core: Core) {
+	return applyTaskViewerConfig(await core.filesystem.loadConfig());
+}
+
+async function loadTaskViewerTasks(core: Core, providedTasks?: Task[]) {
+	if (providedTasks) {
+		return {
+			allTasks: providedTasks.filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id)),
+			contentStore: null,
+			...(await loadTaskViewerConfig(core)),
+		};
+	}
+
+	const loadingScreen = await createLoadingScreen("Loading tasks");
+	try {
+		loadingScreen?.update("Loading configuration...");
+		const config = await loadTaskViewerConfig(core);
+		loadingScreen?.update("Loading tasks from branches...");
+		const contentStore = await core.getContentStore();
+		loadingScreen?.update("Preparing task list...");
+		const allTasks = (await core.queryTasks()).filter(
+			(task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id),
+		);
+		return { allTasks, contentStore, ...config };
+	} finally {
+		await loadingScreen?.close();
 	}
 }
 
@@ -195,6 +257,63 @@ export function resolveTaskListSelection<T>(
 	return items[index] ?? fallback;
 }
 
+type TaskViewerFilterModel = {
+	search: string;
+	status: string[];
+	excludeStatus: string[];
+	taskTypes: string[];
+	projects: string[];
+	priority: string;
+	labels: string[];
+	milestone: string;
+	labelMatch: LabelMatchMode;
+	limit?: number;
+};
+
+function filterTaskViewerTasks(
+	tasks: Task[],
+	filters: TaskViewerFilterModel,
+	searchIndex: ReturnType<typeof createTaskSearchIndex>,
+	resolveMilestoneLabel: MilestoneFilterValueResolver,
+	readyTasks?: TaskCorpus,
+): Task[] {
+	const filtered = applyTaskFilters(
+		tasks,
+		{
+			...taskFilterOptions(filters, filters.labelMatch, resolveMilestoneLabel),
+			excludeStatus: filters.excludeStatus,
+		},
+		searchIndex,
+	);
+	const ready = readyTasks ? withReadiness(filtered, readyTasks).filter((task) => task.isReady) : filtered;
+	return filters.limit === undefined ? ready : ready.slice(0, filters.limit);
+}
+
+export function taskViewerEmptyState(filters: TaskViewerFilterModel): { detail: string; list: string } {
+	const milestone = filters.milestone === NO_MILESTONE_FILTER_VALUE ? NO_MILESTONE_FILTER_LABEL : filters.milestone;
+	const active = [
+		filters.search.trim() && `Search: {cyan-fg}${filters.search.trim()}{/}`,
+		filters.status.length > 0 && `Status: {cyan-fg}${filters.status.join(", ")}{/}`,
+		filters.excludeStatus.length > 0 && `Exclude status: {cyan-fg}${filters.excludeStatus.join(", ")}{/}`,
+		filters.taskTypes.length > 0 && `Type: {magenta-fg}${filters.taskTypes.join(", ")}{/}`,
+		filters.projects.length > 0 && `Project: {blue-fg}${filters.projects.join(", ")}{/}`,
+		filters.priority && `Priority: {cyan-fg}${filters.priority}{/}`,
+		filters.labels.length > 0 && `Labels: {yellow-fg}${filters.labels.join(", ")}{/}`,
+		filters.milestone && `Milestone: {magenta-fg}${milestone}{/}`,
+	].filter((value): value is string => Boolean(value));
+	if (active.length === 0) {
+		return {
+			detail: "{bold}No tasks available{/bold}\n{gray-fg}Create a task with {cyan-fg}backlog task create{/cyan-fg}.{/}",
+			list: "{bold}No tasks available{/bold}",
+		};
+	}
+	const items = active.map((value) => ` • ${value}`).join("\n");
+	return {
+		detail: `{bold}No tasks match your current filters{/bold}\n${items}\n\n{gray-fg}Try adjusting the search or clearing filters.{/}`,
+		list: `{bold}No matching tasks{/bold}\n\n${items}`,
+	};
+}
+
 /**
  * Merge the unfiltered readiness snapshot with the live display copies into the corpus the
  * dependency graph and readiness resolve against.
@@ -298,15 +417,15 @@ export async function viewTaskEnhanced(
 	// Reuse the caller's Core so every surface reads the same project root.
 	const core = options.core || (await createRuntimeCore({ enableWatchers: true }));
 
-	// Show loading screen while loading tasks (can be slow with cross-branch loading)
-	let allTasks: Task[];
-	let statuses: string[];
-	let labels: string[];
-	let priorityOptions = getPriorityOptions();
-	let configuredTaskTypes = getTaskTypeValues();
-	let configuredProjects = getProjectValues();
+	const loaded = await loadTaskViewerTasks(core, options.tasks);
+	let allTasks = loaded.allTasks;
+	let statuses = loaded.statuses;
+	let labels = loaded.labels;
+	const priorityOptions = loaded.priorityOptions;
+	const configuredTaskTypes = loaded.configuredTaskTypes;
+	const configuredProjects = loaded.configuredProjects;
 	let availableLabels: string[] = [];
-	let contentStore: Awaited<ReturnType<typeof core.getContentStore>> | null = null;
+	const contentStore = loaded.contentStore ?? null;
 	// Completed tasks are loaded alongside the milestone metadata so dependency readiness can
 	// resolve dependencies that already left the active corpus, without a second full task load.
 	const [milestoneEntities, archivedMilestones, completedTasks] = await Promise.all([
@@ -319,44 +438,7 @@ export async function viewTaskEnhanced(
 		archivedMilestones,
 	);
 
-	let dateFormat: string | undefined;
-	let projectName: string | undefined;
-
-	if (options.tasks) {
-		// Tasks already provided - no ContentStore loading
-		allTasks = options.tasks.filter((t) => t.id && t.id.trim() !== "" && hasAnyPrefix(t.id));
-		const config = await core.filesystem.loadConfig();
-		statuses = config?.statuses || ["To Do", "In Progress", "Done"];
-		labels = config?.labels || [];
-		priorityOptions = getPriorityOptions(config);
-		configuredTaskTypes = getTaskTypeValues(config);
-		configuredProjects = getProjectValues(config);
-		dateFormat = config?.dateFormat;
-		projectName = config?.projectName;
-	} else {
-		// Need to load tasks - show loading screen
-		const loadingScreen = await createLoadingScreen("Loading tasks");
-		try {
-			loadingScreen?.update("Loading configuration...");
-			const config = await core.filesystem.loadConfig();
-			statuses = config?.statuses || ["To Do", "In Progress", "Done"];
-			labels = config?.labels || [];
-			priorityOptions = getPriorityOptions(config);
-			configuredTaskTypes = getTaskTypeValues(config);
-			configuredProjects = getProjectValues(config);
-			dateFormat = config?.dateFormat;
-			projectName = config?.projectName;
-
-			loadingScreen?.update("Loading tasks from branches...");
-			contentStore = await core.getContentStore();
-
-			loadingScreen?.update("Preparing task list...");
-			const tasks = await core.queryTasks();
-			allTasks = tasks.filter((t) => t.id && t.id.trim() !== "" && hasAnyPrefix(t.id));
-		} finally {
-			await loadingScreen?.close();
-		}
-	}
+	const { dateFormat, projectName } = loaded;
 
 	// One shared index over the loaded corpus, however that corpus arrived. Searching exactly the
 	// tasks this list renders is what keeps its results identical to the other surfaces'.
@@ -432,8 +514,7 @@ export async function viewTaskEnhanced(
 	};
 
 	// Find the initial selected task
-	let currentSelectedTask = enrichTask(task) ?? task;
-	let selectionRequestId = 0;
+	const session = new TaskViewerSession(enrichTask(task) ?? task);
 	let noResultsMessage: string | null = null;
 
 	const screenTitle = formatTuiTitle(options.title || "Tasks", projectName);
@@ -456,31 +537,7 @@ export async function viewTaskEnhanced(
 	// Create filter header component
 	let filterHeader: FilterHeader;
 
-	const focusFilterControl = (filterId: FilterControlId) => {
-		switch (filterId) {
-			case "search":
-				filterHeader.focusSearch();
-				break;
-			case "status":
-				filterHeader.focusStatus();
-				break;
-			case "type":
-				filterHeader.focusType();
-				break;
-			case "project":
-				filterHeader.focusProject();
-				break;
-			case "priority":
-				filterHeader.focusPriority();
-				break;
-			case "milestone":
-				filterHeader.focusMilestone();
-				break;
-			case "labels":
-				filterHeader.focusLabels();
-				break;
-		}
-	};
+	const focusFilterControl = (filterId: FilterControlId) => focusTaskFilterControl(filterHeader, filterId);
 
 	const openFilterPicker = async (filterId: Exclude<FilterControlId, "search">) => {
 		if (filterPopupOpen) {
@@ -735,33 +792,25 @@ export async function viewTaskEnhanced(
 
 	// Function to apply filters and refresh the task list
 	function applyFilters() {
-		// An unset filter contributes no check, so this covers the no-filters case too.
-		const nextFilteredTasks = applyTaskFilters(
+		const filters: TaskViewerFilterModel = {
+			search: searchQuery,
+			status: statusFilter,
+			excludeStatus: excludeStatusFilter,
+			taskTypes: taskTypeFilter,
+			projects: projectFilter,
+			priority: priorityFilter,
+			labels: labelFilter,
+			milestone: milestoneFilter,
+			labelMatch,
+			limit: taskLimit,
+		};
+		filteredTasks = filterTaskViewerTasks(
 			allTasks,
-			{
-				...taskFilterOptions(
-					{
-						search: searchQuery,
-						status: statusFilter,
-						taskTypes: taskTypeFilter,
-						projects: projectFilter,
-						priority: priorityFilter,
-						labels: labelFilter,
-						milestone: milestoneFilter,
-					},
-					labelMatch,
-					resolveMilestoneLabel,
-				),
-				excludeStatus: excludeStatusFilter,
-			},
+			filters,
 			taskSearchIndex,
+			resolveMilestoneLabel,
+			options.readyFilter ? resolveDependencyCorpus() : undefined,
 		);
-		// Readiness is derived over the filtered list in one pass against the whole corpus, so a
-		// dependency the other filters hid still decides the verdict.
-		const readyFilteredTasks = options.readyFilter
-			? withReadiness(nextFilteredTasks, resolveDependencyCorpus()).filter((task) => task.isReady)
-			: nextFilteredTasks;
-		filteredTasks = taskLimit !== undefined ? readyFilteredTasks.slice(0, taskLimit) : readyFilteredTasks;
 
 		// Update the task list label
 		if (taskListPane.setLabel) {
@@ -773,44 +822,9 @@ export async function viewTaskEnhanced(
 				taskList.destroy();
 				taskList = null;
 			}
-			const activeFilters: string[] = [];
-			const trimmedQuery = searchQuery.trim();
-			if (trimmedQuery) {
-				activeFilters.push(`Search: {cyan-fg}${trimmedQuery}{/}`);
-			}
-			if (statusFilter.length > 0) {
-				activeFilters.push(`Status: {cyan-fg}${statusFilter.join(", ")}{/}`);
-			}
-			if (excludeStatusFilter.length > 0) {
-				activeFilters.push(`Exclude status: {cyan-fg}${excludeStatusFilter.join(", ")}{/}`);
-			}
-			if (taskTypeFilter.length > 0) {
-				activeFilters.push(`Type: {magenta-fg}${taskTypeFilter.join(", ")}{/}`);
-			}
-			if (projectFilter.length > 0) {
-				activeFilters.push(`Project: {blue-fg}${projectFilter.join(", ")}{/}`);
-			}
-			if (priorityFilter) {
-				activeFilters.push(`Priority: {cyan-fg}${priorityFilter}{/}`);
-			}
-			if (labelFilter.length > 0) {
-				activeFilters.push(`Labels: {yellow-fg}${labelFilter.join(", ")}{/}`);
-			}
-			if (milestoneFilter) {
-				const milestoneFilterLabel =
-					milestoneFilter === NO_MILESTONE_FILTER_VALUE ? NO_MILESTONE_FILTER_LABEL : milestoneFilter;
-				activeFilters.push(`Milestone: {magenta-fg}${milestoneFilterLabel}{/}`);
-			}
-			let listPaneMessage: string;
-			if (activeFilters.length > 0) {
-				noResultsMessage = `{bold}No tasks match your current filters{/bold}\n${activeFilters.map((f) => ` • ${f}`).join("\n")}\n\n{gray-fg}Try adjusting the search or clearing filters.{/}`;
-				listPaneMessage = `{bold}No matching tasks{/bold}\n\n${activeFilters.map((f) => ` • ${f}`).join("\n")}`;
-			} else {
-				noResultsMessage =
-					"{bold}No tasks available{/bold}\n{gray-fg}Create a task with {cyan-fg}backlog task create{/cyan-fg}.{/}";
-				listPaneMessage = "{bold}No tasks available{/bold}";
-			}
-			showListEmptyState(listPaneMessage);
+			const emptyState = taskViewerEmptyState(filters);
+			noResultsMessage = emptyState.detail;
+			showListEmptyState(emptyState.list);
 			refreshDetailPane();
 			screen.render();
 			return;
@@ -827,14 +841,13 @@ export async function viewTaskEnhanced(
 		taskList = listController;
 		if (listController) {
 			const forceFirst = requireInitialFilterSelection;
-			let desiredIndex = filteredTasks.findIndex((t) => t.id === currentSelectedTask.id);
+			let desiredIndex = filteredTasks.findIndex((t) => t.id === session.selected.id);
 			if (forceFirst || desiredIndex < 0) {
 				desiredIndex = 0;
 			}
 			const desiredTask = filteredTasks[desiredIndex];
-			if (desiredTask && desiredTask.id !== currentSelectedTask.id) {
-				currentSelectedTask = enrichTask(desiredTask) ?? desiredTask;
-				options.onTaskChange?.(currentSelectedTask);
+			if (desiredTask && session.select(enrichTask(desiredTask) ?? desiredTask)) {
+				options.onTaskChange?.(session.selected);
 			}
 			const currentIndexRaw = listController.getSelectedIndex();
 			const currentIndex = Array.isArray(currentIndexRaw) ? (currentIndexRaw[0] ?? 0) : currentIndexRaw;
@@ -878,21 +891,21 @@ export async function viewTaskEnhanced(
 
 	async function applySelection(selectedTask: Task | null) {
 		if (!selectedTask) return;
-		if (currentSelectedTask && selectedTask.id === currentSelectedTask.id) {
+		if (selectedTask.id === session.selected.id) {
 			return;
 		}
 		const enriched = enrichTask(selectedTask);
-		currentSelectedTask = enriched ?? selectedTask;
-		options.onTaskChange?.(currentSelectedTask);
-		const requestId = ++selectionRequestId;
+		session.select(enriched ?? selectedTask);
+		options.onTaskChange?.(session.selected);
+		const requestId = session.beginSelectionRefresh();
 		refreshDetailPane();
 		screen.render();
 		const refreshed = await core.getTaskWithSubtasks(selectedTask.id, allTasks);
-		if (requestId !== selectionRequestId) {
+		if (!session.isCurrentSelectionRefresh(requestId)) {
 			return;
 		}
 		if (refreshed) {
-			currentSelectedTask = refreshed;
+			session.select(refreshed);
 			options.onTaskChange?.(refreshed);
 		}
 		refreshDetailPane();
@@ -902,7 +915,7 @@ export async function viewTaskEnhanced(
 	function createTaskList(): GenericList<Task> | null {
 		const initialIndex = Math.max(
 			0,
-			filteredTasks.findIndex((t) => t.id === currentSelectedTask.id),
+			filteredTasks.findIndex((t) => t.id === session.selected.id),
 		);
 
 		taskList = createGenericList<Task>({
@@ -953,7 +966,7 @@ export async function viewTaskEnhanced(
 				setActivePane("none");
 				screen.render();
 			});
-			listBox.key(["right", "l"], () => {
+			listBox.key(keymapKeys("taskList", "focusDetail"), () => {
 				focusDetailPane();
 				return false;
 			});
@@ -996,10 +1009,10 @@ export async function viewTaskEnhanced(
 				return false;
 			};
 
-			boxInstance.key(["up"], () => moveUpFromDetail("arrow"));
-			boxInstance.key(["k"], () => moveUpFromDetail("vim"));
+			boxInstance.key(keymapKeys("taskList", "detailUp"), () => moveUpFromDetail("arrow"));
+			boxInstance.key(keymapKeys("taskList", "detailUpVim"), () => moveUpFromDetail("vim"));
 
-			boxInstance.key(["pageup", "b"], () => {
+			boxInstance.key(keymapKeys("taskList", "detailPageUp"), () => {
 				const delta = pageAmount();
 				if (delta > 0) {
 					scrollable.scroll?.(-delta);
@@ -1007,7 +1020,7 @@ export async function viewTaskEnhanced(
 				}
 				return false;
 			});
-			boxInstance.key(["pagedown", "space"], () => {
+			boxInstance.key(keymapKeys("taskList", "detailPageDown"), () => {
 				const delta = pageAmount();
 				if (delta > 0) {
 					scrollable.scroll?.(delta);
@@ -1015,12 +1028,12 @@ export async function viewTaskEnhanced(
 				}
 				return false;
 			});
-			boxInstance.key(["home", "g"], () => {
+			boxInstance.key(keymapKeys("taskList", "detailFirst"), () => {
 				scrollable.setScroll?.(0);
 				screen.render();
 				return false;
 			});
-			boxInstance.key(["end", "G"], () => {
+			boxInstance.key(keymapKeys("taskList", "detailLast"), () => {
 				scrollable.setScrollPerc?.(100);
 				screen.render();
 				return false;
@@ -1037,11 +1050,11 @@ export async function viewTaskEnhanced(
 					screen.render();
 				}
 			});
-			boxInstance.key(["left", "h"], () => {
+			boxInstance.key(keymapKeys("taskList", "focusList"), () => {
 				focusTaskList();
 				return false;
 			});
-			boxInstance.key(["escape"], () => {
+			boxInstance.key(keymapKeys("taskList", "focusListEscape"), () => {
 				focusTaskList();
 				return false;
 			});
@@ -1088,9 +1101,9 @@ export async function viewTaskEnhanced(
 			return;
 		}
 
-		screen.title = formatTuiTitle(`Task ${currentSelectedTask.id} - ${currentSelectedTask.title}`, projectName);
+		screen.title = formatTuiTitle(`Task ${session.selected.id} - ${session.selected.title}`, projectName);
 
-		const detailContent = generateDetailContent(toTaskDetail(currentSelectedTask, resolveDependencyCorpus()), {
+		const detailContent = generateDetailContent(toTaskDetail(session.selected, resolveDependencyCorpus()), {
 			resolveMilestoneLabel,
 			dateFormat,
 			configuredProjects,
@@ -1162,14 +1175,12 @@ export async function viewTaskEnhanced(
 		const filterFocus = filterHeader.getCurrentFocus();
 		if (currentFocus === "filters" && filterFocus) {
 			if (filterFocus === "search") {
-				content =
-					" {cyan-fg}[←/→]{/} Cursor (edge=Prev/Next) | {cyan-fg}[↑/↓]{/} Back to Tasks | {cyan-fg}[Esc]{/} Cancel | {gray-fg}(Live search){/}";
+				content = ` {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Cursor (edge=Prev/Next) | {cyan-fg}[${formatKeymap("shared", "up")}/${formatKeymap("shared", "down")}]{/} Back to Tasks | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel | {gray-fg}(Live search){/}`;
 			} else {
-				content = " {cyan-fg}[Enter/Space]{/} Open Picker | {cyan-fg}[←/→]{/} Prev/Next | {cyan-fg}[Esc]{/} Back";
+				content = ` {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Open Picker | {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Prev/Next | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Back`;
 			}
 		} else if (currentFocus === "detail") {
-			content =
-				" {cyan-fg}[Tab]{/} View | {cyan-fg}[←]{/} List | {cyan-fg}[↑↓]{/} Scroll | {cyan-fg}[E]{/} Edit | {cyan-fg}[Y]{/} Yank | {cyan-fg}[?]{/} Help | {cyan-fg}[q]{/} Quit";
+			content = ` {cyan-fg}[${formatKeymap("shared", "tab")}]{/} View | {cyan-fg}[${formatKeymap("taskList", "focusList")}]{/} List | {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}]{/} Scroll | {cyan-fg}[${formatKeymap("taskList", "edit")}]{/} Edit | {cyan-fg}[${formatKeymap("taskList", "copy")}]{/} Yank | {cyan-fg}[${formatKeymap("shared", "help")}]{/} Help | {cyan-fg}[${formatKeymap("shared", "quitWithoutEscape")}]{/} Quit`;
 		} else {
 			// Task list help
 			content = getTaskListFooterContent({ hasProjects: configuredProjects.length > 0 });
@@ -1183,7 +1194,7 @@ export async function viewTaskEnhanced(
 		if (filterPopupOpen || currentFocus === "filters" || noResultsMessage) {
 			return;
 		}
-		const selectedTask = currentSelectedTask;
+		const selectedTask = session.selected;
 
 		try {
 			const result = await core.editTaskInTui(selectedTask.id, screen, selectedTask);
@@ -1231,7 +1242,7 @@ export async function viewTaskEnhanced(
 					allTasks[index] = result.task;
 				}
 				const enhancedTask = enrichTask(result.task) ?? result.task;
-				currentSelectedTask = enhancedTask;
+				session.select(enhancedTask);
 				options.onTaskChange?.(enhancedTask);
 				taskSearchIndex = createTaskSearchIndex(allTasks);
 			}
@@ -1251,7 +1262,7 @@ export async function viewTaskEnhanced(
 		if (noResultsMessage) {
 			return null;
 		}
-		return resolveTaskListSelection(filteredTasks, taskList?.getSelectedIndex(), currentSelectedTask);
+		return resolveTaskListSelection(filteredTasks, taskList?.getSelectedIndex(), session.selected);
 	};
 
 	const removeTaskFromCurrentView = (taskId: string) => {
@@ -1263,8 +1274,8 @@ export async function viewTaskEnhanced(
 		allTasks = allTasks.filter((taskItem) => taskItem.id !== taskId);
 		taskSearchIndex = createTaskSearchIndex(allTasks);
 		if (nextTask) {
-			currentSelectedTask = enrichTask(nextTask) ?? nextTask;
-			options.onTaskChange?.(currentSelectedTask);
+			session.select(enrichTask(nextTask) ?? nextTask);
+			options.onTaskChange?.(session.selected);
 		}
 		applyFilters();
 	};
@@ -1285,16 +1296,7 @@ export async function viewTaskEnhanced(
 			return;
 		}
 
-		const confirmed = await runWithModalGuard(() =>
-			openConfirmPopup({
-				screen,
-				title: action === "complete" ? "Move to Completed" : "Archive Task",
-				message:
-					action === "complete"
-						? `Move {bold}${task.id}{/bold} to completed?\nRemoves from board; keeps record\nand dependency links.`
-						: `Archive {bold}${task.id}{/bold}?\nCanceled, duplicate, or invalid work.\nRemoves incoming task links.`,
-			}),
-		);
+		const confirmed = await runWithModalGuard(() => confirmTaskLifecycleAction(screen, task, action, openConfirmPopup));
 
 		if (!confirmed) {
 			return;
@@ -1336,24 +1338,24 @@ export async function viewTaskEnhanced(
 	});
 
 	// Keyboard shortcuts
-	screen.key(["/"], () => {
+	screen.key(keymapKeys("shared", "search"), () => {
 		if (modalOpen) return;
 		pendingSearchWrap = null;
 		filterHeader.focusSearch();
 	});
 
-	screen.key(["C-f"], () => {
+	screen.key(keymapKeys("shared", "find"), () => {
 		if (modalOpen) return;
 		pendingSearchWrap = null;
 		filterHeader.focusSearch();
 	});
 
-	screen.key(["s", "S"], () => {
+	screen.key(keymapKeys("taskList", "filterStatus"), () => {
 		if (modalOpen) return;
 		void openFilterPicker("status");
 	});
 
-	screen.key(["t", "T"], () => {
+	screen.key(keymapKeys("taskList", "filterType"), () => {
 		if (modalOpen || filterPopupOpen) return;
 		void openFilterPicker("type");
 	});
@@ -1361,33 +1363,33 @@ export async function viewTaskEnhanced(
 	if (configuredProjects.length > 0) {
 		// Not "g"/"G": those already scroll the detail pane to top/bottom (see the
 		// boxInstance bindings above) and a screen-level handler here would conflict.
-		screen.key(["v", "V"], () => {
+		screen.key(keymapKeys("taskList", "filterProject"), () => {
 			if (modalOpen || filterPopupOpen) return;
 			void openFilterPicker("project");
 		});
 	}
 
-	screen.key(["p", "P"], () => {
+	screen.key(keymapKeys("taskList", "filterPriority"), () => {
 		if (modalOpen) return;
 		void openFilterPicker("priority");
 	});
 
-	screen.key(["l", "L"], () => {
+	screen.key(keymapKeys("taskList", "filterLabels"), () => {
 		if (modalOpen) return;
 		void openFilterPicker("labels");
 	});
 
-	screen.key(["i", "I"], () => {
+	screen.key(keymapKeys("taskList", "filterMilestone"), () => {
 		if (modalOpen) return;
 		void openFilterPicker("milestone");
 	});
 
-	screen.key(["e", "E", "S-e"], () => {
+	screen.key(keymapKeys("taskList", "edit"), () => {
 		if (modalOpen) return;
 		void openCurrentTaskInEditor();
 	});
 
-	screen.key(["y", "Y"], async () => {
+	screen.key(keymapKeys("taskList", "copy"), async () => {
 		if (modalOpen || filterPopupOpen || currentFocus === "filters") return;
 		const task = getCurrentShortcutTask();
 		if (!task) return;
@@ -1399,26 +1401,26 @@ export async function viewTaskEnhanced(
 		}
 	});
 
-	screen.key(["c", "C"], async () => {
+	screen.key(keymapKeys("taskList", "complete"), async () => {
 		if (modalOpen || filterPopupOpen || currentFocus === "filters") return;
 		const task = getCurrentShortcutTask();
 		if (!task) return;
 		await applyTaskLifecycleShortcut(task, "complete");
 	});
 
-	screen.key(["a", "A"], async () => {
+	screen.key(keymapKeys("taskList", "archive"), async () => {
 		if (modalOpen || filterPopupOpen || currentFocus === "filters") return;
 		const task = getCurrentShortcutTask();
 		if (!task) return;
 		await applyTaskLifecycleShortcut(task, "archive");
 	});
 
-	screen.key(["?"], async () => {
+	screen.key(keymapKeys("shared", "help"), async () => {
 		if (modalOpen || filterPopupOpen) return;
 		await runWithModalGuard(() => openHelpPopup(screen, "task-list", { hasProjects: configuredProjects.length > 0 }));
 	});
 
-	screen.key(["escape"], () => {
+	screen.key(keymapKeys("shared", "escape"), () => {
 		if (modalOpen || filterPopupOpen) {
 			return;
 		}
@@ -1445,7 +1447,7 @@ export async function viewTaskEnhanced(
 
 	// Tab key handling for view switching - only when in task list
 	if (options.onTabPress) {
-		screen.key(["tab"], async () => {
+		screen.key(keymapKeys("shared", "tab"), async () => {
 			// Keep tab as filter-navigation while filters are focused.
 			if (modalOpen || filterPopupOpen || currentFocus === "filters") {
 				return;
@@ -1461,7 +1463,7 @@ export async function viewTaskEnhanced(
 	}
 
 	// Quit handlers
-	screen.key(["q", "C-c"], () => {
+	screen.key(keymapKeys("shared", "quitWithoutEscape"), () => {
 		if (modalOpen || filterPopupOpen) {
 			return;
 		}
@@ -1487,14 +1489,14 @@ export async function viewTaskEnhanced(
 		availableLabels = collectAvailableLabels(allTasks, labels);
 		taskSearchIndex = createTaskSearchIndex(allTasks);
 
-		const previousTaskId = currentSelectedTask.id;
+		const previousTaskId = session.selected.id;
 		const currentTask =
 			allTasks.find((candidate) => candidate.id === nextSelectedTask?.id) ??
-			allTasks.find((candidate) => candidate.id === currentSelectedTask.id) ??
+			allTasks.find((candidate) => candidate.id === session.selected.id) ??
 			allTasks[0];
 		if (currentTask) {
-			currentSelectedTask = enrichTask(currentTask) ?? currentTask;
-			if (currentSelectedTask.id !== previousTaskId) options.onTaskChange?.(currentSelectedTask);
+			session.select(enrichTask(currentTask) ?? currentTask);
+			if (session.selected.id !== previousTaskId) options.onTaskChange?.(session.selected);
 		}
 		applyFilters();
 	});
@@ -1534,11 +1536,74 @@ export interface TaskDetailContentOptions {
 	configuredProjects?: string[];
 }
 
+function detailMetadata(task: Task | TaskDetail, options: TaskDetailContentOptions): string[] {
+	const { resolveMilestoneLabel, dateFormat, configuredProjects } = options;
+	const metadata = [`{bold}Created:{/bold} ${formatDateForDisplay(task.createdDate, { dateFormat })}`];
+	if (task.updatedDate && task.updatedDate !== task.createdDate)
+		metadata.push(`{bold}Updated:{/bold} ${formatDateForDisplay(task.updatedDate, { dateFormat })}`);
+	if (task.dueDate) metadata.push(`{bold}Due:{/bold} ${formatDateForDisplay(task.dueDate, { dateFormat })}`);
+	if (task.priority)
+		metadata.push(`{bold}Priority:{/bold} ${formatPriorityLabel(task.priority)}${getPriorityDisplay(task.priority)}`);
+	if (task.type) metadata.push(`{bold}Type:{/bold} ${formatTaskTypeBadge(task.type)}`);
+	if (task.project && configuredProjects?.length)
+		metadata.push(`{bold}Project:{/bold} ${formatProjectBadge(task.project, configuredProjects)}`);
+	if (task.assignee?.length)
+		metadata.push(
+			`{bold}Assignee:{/bold} {cyan-fg}${task.assignee.map((a) => (a.startsWith("@") ? a : `@${a}`)).join(", ")}{/}`,
+		);
+	if (task.labels?.length)
+		metadata.push(`{bold}Labels:{/bold} ${task.labels.map((label) => `{yellow-fg}[${label}]{/}`).join(" ")}`);
+	if (task.reporter)
+		metadata.push(
+			`{bold}Reporter:{/bold} {cyan-fg}${task.reporter.startsWith("@") ? task.reporter : `@${task.reporter}`}{/}`,
+		);
+	if (task.milestone)
+		metadata.push(
+			`{bold}Milestone:{/bold} {magenta-fg}${resolveMilestoneLabel?.(task.milestone) ?? task.milestone}{/}`,
+		);
+	if (task.parentTaskId)
+		metadata.push(
+			`{bold}Parent:{/bold} {blue-fg}${task.parentTaskTitle ? `${task.parentTaskId} - ${task.parentTaskTitle}` : task.parentTaskId}{/}`,
+		);
+	if (task.subtasks?.length)
+		metadata.push(`{bold}Subtasks:{/bold} ${task.subtasks.length} task${task.subtasks.length > 1 ? "s" : ""}`);
+	const readiness = task.dependencies?.length ? taskReadiness(task) : undefined;
+	if (readiness?.isReady) metadata.push("{bold}Readiness:{/bold} {green-fg}✓ Ready to start{/}");
+	if (readiness?.isBlocked)
+		metadata.push(`{bold}Readiness:{/bold} {yellow-fg}● ${formatReadinessBlockers(readiness)}{/}`);
+	if (task.modifiedFiles?.length) metadata.push(`{bold}Modified files:{/bold} ${task.modifiedFiles.join(", ")}`);
+	return metadata;
+}
+
+function textDetailSection(heading: string, value: string | undefined, empty?: string): string[] {
+	const text = value?.trim();
+	if (!text && !empty) return [];
+	return [formatHeading(heading, 2), text ? transformCodePaths(text) : (empty ?? ""), ""];
+}
+
+function checklistDetailSection(
+	heading: string,
+	items: Array<{ text: string; checked: boolean }>,
+	empty: string,
+): string[] {
+	const content = items.length
+		? items
+				.map((item) =>
+					formatChecklistItem(
+						{ text: transformCodePaths(item.text), checked: item.checked },
+						{ padding: " ", checkedSymbol: "{green-fg}✓{/}", uncheckedSymbol: "{gray-fg}○{/}" },
+					),
+				)
+				.join("\n")
+		: `{gray-fg}${empty}{/}`;
+	return [formatHeading(heading, 2), content, ""];
+}
+
 export function generateDetailContent(
 	task: Task | TaskDetail,
 	options: TaskDetailContentOptions = {},
 ): { headerContent: string[]; bodyContent: string[] } {
-	const { resolveMilestoneLabel, dateFormat, configuredProjects } = options;
+	const { dateFormat } = options;
 	const headerContent = [
 		` ${wrapStatusColor(formatStatusWithIcon(task.status), getStatusColor(task.status))} {bold}{blue-fg}${task.id}{/blue-fg}{/bold} - ${task.title}`,
 	];
@@ -1555,68 +1620,7 @@ export function generateDetailContent(
 	const bodyContent: string[] = [];
 	bodyContent.push(formatHeading("Details", 2));
 
-	const metadata: string[] = [];
-	metadata.push(`{bold}Created:{/bold} ${formatDateForDisplay(task.createdDate, { dateFormat })}`);
-	if (task.updatedDate && task.updatedDate !== task.createdDate) {
-		metadata.push(`{bold}Updated:{/bold} ${formatDateForDisplay(task.updatedDate, { dateFormat })}`);
-	}
-	if (task.dueDate) {
-		metadata.push(`{bold}Due:{/bold} ${formatDateForDisplay(task.dueDate, { dateFormat })}`);
-	}
-	if (task.priority) {
-		const priorityDisplay = getPriorityDisplay(task.priority);
-		const priorityText = formatPriorityLabel(task.priority);
-		metadata.push(`{bold}Priority:{/bold} ${priorityText}${priorityDisplay}`);
-	}
-	if (task.type) {
-		metadata.push(`{bold}Type:{/bold} ${formatTaskTypeBadge(task.type)}`);
-	}
-	if (task.project && configuredProjects?.length) {
-		metadata.push(`{bold}Project:{/bold} ${formatProjectBadge(task.project, configuredProjects)}`);
-	}
-	if (task.assignee?.length) {
-		const assigneeList = task.assignee.map((a) => (a.startsWith("@") ? a : `@${a}`)).join(", ");
-		metadata.push(`{bold}Assignee:{/bold} {cyan-fg}${assigneeList}{/}`);
-	}
-	if (task.labels?.length) {
-		metadata.push(`{bold}Labels:{/bold} ${task.labels.map((l) => `{yellow-fg}[${l}]{/}`).join(" ")}`);
-	}
-	if (task.reporter) {
-		const reporterText = task.reporter.startsWith("@") ? task.reporter : `@${task.reporter}`;
-		metadata.push(`{bold}Reporter:{/bold} {cyan-fg}${reporterText}{/}`);
-	}
-	if (task.milestone) {
-		const milestoneLabel = resolveMilestoneLabel ? resolveMilestoneLabel(task.milestone) : task.milestone;
-		metadata.push(`{bold}Milestone:{/bold} {magenta-fg}${milestoneLabel}{/}`);
-	}
-	if (task.parentTaskId) {
-		const parentLabel = task.parentTaskTitle ? `${task.parentTaskId} - ${task.parentTaskTitle}` : task.parentTaskId;
-		metadata.push(`{bold}Parent:{/bold} {blue-fg}${parentLabel}{/}`);
-	}
-	if (task.subtasks?.length) {
-		metadata.push(`{bold}Subtasks:{/bold} ${task.subtasks.length} task${task.subtasks.length > 1 ? "s" : ""}`);
-	}
-	if (task.dependencies?.length) {
-		// The Dependency Graph section below names the same dependencies and resolves them, so the
-		// raw ID list is not repeated here. Readiness stays: it is a verdict, not a restatement.
-		// It is rendered only when the caller was handed a detail read that carries it: a caller
-		// without one (the board quick-look popup) gets no readiness line rather than a guess.
-		const readiness = taskReadiness(task);
-		if (readiness) {
-			if (readiness.isReady) {
-				metadata.push("{bold}Readiness:{/bold} {green-fg}✓ Ready to start{/}");
-			} else if (readiness.isBlocked) {
-				// Single-width glyphs only: blessed miscounts East Asian Wide characters and leaves
-				// stale cells behind when the detail pane re-renders a shorter line.
-				metadata.push(`{bold}Readiness:{/bold} {yellow-fg}● ${formatReadinessBlockers(readiness)}{/}`);
-			}
-		}
-	}
-	if (task.modifiedFiles?.length) {
-		metadata.push(`{bold}Modified files:{/bold} ${task.modifiedFiles.join(", ")}`);
-	}
-
-	bodyContent.push(metadata.join("\n"));
+	bodyContent.push(detailMetadata(task, options).join("\n"));
 	bodyContent.push("");
 
 	// Directly below the details block and above the description, the same relative position the
@@ -1632,13 +1636,7 @@ export function generateDetailContent(
 		bodyContent.push("");
 	}
 
-	bodyContent.push(formatHeading("Description", 2));
-	const descriptionText = task.description?.trim();
-	const descriptionContent = descriptionText
-		? transformCodePaths(descriptionText)
-		: "{gray-fg}No description provided{/}";
-	bodyContent.push(descriptionContent);
-	bodyContent.push("");
+	bodyContent.push(...textDetailSection("Description", task.description, "{gray-fg}No description provided{/}"));
 
 	if (task.references?.length) {
 		bodyContent.push(formatHeading("References", 2));
@@ -1665,63 +1663,22 @@ export function generateDetailContent(
 		bodyContent.push("");
 	}
 
-	bodyContent.push(formatHeading("Acceptance Criteria", 2));
-	const checklistItems = buildAcceptanceCriteriaItems(task);
-	if (checklistItems.length > 0) {
-		const formattedCriteria = checklistItems.map((item) =>
-			formatChecklistItem(
-				{
-					text: transformCodePaths(item.text),
-					checked: item.checked,
-				},
-				{
-					padding: " ",
-					checkedSymbol: "{green-fg}✓{/}",
-					uncheckedSymbol: "{gray-fg}○{/}",
-				},
-			),
-		);
-		bodyContent.push(formattedCriteria.join("\n"));
-	} else {
-		bodyContent.push("{gray-fg}No acceptance criteria defined{/}");
-	}
-	bodyContent.push("");
-
-	bodyContent.push(formatHeading("Definition of Done", 2));
-	const definitionItems = buildDefinitionOfDoneItems(task);
-	if (definitionItems.length > 0) {
-		const formattedDefinition = definitionItems.map((item) =>
-			formatChecklistItem(
-				{
-					text: transformCodePaths(item.text),
-					checked: item.checked,
-				},
-				{
-					padding: " ",
-					checkedSymbol: "{green-fg}✓{/}",
-					uncheckedSymbol: "{gray-fg}○{/}",
-				},
-			),
-		);
-		bodyContent.push(formattedDefinition.join("\n"));
-	} else {
-		bodyContent.push("{gray-fg}No Definition of Done items defined{/}");
-	}
-	bodyContent.push("");
-
-	const implementationPlan = task.implementationPlan?.trim();
-	if (implementationPlan) {
-		bodyContent.push(formatHeading("Implementation Plan", 2));
-		bodyContent.push(transformCodePaths(implementationPlan));
-		bodyContent.push("");
-	}
-
-	const implementationNotes = task.implementationNotes?.trim();
-	if (implementationNotes) {
-		bodyContent.push(formatHeading("Implementation Notes", 2));
-		bodyContent.push(transformCodePaths(implementationNotes));
-		bodyContent.push("");
-	}
+	bodyContent.push(
+		...checklistDetailSection(
+			"Acceptance Criteria",
+			buildAcceptanceCriteriaItems(task),
+			"No acceptance criteria defined",
+		),
+	);
+	bodyContent.push(
+		...checklistDetailSection(
+			"Definition of Done",
+			formatDefinitionOfDoneChecklist(task),
+			"No Definition of Done items defined",
+		),
+	);
+	bodyContent.push(...textDetailSection("Implementation Plan", task.implementationPlan));
+	bodyContent.push(...textDetailSection("Implementation Notes", task.implementationNotes));
 
 	const comments = (task.comments ?? []).filter((comment) => comment.body.trim().length > 0);
 	if (comments.length > 0) {
@@ -1829,7 +1786,7 @@ export async function createTaskPopup(
 
 	box({
 		parent: popup,
-		content: " Esc ",
+		content: ` ${formatKeymap("shared", "escape")} `,
 		top: -1,
 		right: 1,
 		width: 5,
@@ -1862,7 +1819,7 @@ export async function createTaskPopup(
 		screen.render();
 	};
 
-	popup.key(["escape", "q", "C-c"], () => {
+	popup.key(keymapKeys("shared", "quit"), () => {
 		closePopup();
 		return false;
 	});
@@ -1879,7 +1836,7 @@ export async function createTaskPopup(
 		screen.render();
 	});
 
-	contentArea.key(["escape"], () => {
+	contentArea.key(keymapKeys("shared", "escape"), () => {
 		closePopup();
 		return false;
 	});

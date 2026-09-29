@@ -123,19 +123,22 @@ async function withBoard(
 	const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 	const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget;
+	let boardPromise: Promise<void> | undefined;
+	let closed = false;
 	try {
-		const boardPromise = renderBoardTui(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
+		boardPromise = renderBoardTui(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
 			screen,
 			core: options.core,
 			hideEmptyColumns: options.hideEmptyColumns,
 		});
 		await Bun.sleep(20);
-		let closed = false;
 		const quit = async () => {
 			if (closed) return;
 			closed = true;
 			pressKey(screen, "q");
-			await withTimeout(boardPromise, "board close", 5000);
+			const board = boardPromise;
+			if (!board) throw new Error("Board did not start");
+			await withTimeout(board, "board close", 5000);
 		};
 		await run({
 			screen,
@@ -144,6 +147,11 @@ async function withBoard(
 		});
 		await quit();
 	} finally {
+		if (!closed && boardPromise) {
+			closed = true;
+			pressKey(screen, "q");
+			await withTimeout(boardPromise, "board close", 5000);
+		}
 		screen.destroy();
 		if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);
 		else Reflect.deleteProperty(process.stdout, "isTTY");
@@ -151,6 +159,34 @@ async function withBoard(
 }
 
 describe("TUI board honors hideEmptyColumns", () => {
+	it("releases Board resources but preserves a shared screen for Shift+B handoff", async () => {
+		const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget & { children: unknown[] };
+		let handoffs = 0;
+		try {
+			const board = renderBoardTui(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
+				screen,
+				preserveScreen: true,
+				onWorkspacePress: async () => {
+					handoffs += 1;
+				},
+			});
+			await Bun.sleep(20);
+			pressKey(screen, "S-b");
+			await withTimeout(board, "board workspace handoff", 5000);
+
+			expect(handoffs).toBe(1);
+			expect(screen.children).toEqual([]);
+			pressKey(screen, "S-b");
+			expect(handoffs).toBe(1);
+		} finally {
+			screen.destroy();
+			if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+		}
+	});
+
 	it("renders every configured column by default", async () => {
 		await withBoard({}, ({ columnStatuses }) => {
 			expect(columnStatuses()).toEqual(["To Do", "In Progress", "Done"]);

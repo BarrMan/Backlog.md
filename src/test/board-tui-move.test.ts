@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,11 @@ import type { Task } from "../types/index.ts";
 import { renderBoardTui } from "../ui/board.ts";
 import { getHelpShortcuts } from "../ui/components/help-popup.ts";
 import { createScreen } from "../ui/tui.ts";
-import { initializeTestProject, retry, withTimeout } from "./test-utils.ts";
+import { initializeTestProject, withTimeout } from "./test-utils.ts";
+
+// This harness keeps its Core and temporary directory at module scope, so each case must
+// own that state until its board and filesystem cleanup complete.
+const it = test.serial;
 
 type EmittingWidget = {
 	emit: (event: string, ch?: string, key?: { name: string; full: string; shift?: boolean }) => boolean;
@@ -110,14 +114,21 @@ async function withBoard(
 	];
 	let pushUpdate: ((nextTasks: Task[], nextStatuses: string[]) => void) | undefined;
 	let tabHandoffs = 0;
+	let boardPromise: Promise<void> | undefined;
+	let closed = false;
+	let resolveBoardReady: (() => void) | undefined;
+	const boardReady = new Promise<void>((resolve) => {
+		resolveBoardReady = resolve;
+	});
 	try {
-		const boardPromise = renderBoardTui(tasks, STATUSES, "horizontal", 20, {
+		boardPromise = renderBoardTui(tasks, STATUSES, "horizontal", 20, {
 			screen,
 			core,
 			filters: options?.filters,
 			subscribeUpdates: (updateFn) => {
 				pushUpdate = updateFn;
 			},
+			onReady: () => resolveBoardReady?.(),
 			...(options?.trackTabHandoff
 				? {
 						onTabPress: async () => {
@@ -126,13 +137,14 @@ async function withBoard(
 					}
 				: {}),
 		});
-		await Bun.sleep(20);
-		let closed = false;
+		await withTimeout(boardReady, "board ready", 1000);
 		const quit = async () => {
 			if (closed) return;
 			closed = true;
 			pressKey(screen, "q");
-			await withTimeout(boardPromise, "board close", 5000);
+			const board = boardPromise;
+			if (!board) throw new Error("Board did not start");
+			await withTimeout(board, "board close", 5000);
 		};
 		await run({
 			screen,
@@ -144,6 +156,11 @@ async function withBoard(
 		});
 		await quit();
 	} finally {
+		if (!closed && boardPromise) {
+			closed = true;
+			pressKey(screen, "q");
+			await withTimeout(boardPromise, "board close", 5000);
+		}
 		screen.destroy();
 		if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);
 		else Reflect.deleteProperty(process.stdout, "isTTY");
@@ -171,14 +188,10 @@ describe("TUI board single-task mover", () => {
 
 			pressKey(screen, "right");
 			pressKey(screen, "enter");
-			await retry(async () => {
-				const moved = await core.filesystem.loadTask("TASK-1");
-				if (moved?.status !== "In Progress") throw new Error("move not persisted yet");
-			});
-
+			await quit();
+			expect((await core.filesystem.loadTask("TASK-1"))?.status).toBe("In Progress");
 			expect((await core.filesystem.loadTask("TASK-2"))?.status).toBe("To Do");
 			expect((await core.filesystem.loadTask("TASK-3"))?.status).toBe("To Do");
-			await quit();
 		});
 	});
 
@@ -187,13 +200,9 @@ describe("TUI board single-task mover", () => {
 			pressKey(screen, "m");
 			pressKey(screen, "right");
 			pressKey(screen, "m");
-			await retry(async () => {
-				const moved = await core.filesystem.loadTask("TASK-1");
-				if (moved?.status !== "In Progress") throw new Error("move not persisted yet");
-			});
-
-			expect((await core.filesystem.loadTask("TASK-2"))?.status).toBe("To Do");
 			await quit();
+			expect((await core.filesystem.loadTask("TASK-1"))?.status).toBe("In Progress");
+			expect((await core.filesystem.loadTask("TASK-2"))?.status).toBe("To Do");
 		});
 	});
 
@@ -308,16 +317,13 @@ describe("TUI board multi-select mover", () => {
 			pressKey(screen, "right");
 			pressKey(screen, "enter");
 
-			await retry(async () => {
-				const moved = await core.filesystem.loadTask("TASK-1");
-				if (moved?.status !== "In Progress") throw new Error("set move not persisted yet");
-			});
+			await quit();
+			expect((await core.filesystem.loadTask("TASK-1"))?.status).toBe("In Progress");
 			const companion = await core.filesystem.loadTask("TASK-2");
 			expect(companion?.status).toBe("In Progress");
 			const first = await core.filesystem.loadTask("TASK-1");
 			expect((first?.ordinal ?? 0) < (companion?.ordinal ?? 0)).toBe(true);
 			expect((await core.filesystem.loadTask("TASK-3"))?.status).toBe("To Do");
-			await quit();
 		});
 	});
 
@@ -335,19 +341,15 @@ describe("TUI board multi-select mover", () => {
 			expect((await core.filesystem.loadTask("TASK-3"))?.ordinal).toBe(3000);
 
 			pressKey(screen, "enter");
-			await retry(async () => {
-				const first = await core.filesystem.loadTask("TASK-1");
-				const second = await core.filesystem.loadTask("TASK-2");
-				const third = await core.filesystem.loadTask("TASK-3");
-				const ordinalOf = (task: Task | null) => task?.ordinal ?? Number.NaN;
-				// The set [TASK-1, TASK-3] collapses adjacent at the grabbed task's position.
-				if (!(ordinalOf(first) < ordinalOf(third) && ordinalOf(third) < ordinalOf(second))) {
-					throw new Error("adjacency collapse not persisted yet");
-				}
-			});
+			await quit();
+			const first = await core.filesystem.loadTask("TASK-1");
+			const second = await core.filesystem.loadTask("TASK-2");
+			const third = await core.filesystem.loadTask("TASK-3");
+			// The set [TASK-1, TASK-3] collapses adjacent at the grabbed task's position.
+			expect((first?.ordinal ?? Number.NaN) < (third?.ordinal ?? Number.NaN)).toBe(true);
+			expect((third?.ordinal ?? Number.NaN) < (second?.ordinal ?? Number.NaN)).toBe(true);
 			expect((await core.filesystem.loadTask("TASK-1"))?.status).toBe("To Do");
 			expect((await core.filesystem.loadTask("TASK-3"))?.status).toBe("To Do");
-			await quit();
 		});
 	});
 
@@ -427,17 +429,13 @@ describe("TUI board multi-select mover", () => {
 				expect(previewed.slice(0, 2).sort()).toEqual(["TASK-1", "TASK-3"]);
 
 				pressKey(screen, "enter");
-				await retry(async () => {
-					const first = await core.filesystem.loadTask(previewed[0] ?? "");
-					const second = await core.filesystem.loadTask(previewed[1] ?? "");
-					const third = await core.filesystem.loadTask("TASK-2");
-					const a = first?.ordinal ?? Number.NaN;
-					const b = second?.ordinal ?? Number.NaN;
-					const c = third?.ordinal ?? Number.NaN;
-					// The persisted column order must be exactly the previewed one.
-					if (!(a < b && b < c)) throw new Error("cross-column order not persisted yet");
-				});
 				await quit();
+				const first = await core.filesystem.loadTask(previewed[0] ?? "");
+				const second = await core.filesystem.loadTask(previewed[1] ?? "");
+				const third = await core.filesystem.loadTask("TASK-2");
+				// The persisted column order must be exactly the previewed one.
+				expect((first?.ordinal ?? Number.NaN) < (second?.ordinal ?? Number.NaN)).toBe(true);
+				expect((second?.ordinal ?? Number.NaN) < (third?.ordinal ?? Number.NaN)).toBe(true);
 			},
 			{
 				tasks: [
@@ -544,18 +542,27 @@ describe("TUI board multi-select mover", () => {
 			pressKey(screen, "S-m");
 			pressKey(screen, "escape");
 
-			await retry(async () => {
-				const moved = await core.filesystem.loadTask("TASK-1");
-				if (moved?.status !== "In Progress") throw new Error("set move not persisted yet");
-			});
+			await quit();
+			expect((await core.filesystem.loadTask("TASK-1"))?.status).toBe("In Progress");
 			expect((await core.filesystem.loadTask("TASK-2"))?.status).toBe("In Progress");
 			expect((await core.filesystem.loadTask("TASK-3"))?.status).toBe("To Do");
-			await quit();
 		});
 	});
 
 	it("reports per-task failures in the transient footer and still moves the rest", async () => {
 		await withBoard(async ({ screen, footer, quit }) => {
+			const originalMove = core.moveTasksToStatus.bind(core);
+			let resolveMoveCompleted: (() => void) | undefined;
+			const moveCompleted = new Promise<void>((resolve) => {
+				resolveMoveCompleted = resolve;
+			});
+			core.moveTasksToStatus = (async (params: Parameters<Core["moveTasksToStatus"]>[0]) => {
+				try {
+					return await originalMove(params);
+				} finally {
+					resolveMoveCompleted?.();
+				}
+			}) as Core["moveTasksToStatus"];
 			pressKey(screen, "m");
 			pressKey(screen, "S-down");
 			pressKey(screen, "S-m");
@@ -569,10 +576,9 @@ describe("TUI board multi-select mover", () => {
 			pressKey(screen, "right");
 			pressKey(screen, "enter");
 
-			await retry(async () => {
-				const moved = await core.filesystem.loadTask("TASK-1");
-				if (moved?.status !== "In Progress") throw new Error("partial move not persisted yet");
-			});
+			await withTimeout(moveCompleted, "partial move completion", 1000);
+			await Promise.resolve();
+			expect((await core.filesystem.loadTask("TASK-1"))?.status).toBe("In Progress");
 			expect(footer()).toContain("Could not move 1 of the selected tasks");
 			expect(footer()).toContain("TASK-2");
 			await quit();

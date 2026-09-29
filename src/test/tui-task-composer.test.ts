@@ -15,6 +15,7 @@ import {
 	deletionEnd,
 	deletionStart,
 	getTaskComposerLayout,
+	getTaskComposerNavigationTarget,
 	getTaskComposerPriorityChoices,
 	getTaskComposerProjectChoices,
 	getTaskComposerStatusChoices,
@@ -1118,6 +1119,33 @@ describe("TUI task composer canonical persistence", () => {
 
 describe("TUI task composer selector navigation", () => {
 	const PROJECTS = ["Web"];
+
+	it("resolves explicit focus transitions for each selector/action layout", () => {
+		const cases = [
+			[false, false, false, "status", "down", "create"],
+			[false, false, false, "priority", "down", "cancel"],
+			[false, false, false, "create", "up", "status"],
+			[false, false, false, "status", "left", "status"],
+			[true, false, false, "type", "down", "create"],
+			[true, false, false, "priority", "up", "status"],
+			[true, true, false, "type", "down", "priority"],
+			[true, true, false, "priority", "down", "create"],
+			[false, false, true, "status", "down", "project"],
+			[true, false, true, "status", "down", "type"],
+			[true, false, true, "type", "down", "project"],
+			[true, true, true, "type", "down", "priority"],
+			[true, true, true, "priority", "down", "project"],
+			[false, false, true, "project", "up", "priority"],
+			[false, false, true, "project", "right", "project"],
+			[false, false, true, "cancel", "up", "project"],
+		] as const;
+
+		for (const [compact, stackSelectors, hasProjects, field, direction, expected] of cases) {
+			expect(getTaskComposerNavigationTarget(field, direction, { compact, stackSelectors }, hasProjects)).toBe(
+				expected,
+			);
+		}
+	});
 
 	/**
 	 * Tab from the initial focus until the selector whose label starts with `prefix` is focused,

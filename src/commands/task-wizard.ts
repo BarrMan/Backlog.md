@@ -1,7 +1,7 @@
 import { TextPrompt } from "@clack/core";
 import * as clack from "@clack/prompts";
 import picocolors from "picocolors";
-import { DEFAULT_STATUSES } from "../constants/index.ts";
+import { DEFAULT_STATUSES, FALLBACK_STATUS } from "../constants/index.ts";
 import type { AcceptanceCriterion, Task, TaskCreateInput, TaskUpdateInput } from "../types/index.ts";
 import { normalizeDueDate } from "../utils/due-date.ts";
 import { getPriorityOptions, normalizePriorityValue } from "../utils/priority-config.ts";
@@ -126,12 +126,12 @@ function parseChecklistInput(value: string): ChecklistEntry[] {
 }
 
 function getDefaultCreateStatus(statuses: string[]): string {
-	const canonicalTodo = findCanonicalStatus("To Do", statuses);
+	const canonicalTodo = findCanonicalStatus(FALLBACK_STATUS, statuses);
 	if (canonicalTodo) {
 		return canonicalTodo;
 	}
 	const firstStatus = statuses.find((status) => status.trim().length > 0);
-	return firstStatus ?? "To Do";
+	return firstStatus ?? FALLBACK_STATUS;
 }
 
 function buildStatusPromptValues(params: { statuses: string[]; mode: "create" | "edit"; initialStatus: string }): {
@@ -204,17 +204,20 @@ function buildPriorityPromptValues(
 	};
 }
 
-function buildTaskTypePromptValues(
-	initialType: string,
-	types?: string[],
+function buildConfiguredChoicePromptValues(
+	initialValue: string,
+	configuredValues: string[] | undefined,
+	resolveValue: (value: string, values?: string[]) => string | undefined,
+	getValues: (values?: string[]) => string[],
+	noneHint: string,
 ): {
 	options: PromptChoice[];
 	initial: string;
 } {
-	const canonicalInitial = resolveTaskTypeValue(initialType, types) ?? initialType.trim();
+	const canonicalInitial = resolveValue(initialValue, configuredValues) ?? initialValue.trim();
 	const options: PromptChoice[] = [
-		{ label: "None", value: "", hint: "No task type" },
-		...getTaskTypeValues(types).map((type) => ({ label: type, value: type })),
+		{ label: "None", value: "", hint: noneHint },
+		...getValues(configuredValues).map((value) => ({ label: value, value })),
 	];
 	if (!canonicalInitial) {
 		return { options, initial: "" };
@@ -223,33 +226,23 @@ function buildTaskTypePromptValues(
 		return { options, initial: canonicalInitial };
 	}
 	return {
-		options: [{ label: `${initialType} (current)`, value: initialType }, ...options],
-		initial: initialType,
+		options: [{ label: `${initialValue} (current)`, value: initialValue }, ...options],
+		initial: initialValue,
 	};
 }
 
-function buildProjectPromptValues(
-	initialProject: string,
-	projects?: string[],
-): {
-	options: PromptChoice[];
-	initial: string;
-} {
-	const canonicalInitial = resolveProjectValue(initialProject, projects) ?? initialProject.trim();
-	const options: PromptChoice[] = [
-		{ label: "None", value: "", hint: "No project" },
-		...getProjectValues(projects).map((project) => ({ label: project, value: project })),
-	];
-	if (!canonicalInitial) {
-		return { options, initial: "" };
-	}
-	if (options.some((option) => option.value === canonicalInitial)) {
-		return { options, initial: canonicalInitial };
-	}
-	return {
-		options: [{ label: `${initialProject} (current)`, value: initialProject }, ...options],
-		initial: initialProject,
-	};
+function buildTaskTypePromptValues(initialType: string, types?: string[]) {
+	return buildConfiguredChoicePromptValues(initialType, types, resolveTaskTypeValue, getTaskTypeValues, "No task type");
+}
+
+function buildProjectPromptValues(initialProject: string, projects?: string[]) {
+	return buildConfiguredChoicePromptValues(
+		initialProject,
+		projects,
+		resolveProjectValue,
+		getProjectValues,
+		"No project",
+	);
 }
 
 function formatListInput(values?: string[]): string {
@@ -268,6 +261,19 @@ function formatChecklistInput(values?: AcceptanceCriterion[]): string {
 function areStringArraysEqual(a: string[], b: string[]): boolean {
 	if (a.length !== b.length) return false;
 	return a.every((value, index) => value === b[index]);
+}
+
+function applyChangedList(initialValue: string, nextValue: string, apply: (values: string[]) => void): void {
+	const initial = parseListInput(initialValue);
+	const next = parseListInput(nextValue);
+	if (!areStringArraysEqual(initial, next)) apply(next);
+}
+
+function checklistSnapshot(items?: AcceptanceCriterion[]): ChecklistEntry[] {
+	return (items ?? [])
+		.slice()
+		.sort((a, b) => a.index - b.index)
+		.map((entry) => ({ text: entry.text, checked: entry.checked }));
 }
 
 function areChecklistEntriesEqual(existing: ChecklistEntry[], next: ChecklistEntry[]): boolean {
@@ -771,35 +777,21 @@ export async function runTaskEditWizard(
 		updateInput.dueDate = values.dueDate || null;
 	}
 
-	const initialAssignee = parseListInput(initial.assignee);
-	const nextAssignee = parseListInput(values.assignee);
-	if (!areStringArraysEqual(initialAssignee, nextAssignee)) {
-		updateInput.assignee = nextAssignee;
-	}
-
-	const initialLabels = parseListInput(initial.labels);
-	const nextLabels = parseListInput(values.labels);
-	if (!areStringArraysEqual(initialLabels, nextLabels)) {
-		updateInput.labels = nextLabels;
-	}
-
-	const initialDependencies = parseListInput(initial.dependencies);
-	const nextDependencies = parseListInput(values.dependencies);
-	if (!areStringArraysEqual(initialDependencies, nextDependencies)) {
-		updateInput.dependencies = nextDependencies;
-	}
-
-	const initialReferences = parseListInput(initial.references);
-	const nextReferences = parseListInput(values.references);
-	if (!areStringArraysEqual(initialReferences, nextReferences)) {
-		updateInput.references = nextReferences;
-	}
-
-	const initialDocumentation = parseListInput(initial.documentation);
-	const nextDocumentation = parseListInput(values.documentation);
-	if (!areStringArraysEqual(initialDocumentation, nextDocumentation)) {
-		updateInput.documentation = nextDocumentation;
-	}
+	applyChangedList(initial.assignee, values.assignee, (assignee) => {
+		updateInput.assignee = assignee;
+	});
+	applyChangedList(initial.labels, values.labels, (labels) => {
+		updateInput.labels = labels;
+	});
+	applyChangedList(initial.dependencies, values.dependencies, (dependencies) => {
+		updateInput.dependencies = dependencies;
+	});
+	applyChangedList(initial.references, values.references, (references) => {
+		updateInput.references = references;
+	});
+	applyChangedList(initial.documentation, values.documentation, (documentation) => {
+		updateInput.documentation = documentation;
+	});
 
 	if (values.implementationPlan !== initial.implementationPlan) {
 		updateInput.implementationPlan = values.implementationPlan;
@@ -808,10 +800,7 @@ export async function runTaskEditWizard(
 		updateInput.implementationNotes = values.implementationNotes;
 	}
 
-	const existingCriteria = (options.task.acceptanceCriteriaItems ?? [])
-		.slice()
-		.sort((a, b) => a.index - b.index)
-		.map((entry) => ({ text: entry.text, checked: entry.checked }));
+	const existingCriteria = checklistSnapshot(options.task.acceptanceCriteriaItems);
 	const targetCriteria = parseChecklistInput(values.acceptanceCriteria);
 	if (!areChecklistEntriesEqual(existingCriteria, targetCriteria)) {
 		updateInput.acceptanceCriteria = targetCriteria.map((entry) => ({
@@ -820,10 +809,7 @@ export async function runTaskEditWizard(
 		}));
 	}
 
-	const existingDod = (options.task.definitionOfDoneItems ?? [])
-		.slice()
-		.sort((a, b) => a.index - b.index)
-		.map((entry) => ({ text: entry.text, checked: entry.checked }));
+	const existingDod = checklistSnapshot(options.task.definitionOfDoneItems);
 	const targetDod = parseChecklistInput(values.definitionOfDone);
 	if (!areChecklistEntriesEqual(existingDod, targetDod)) {
 		const existingIndices = (options.task.definitionOfDoneItems ?? []).map((entry) => entry.index);

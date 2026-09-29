@@ -5,6 +5,7 @@ import type { Task } from '../../types';
 import { formatPriorityLabel } from '../../utils/priority-config';
 import LoadingSpinner from './LoadingSpinner';
 import StoredDate from './StoredDate';
+import MetricRow from './MetricRow';
 
 interface StatisticsData extends Omit<TaskStatistics, 'statusCounts' | 'priorityCounts'> {
 	statusCounts: Record<string, number>;
@@ -12,7 +13,6 @@ interface StatisticsData extends Omit<TaskStatistics, 'statusCounts' | 'priority
 }
 
 interface StatisticsProps {
-	tasks?: Task[];
 	isLoading?: boolean;
 	onEditTask?: (task: Task) => void;
 	projectName?: string;
@@ -20,7 +20,6 @@ interface StatisticsProps {
 }
 
 const Statistics: React.FC<StatisticsProps> = ({
-	tasks: _tasks,
 	isLoading: externalLoading,
 	onEditTask,
 	projectName,
@@ -346,30 +345,7 @@ const Statistics: React.FC<StatisticsProps> = ({
 					<div className="space-y-4">
 						{Object.entries(statistics.statusCounts)
 							.filter(([, count]) => count > 0)
-							.map(([status, count]) => (
-							<div key={status} className="flex items-center justify-between">
-								<div className="flex items-center space-x-3">
-									<StatusIcon status={status} />
-									<span className={`px-3 py-1 rounded-circle text-sm font-medium ${getStatusColor(status)}`}>
-										{status}
-									</span>
-								</div>
-								<div className="flex items-center space-x-3">
-									<div className="text-right">
-										<div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{count}</div>
-										<div className="text-xs text-gray-500 dark:text-gray-400">
-											{Math.round((count / statistics.totalTasks) * 100)}%
-										</div>
-									</div>
-									<div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-circle h-2">
-										<div 
-											className="bg-blue-500 h-2 rounded-circle transition-all duration-300"
-											style={{ width: `${(count / statistics.totalTasks) * 100}%` }}
-										></div>
-									</div>
-								</div>
-							</div>
-						))}
+							.map(([status, count]) => <MetricRow key={status} icon={<StatusIcon status={status} />} label={status} labelClassName={getStatusColor(status)} count={count} total={statistics.totalTasks} barClassName="bg-blue-500" />)}
 					</div>
 				</div>
 
@@ -377,30 +353,7 @@ const Statistics: React.FC<StatisticsProps> = ({
 				<div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
 					<h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Priority Distribution</h3>
 					<div className="space-y-4">
-						{priorityBreakdown.map(({ key, priority, label, count }) => (
-							<div key={key} className="flex items-center justify-between">
-								<div className="flex items-center space-x-3">
-									<PriorityIcon priority={priority} />
-									<span className={`px-3 py-1 rounded-circle text-sm font-medium ${getPriorityColor(priority)}`}>
-										{label}
-									</span>
-								</div>
-								<div className="flex items-center space-x-3">
-									<div className="text-right">
-										<div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{count}</div>
-										<div className="text-xs text-gray-500 dark:text-gray-400">
-											{Math.round((count / statistics.totalTasks) * 100)}%
-										</div>
-									</div>
-									<div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-circle h-2">
-										<div
-											className="bg-yellow-500 h-2 rounded-circle transition-all duration-300"
-											style={{ width: `${(count / statistics.totalTasks) * 100}%` }}
-										></div>
-									</div>
-								</div>
-							</div>
-						))}
+						{priorityBreakdown.map(({ key, priority, label, count }) => <MetricRow key={key} icon={<PriorityIcon priority={priority} />} label={label} labelClassName={getPriorityColor(priority)} count={count} total={statistics.totalTasks} barClassName="bg-yellow-500" />)}
 					</div>
 				</div>
 			</div>

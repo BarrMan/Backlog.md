@@ -1,4 +1,5 @@
 import React, { useState, type KeyboardEvent } from 'react';
+import { matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
 
 interface ChipInputProps {
   value: string[];
@@ -15,14 +16,14 @@ const ChipInput: React.FC<ChipInputProps> = ({ value, onChange, placeholder, lab
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (disabled) return;
-    if ((e.key === 'Enter' || e.key === ',') && inputValue.trim()) {
+		if (matchesBrowserShortcut(e, "commitChip") && inputValue.trim()) {
       e.preventDefault();
       const newValue = inputValue.trim();
       if (!value.includes(newValue)) {
         onChange([...value, newValue]);
       }
       setInputValue('');
-    } else if (e.key === 'Backspace' && !inputValue && value.length > 0) {
+		} else if (matchesBrowserShortcut(e, "removeLastChip") && !inputValue && value.length > 0) {
       // Remove last chip when backspace is pressed on empty input
       onChange(value.slice(0, -1));
     }

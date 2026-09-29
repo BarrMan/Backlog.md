@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
-import { clearProjectRootCache, findBacklogRoot } from "../utils/find-backlog-root.ts";
+import { findBacklogRoot } from "../utils/find-backlog-root.ts";
 
 describe("findBacklogRoot", () => {
 	let testDir: string;
@@ -11,11 +11,9 @@ describe("findBacklogRoot", () => {
 	beforeEach(async () => {
 		testDir = join(tmpdir(), `backlog-root-test-${Date.now()}`);
 		await mkdir(testDir, { recursive: true });
-		clearProjectRootCache();
 	});
 
 	afterEach(async () => {
-		clearProjectRootCache();
 		await rm(testDir, { recursive: true, force: true });
 	});
 

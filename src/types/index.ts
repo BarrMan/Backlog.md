@@ -1,6 +1,7 @@
 import type { AgentConfiguration } from "../agent-workspace/types.ts";
 
 export type TaskStatus = string;
+export type TaskDirectoryType = "task" | "draft" | "archived" | "completed";
 
 /**
  * How a multi-label filter is combined. Interactive multi-select pickers use "any" so adding a
@@ -101,11 +102,6 @@ export interface MilestoneBucket {
 	total: number;
 	doneCount: number;
 	progress: number;
-}
-
-export interface MilestoneSummary {
-	milestones: string[];
-	buckets: MilestoneBucket[];
 }
 
 /**

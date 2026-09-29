@@ -1,8 +1,8 @@
 import { isAbsolute, relative } from "node:path";
-import type { Task } from "../types/index.ts";
+import { DEFAULT_DIRECTORIES } from "../constants/index.ts";
+import type { Task, TaskDirectoryType } from "../types/index.ts";
 import { canonicalTaskId, taskIdsEqual } from "../utils/task-path.ts";
 import { compareTaskIds } from "../utils/task-sorting.ts";
-import type { TaskDirectoryType } from "./cross-branch-tasks.ts";
 
 export interface TaskIdentityRecord {
 	id: string;
@@ -12,6 +12,22 @@ export interface TaskIdentityRecord {
 	lastModified: Date;
 	task?: Task;
 	workingCopy?: boolean;
+}
+
+function workingCopyTaskIdentityRecord(task: Task, type: "task" | "completed", path: string): TaskIdentityRecord {
+	return {
+		id: task.id,
+		type,
+		branch: "local",
+		path,
+		lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
+		task: { ...task, source: type === "completed" ? "completed" : "local" },
+		workingCopy: true,
+	};
+}
+
+export function completedTaskIdentityRecord(task: Task, path: string): TaskIdentityRecord {
+	return workingCopyTaskIdentityRecord(task, "completed", path);
 }
 
 interface TaskIdentityPathContext {
@@ -47,10 +63,10 @@ function joinPosix(...parts: string[]): string {
 }
 
 export function normalizeTaskLifecyclePath(path: string, backlogDirectory: string): string {
-	for (const lifecycleDirectory of ["archive/tasks", "completed"]) {
+	for (const lifecycleDirectory of [DEFAULT_DIRECTORIES.ARCHIVE_TASKS, DEFAULT_DIRECTORIES.COMPLETED]) {
 		const lifecyclePrefix = `${backlogDirectory}/${lifecycleDirectory}/`;
 		if (path.startsWith(lifecyclePrefix)) {
-			return `${backlogDirectory}/tasks/${path.slice(lifecyclePrefix.length)}`;
+			return `${backlogDirectory}/${DEFAULT_DIRECTORIES.TASKS}/${path.slice(lifecyclePrefix.length)}`;
 		}
 	}
 	return path;
@@ -171,26 +187,10 @@ export class TaskIdentityIndex {
 	withWorkingCopyCorpus(activeTasks: Task[], completedTasks: Task[]): TaskIdentityIndex {
 		const records = this.records.filter((record) => !record.workingCopy);
 		for (const task of activeTasks) {
-			records.push({
-				id: task.id,
-				type: "task",
-				branch: "local",
-				path: task.filePath ?? task.id,
-				lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
-				task: { ...task, source: "local" },
-				workingCopy: true,
-			});
+			records.push(workingCopyTaskIdentityRecord(task, "task", task.filePath ?? task.id));
 		}
 		for (const task of completedTasks) {
-			records.push({
-				id: task.id,
-				type: "completed",
-				branch: "local",
-				path: task.filePath ?? task.id,
-				lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
-				task: { ...task, source: "completed" },
-				workingCopy: true,
-			});
+			records.push(completedTaskIdentityRecord(task, task.filePath ?? task.id));
 		}
 		return new TaskIdentityIndex(records, this.context, this.statuses, this.resolutionStrategy);
 	}
@@ -259,29 +259,39 @@ export class TaskIdentityIndex {
 	}
 
 	resolveForRead(taskId: string): TaskIdentityResolution {
-		const groups = this.getGroups(taskId);
-		if (groups.length === 0) return { status: "not-found" };
-		if (groups.length > 1) return { status: "ambiguous", candidates: this.candidatesAcrossGroups(groups) };
-		const group = groups[0] as TaskIdentityGroup;
-		const candidates = this.ambiguousCandidates(group);
-		if (candidates.length > 0) return { status: "ambiguous", candidates };
-		const tasks = this.getTasks(true).filter((task) => taskIdsEqual(task.id, taskId));
-		return tasks[0] ? { status: "found", task: tasks[0] } : { status: "not-found" };
+		return this.resolveWithPolicy(
+			taskId,
+			() => this.getTasks(true).filter((task) => taskIdsEqual(task.id, taskId))[0],
+			false,
+		);
 	}
 
 	resolveForMutation(taskId: string): TaskIdentityResolution {
+		return this.resolveWithPolicy(taskId, (group) => this.selectWorkingTask(group), true);
+	}
+
+	private selectWorkingTask(group: TaskIdentityGroup): Task | undefined {
+		return [...group.identities.values()]
+			.flatMap((identity) => identity.records)
+			.filter((record) => record.workingCopy && record.type === "task" && record.task)
+			.sort((left, right) => recordKey(left).localeCompare(recordKey(right)))[0]?.task;
+	}
+
+	private resolveWithPolicy(
+		taskId: string,
+		selectTask: (group: TaskIdentityGroup) => Task | undefined,
+		localSource: boolean,
+	): TaskIdentityResolution {
 		const groups = this.getGroups(taskId);
 		if (groups.length === 0) return { status: "not-found" };
 		if (groups.length > 1) return { status: "ambiguous", candidates: this.candidatesAcrossGroups(groups) };
 		const group = groups[0] as TaskIdentityGroup;
 		const candidates = this.ambiguousCandidates(group);
 		if (candidates.length > 0) return { status: "ambiguous", candidates };
-		const workingTasks = [...group.identities.values()]
-			.flatMap((identity) => identity.records)
-			.filter((record) => record.workingCopy && record.type === "task" && record.task)
-			.sort((left, right) => recordKey(left).localeCompare(recordKey(right)));
-		const selected = workingTasks[0]?.task;
-		return selected ? { status: "found", task: { ...selected, source: "local" } } : { status: "not-found" };
+		const selected = selectTask(group);
+		return selected
+			? { status: "found", task: localSource ? { ...selected, source: "local" } : selected }
+			: { status: "not-found" };
 	}
 
 	resolve(taskId: string): TaskIdentityResolution {

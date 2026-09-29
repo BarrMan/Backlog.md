@@ -1,45 +1,7 @@
+import { canonicalMilestoneId, collectMilestoneAliasKeys, milestoneKey } from "../core/milestones.ts";
 import type { Milestone } from "../types/index.ts";
 
 type MilestoneRef = Pick<Milestone, "id" | "title">;
-
-function milestoneStorageKey(value: string): string {
-	return value.trim().toLowerCase();
-}
-
-function collectMilestoneAliasKeys(value: string): Set<string> {
-	const normalized = value.trim();
-	const keys = new Set<string>();
-	const baseKey = milestoneStorageKey(normalized);
-	if (!baseKey) {
-		return keys;
-	}
-
-	keys.add(baseKey);
-
-	if (/^\d+$/.test(normalized)) {
-		const numeric = String(Number.parseInt(normalized, 10));
-		keys.add(numeric);
-		keys.add(`m-${numeric}`);
-		return keys;
-	}
-
-	const idMatch = normalized.match(/^m-(\d+)$/i);
-	if (idMatch?.[1]) {
-		const numeric = String(Number.parseInt(idMatch[1], 10));
-		keys.add(numeric);
-		keys.add(`m-${numeric}`);
-	}
-
-	return keys;
-}
-
-function canonicalMilestoneIdAlias(value: string): string | null {
-	const normalized = value.trim();
-	if (/^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized)) {
-		return `m-${String(Number.parseInt(normalized.replace(/^m-/i, ""), 10))}`;
-	}
-	return null;
-}
 
 function milestoneIdMatchesAlias(milestoneId: string, aliasKeys: Set<string>): boolean {
 	for (const key of collectMilestoneAliasKeys(milestoneId)) {
@@ -51,15 +13,15 @@ function milestoneIdMatchesAlias(milestoneId: string, aliasKeys: Set<string>): b
 }
 
 function findIdMatch(input: string, milestones: MilestoneRef[], aliasKeys: Set<string>): MilestoneRef | undefined {
-	const inputKey = milestoneStorageKey(input);
-	const rawExactMatch = milestones.find((item) => milestoneStorageKey(item.id) === inputKey);
+	const inputKey = milestoneKey(input);
+	const rawExactMatch = milestones.find((item) => milestoneKey(item.id) === inputKey);
 	if (rawExactMatch) {
 		return rawExactMatch;
 	}
 
-	const canonicalInputId = canonicalMilestoneIdAlias(input);
+	const canonicalInputId = canonicalMilestoneId(input);
 	if (canonicalInputId) {
-		const canonicalRawMatch = milestones.find((item) => milestoneStorageKey(item.id) === canonicalInputId);
+		const canonicalRawMatch = milestones.find((item) => milestoneKey(item.id) === canonicalInputId);
 		if (canonicalRawMatch) {
 			return canonicalRawMatch;
 		}
@@ -69,8 +31,8 @@ function findIdMatch(input: string, milestones: MilestoneRef[], aliasKeys: Set<s
 }
 
 function findUniqueTitleMatch(input: string, milestones: MilestoneRef[]): MilestoneRef | null {
-	const inputKey = milestoneStorageKey(input);
-	const titleMatches = milestones.filter((item) => milestoneStorageKey(item.title) === inputKey);
+	const inputKey = milestoneKey(input);
+	const titleMatches = milestones.filter((item) => milestoneKey(item.title) === inputKey);
 	return titleMatches.length === 1 ? (titleMatches[0] ?? null) : null;
 }
 
@@ -95,8 +57,8 @@ export function resolveMilestoneInputForStorage(
 		return titleMatch?.id ?? idMatch?.id ?? null;
 	};
 
-	const inputKey = milestoneStorageKey(normalized);
-	const activeTitleMatches = activeMilestones.filter((item) => milestoneStorageKey(item.title) === inputKey);
+	const inputKey = milestoneKey(normalized);
+	const activeTitleMatches = activeMilestones.filter((item) => milestoneKey(item.title) === inputKey);
 	const hasAmbiguousActiveTitle = activeTitleMatches.length > 1;
 	if (looksLikeMilestoneId) {
 		const activeIdMatch = findIdMatch(normalized, activeMilestones, aliasKeys);
@@ -126,4 +88,20 @@ export function resolveMilestoneInputForStorage(
 	}
 
 	return resolveByAlias(archivedMilestones) ?? normalized;
+}
+
+type MilestoneStorageFilesystem = {
+	listMilestones(): Promise<MilestoneRef[]>;
+	listArchivedMilestones(): Promise<MilestoneRef[]>;
+};
+
+export async function resolveMilestoneInputFromFilesystem(
+	milestone: string,
+	filesystem: MilestoneStorageFilesystem,
+): Promise<string> {
+	const [activeMilestones, archivedMilestones] = await Promise.all([
+		filesystem.listMilestones(),
+		filesystem.listArchivedMilestones(),
+	]);
+	return resolveMilestoneInputForStorage(milestone, activeMilestones, archivedMilestones);
 }

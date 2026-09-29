@@ -104,18 +104,7 @@ export function sortByPriority<T extends { id: string; priority?: string }>(
 	items: T[],
 	priorityOrder?: readonly string[],
 ): T[] {
-	return [...items].sort((a, b) => {
-		const aWeight = getPriorityRank(a.priority, priorityOrder);
-		const bWeight = getPriorityRank(b.priority, priorityOrder);
-
-		// First sort by priority (higher weight = higher priority)
-		if (aWeight !== bWeight) {
-			return bWeight - aWeight;
-		}
-
-		// If priorities are the same, sort by task ID
-		return compareTaskIds(a.id, b.id);
-	});
+	return [...items].sort((a, b) => comparePriorityThenTaskId(a, b, priorityOrder));
 }
 
 /**
@@ -124,25 +113,14 @@ export function sortByPriority<T extends { id: string; priority?: string }>(
  * Tasks with the same ordinal (or both undefined) are sorted by task ID.
  */
 export function sortByOrdinal<T extends { id: string; ordinal?: number }>(items: T[]): T[] {
-	return [...items].sort((a, b) => {
-		// Tasks with ordinal come before tasks without
-		if (a.ordinal !== undefined && b.ordinal === undefined) {
-			return -1;
-		}
-		if (a.ordinal === undefined && b.ordinal !== undefined) {
-			return 1;
-		}
+	return [...items].sort((a, b) => compareOrdinals(a, b) || compareTaskIds(a.id, b.id));
+}
 
-		// Both have ordinals - sort by ordinal value
-		if (a.ordinal !== undefined && b.ordinal !== undefined) {
-			if (a.ordinal !== b.ordinal) {
-				return a.ordinal - b.ordinal;
-			}
-		}
-
-		// Same ordinal (or both undefined) - sort by task ID
-		return compareTaskIds(a.id, b.id);
-	});
+export function compareOrdinals<T extends { ordinal?: number }>(a: T, b: T): number {
+	if (a.ordinal !== undefined && b.ordinal === undefined) return -1;
+	if (a.ordinal === undefined && b.ordinal !== undefined) return 1;
+	if (a.ordinal !== undefined && b.ordinal !== undefined && a.ordinal !== b.ordinal) return a.ordinal - b.ordinal;
+	return 0;
 }
 
 /**
@@ -154,32 +132,20 @@ export function sortByOrdinalAndPriority<T extends { id: string; ordinal?: numbe
 	priorityOrder?: readonly string[],
 ): T[] {
 	return [...items].sort((a, b) => {
-		// Tasks with ordinal come before tasks without
-		if (a.ordinal !== undefined && b.ordinal === undefined) {
-			return -1;
-		}
-		if (a.ordinal === undefined && b.ordinal !== undefined) {
-			return 1;
-		}
+		const ordinalComparison = compareOrdinals(a, b);
+		if (ordinalComparison !== 0) return ordinalComparison;
 
-		// Both have ordinals - sort by ordinal value
-		if (a.ordinal !== undefined && b.ordinal !== undefined) {
-			if (a.ordinal !== b.ordinal) {
-				return a.ordinal - b.ordinal;
-			}
-		}
-
-		// Same ordinal (or both undefined) - sort by priority
-		const aWeight = getPriorityRank(a.priority, priorityOrder);
-		const bWeight = getPriorityRank(b.priority, priorityOrder);
-
-		if (aWeight !== bWeight) {
-			return bWeight - aWeight;
-		}
-
-		// Same priority - sort by task ID
-		return compareTaskIds(a.id, b.id);
+		return comparePriorityThenTaskId(a, b, priorityOrder);
 	});
+}
+
+function comparePriorityThenTaskId<T extends { id: string; priority?: string }>(
+	a: T,
+	b: T,
+	priorityOrder?: readonly string[],
+): number {
+	const priorityDifference = getPriorityRank(b.priority, priorityOrder) - getPriorityRank(a.priority, priorityOrder);
+	return priorityDifference || compareTaskIds(a.id, b.id);
 }
 
 /**

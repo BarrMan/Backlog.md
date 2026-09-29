@@ -10,7 +10,6 @@ import type {
 	SearchResult,
 	SearchResultType,
 	Task,
-	TaskStatus,
 } from "../../types/index.ts";
 
 const API_BASE = "/api";
@@ -218,6 +217,13 @@ export class ApiClient {
 		const response = await this.fetchWithRetry(url, options);
 		return response.json();
 	}
+
+	private appendNonBlankQueryValues(params: URLSearchParams, key: string, values?: string | string[]): void {
+		if (!values) return;
+		for (const value of Array.isArray(values) ? values : [values]) {
+			if (value && value.trim().length > 0) params.append(key, value.trim());
+		}
+	}
 	async fetchTasks(options?: {
 		status?: string;
 		excludeStatus?: string | string[];
@@ -229,24 +235,11 @@ export class ApiClient {
 	}): Promise<Task[]> {
 		const params = new URLSearchParams();
 		if (options?.status) params.append("status", options.status);
-		if (options?.excludeStatus) {
-			const statuses = Array.isArray(options.excludeStatus) ? options.excludeStatus : [options.excludeStatus];
-			for (const status of statuses) {
-				if (status && status.trim().length > 0) {
-					params.append("excludeStatus", status.trim());
-				}
-			}
-		}
+		this.appendNonBlankQueryValues(params, "excludeStatus", options?.excludeStatus);
 		if (options?.assignee) params.append("assignee", options.assignee);
 		if (options?.parent) params.append("parent", options.parent);
 		if (options?.priority) params.append("priority", options.priority);
-		if (options?.labels) {
-			for (const label of options.labels) {
-				if (label && label.trim().length > 0) {
-					params.append("label", label.trim());
-				}
-			}
-		}
+		this.appendNonBlankQueryValues(params, "label", options?.labels);
 		// Default to true for cross-branch loading to match TUI behavior
 		if (options?.crossBranch !== false) params.append("crossBranch", "true");
 
@@ -282,14 +275,7 @@ export class ApiClient {
 				params.append("status", status);
 			}
 		}
-		if (options.excludeStatus) {
-			const statuses = Array.isArray(options.excludeStatus) ? options.excludeStatus : [options.excludeStatus];
-			for (const status of statuses) {
-				if (status && status.trim().length > 0) {
-					params.append("excludeStatus", status.trim());
-				}
-			}
-		}
+		this.appendNonBlankQueryValues(params, "excludeStatus", options.excludeStatus);
 		if (options.priority) {
 			const priorities = Array.isArray(options.priority) ? options.priority : [options.priority];
 			for (const priority of priorities) {
@@ -304,13 +290,7 @@ export class ApiClient {
 				}
 			}
 		}
-		if (options.labels) {
-			for (const label of options.labels) {
-				if (label && label.trim().length > 0) {
-					params.append("label", label.trim());
-				}
-			}
-		}
+		this.appendNonBlankQueryValues(params, "label", options.labels);
 		if (options.modifiedFiles) {
 			for (const file of options.modifiedFiles) {
 				if (file && file.trim().length > 0) {
@@ -406,10 +386,6 @@ export class ApiClient {
 		});
 	}
 
-	async updateTaskStatus(id: string, status: TaskStatus): Promise<Task> {
-		return this.updateTask(id, { status });
-	}
-
 	async fetchDuplicateTaskRepairPlan(): Promise<DuplicateRepairPlan> {
 		return await this.fetchJson<DuplicateRepairPlan>(`${API_BASE}/tasks/duplicates`);
 	}
@@ -451,24 +427,8 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async fetchDocs(): Promise<Document[]> {
-		const response = await fetch(`${API_BASE}/docs`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch documentation");
-		}
-		return response.json();
-	}
-
 	async fetchDoc(filename: string): Promise<Document> {
 		const response = await fetch(`${API_BASE}/docs/${encodeURIComponent(filename)}`);
-		if (!response.ok) {
-			throw await toApiError(response, "Failed to fetch document");
-		}
-		return response.json();
-	}
-
-	async fetchDocument(id: string): Promise<Document> {
-		const response = await fetch(`${API_BASE}/doc/${encodeURIComponent(id)}`);
 		if (!response.ok) {
 			throw await toApiError(response, "Failed to fetch document");
 		}
@@ -511,24 +471,8 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async fetchDecisions(): Promise<Decision[]> {
-		const response = await fetch(`${API_BASE}/decisions`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch decisions");
-		}
-		return response.json();
-	}
-
 	async fetchDecision(id: string): Promise<Decision> {
 		const response = await fetch(`${API_BASE}/decisions/${encodeURIComponent(id)}`);
-		if (!response.ok) {
-			throw await toApiError(response, "Failed to fetch decision");
-		}
-		return response.json();
-	}
-
-	async fetchDecisionData(id: string): Promise<Decision> {
-		const response = await fetch(`${API_BASE}/decision/${encodeURIComponent(id)}`);
 		if (!response.ok) {
 			throw await toApiError(response, "Failed to fetch decision");
 		}
@@ -574,14 +518,6 @@ export class ApiClient {
 		const response = await fetch(`${API_BASE}/milestones/archived`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch archived milestones");
-		}
-		return response.json();
-	}
-
-	async fetchMilestone(id: string): Promise<Milestone> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch milestone");
 		}
 		return response.json();
 	}

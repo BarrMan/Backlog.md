@@ -15,6 +15,7 @@ const BOOTSTRAP_TYPES = new Set<AgentPreset["bootstrap"]>([
 ]);
 const SAFE_PRESET_NAME = /^(?!__proto__$|prototype$|constructor$)[A-Za-z_][A-Za-z0-9_-]*$/;
 const POSIX_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const AGENT_CONFIGURATION_FILE_NAME = "agents.json";
 
 const BUILT_IN_CONFIGURATION: AgentConfiguration = {
 	selectedPreset: "opencode",
@@ -33,11 +34,11 @@ function clone<T>(value: T): T {
 
 function rootConfigurationPath(): string {
 	const configHome = process.env.XDG_CONFIG_HOME || join(process.env.HOME || homedir(), ".config");
-	return join(configHome, "backlog", "agents.json");
+	return join(configHome, "backlog", AGENT_CONFIGURATION_FILE_NAME);
 }
 
 function projectConfigurationPath(core: Core): string {
-	return join(core.filesystem.backlogDir, "agents.json");
+	return join(core.filesystem.backlogDir, AGENT_CONFIGURATION_FILE_NAME);
 }
 
 function requireTaskId(scope: AgentConfigScope, taskId: string | undefined): string {

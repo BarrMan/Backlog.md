@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, type KeyboardEvent } from 
 import { Link, useLocation } from 'react-router-dom';
 import { type Task } from '../../types';
 import { buildTaskIdIndex, resolveTaskReference } from '../utils/task-id-links';
+import { formatBrowserShortcut, matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
 
 const CHIP_LABEL_CLASS = 'truncate max-w-[16rem] sm:max-w-[20rem] md:max-w-[24rem]';
 
@@ -108,21 +109,21 @@ const DependencyInput: React.FC<DependencyInputProps> = ({ value, onChange, avai
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (disabled) return;
-    if (e.key === 'ArrowDown') {
+		if (matchesBrowserShortcut(e, "nextDependencySuggestion") && suggestions.length > 0) {
       e.preventDefault();
       setSelectedIndex(prev => (prev + 1) % suggestions.length);
-    } else if (e.key === 'ArrowUp') {
+		} else if (matchesBrowserShortcut(e, "previousDependencySuggestion") && suggestions.length > 0) {
       e.preventDefault();
       setSelectedIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
-    } else if ((e.key === 'Enter' || e.key === ',') && inputValue.trim()) {
+		} else if (matchesBrowserShortcut(e, "commitDependency") && inputValue.trim()) {
       e.preventDefault();
       if (suggestions.length > 0 && suggestions[selectedIndex]) {
         addDependency(suggestions[selectedIndex].id);
       }
-    } else if (e.key === 'Backspace' && !inputValue && value.length > 0) {
+		} else if (matchesBrowserShortcut(e, "removeLastChip") && !inputValue && value.length > 0) {
       // Remove last dependency when backspace on empty input
       onChange(value.slice(0, -1));
-    } else if (e.key === 'Escape') {
+		} else if (matchesBrowserShortcut(e, "dismissDependencySuggestions")) {
       setSuggestions([]);
       setInputValue('');
     }
@@ -196,7 +197,7 @@ const DependencyInput: React.FC<DependencyInputProps> = ({ value, onChange, avai
             value={inputValue}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder={value.length === 0 ? "Type task ID or title, then press Enter or comma" : "Add more dependencies..."}
+			placeholder={value.length === 0 ? `Type task ID or title, then press ${formatBrowserShortcut("commitDependency")}` : "Add more dependencies..."}
             className="w-full outline-none text-sm bg-transparent resize-none text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400"
             rows={1}
             disabled={disabled}

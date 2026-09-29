@@ -16,6 +16,42 @@ type StartOptions = {
 	cwd?: string;
 };
 
+type StoppableMcpServer = {
+	stop(): Promise<void>;
+};
+
+function registerShutdownHandlers(server: StoppableMcpServer, debug: boolean): void {
+	let shutdownTriggered = false;
+	const shutdown = async (signal: string) => {
+		if (shutdownTriggered) return;
+		shutdownTriggered = true;
+		if (debug) console.error(`Received ${signal}, shutting down MCP server...`);
+		try {
+			await server.stop();
+			process.exit(0);
+		} catch (error) {
+			console.error("Error during MCP server shutdown:", error);
+			process.exit(1);
+		}
+	};
+	const handleStdioClose = () => shutdown("stdio");
+	process.stdin.once("end", handleStdioClose);
+	if (process.platform !== "win32") process.stdin.once("close", handleStdioClose);
+	const handlePipeError = (error: unknown) => {
+		const code =
+			error && typeof error === "object" && "code" in error ? String((error as { code?: string }).code ?? "") : "";
+		if (code === "EPIPE") void shutdown("EPIPE");
+	};
+	process.stdout.once("error", handlePipeError);
+	process.stderr.once("error", handlePipeError);
+	process.once("SIGINT", () => shutdown("SIGINT"));
+	process.once("SIGTERM", () => shutdown("SIGTERM"));
+	if (process.platform !== "win32") {
+		process.once("SIGHUP", () => shutdown("SIGHUP"));
+		process.once("SIGPIPE", () => shutdown("SIGPIPE"));
+	}
+}
+
 /**
  * Register MCP command group with CLI program.
  *
@@ -54,50 +90,7 @@ function registerStartCommand(mcpCmd: Command): void {
 					console.error("Backlog.md MCP server started (stdio transport)");
 				}
 
-				let shutdownTriggered = false;
-				const shutdown = async (signal: string) => {
-					if (shutdownTriggered) {
-						return;
-					}
-					shutdownTriggered = true;
-					if (options.debug) {
-						console.error(`Received ${signal}, shutting down MCP server...`);
-					}
-
-					try {
-						await server.stop();
-						process.exit(0);
-					} catch (error) {
-						console.error("Error during MCP server shutdown:", error);
-						process.exit(1);
-					}
-				};
-
-				const handleStdioClose = () => shutdown("stdio");
-				process.stdin.once("end", handleStdioClose);
-				if (process.platform !== "win32") {
-					// On Windows, stdin can emit "close" while the MCP stdio pipe is still usable.
-					process.stdin.once("close", handleStdioClose);
-				}
-
-				const handlePipeError = (error: unknown) => {
-					const code =
-						error && typeof error === "object" && "code" in error
-							? String((error as { code?: string }).code ?? "")
-							: "";
-					if (code === "EPIPE") {
-						void shutdown("EPIPE");
-					}
-				};
-				process.stdout.once("error", handlePipeError);
-				process.stderr.once("error", handlePipeError);
-
-				process.once("SIGINT", () => shutdown("SIGINT"));
-				process.once("SIGTERM", () => shutdown("SIGTERM"));
-				if (process.platform !== "win32") {
-					process.once("SIGHUP", () => shutdown("SIGHUP"));
-					process.once("SIGPIPE", () => shutdown("SIGPIPE"));
-				}
+				registerShutdownHandlers(server, Boolean(options.debug));
 			} catch (error) {
 				// A config value Backlog refuses to read already names the file, the key, and the fix,
 				// so it is reported as written instead of behind a startup summary.

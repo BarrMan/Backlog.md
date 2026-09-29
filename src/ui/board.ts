@@ -23,6 +23,7 @@ import { getTaskTypeValues, resolveTaskTypeValues } from "../utils/task-type-con
 import { taskContentSignature } from "../utils/task-watcher.ts";
 import { formatUtcDateForDisplay } from "../utils/utc-date-display.ts";
 import { formatAcceptanceCriteriaProgress } from "./acceptance-criteria-progress.ts";
+import { moveTargetToAdjacentColumn } from "./board-interaction.ts";
 import { openConfirmPopup } from "./components/confirm-popup.ts";
 import { createFilterHeader, type FilterHeader, type FilterState } from "./components/filter-header.ts";
 import { openMultiSelectFilterPopup, openSingleSelectFilterPopup } from "./components/filter-popup.ts";
@@ -30,10 +31,13 @@ import type { BoundaryNavigationKey } from "./components/generic-list.ts";
 import { openHelpPopup } from "./components/help-popup.ts";
 import { openTaskComposer, type TaskComposerOptions } from "./components/task-composer.ts";
 import { formatFooterContent, getBoardFooterContent } from "./footer-content.ts";
+import { formatKeymap, keymapKeys } from "./keymap.ts";
 import { formatProjectBadge } from "./project.ts";
 import { getStatusIcon } from "./status-icon.ts";
+import { focusTaskFilterControl } from "./task-filter-wiring.ts";
 import {
 	completeTaskFromTui,
+	confirmTaskLifecycleAction,
 	formatTaskArchivedMessage,
 	formatTaskCompletionBlockedMessage,
 } from "./task-lifecycle.ts";
@@ -88,6 +92,22 @@ type ColumnView = {
 	plainItems: string[];
 	highlightedIndex?: number;
 };
+
+function collectBoardMilestoneLabels(
+	availableMilestones: string[],
+	tasks: Task[],
+	resolveMilestoneLabel: (milestone: string) => string,
+): string[] {
+	return Array.from(
+		new Set([
+			...availableMilestones,
+			...tasks
+				.map((task) => task.milestone?.trim())
+				.filter((milestone): milestone is string => Boolean(milestone && milestone.length > 0))
+				.map((milestone) => resolveMilestoneLabel(milestone)),
+		]),
+	).sort((a, b) => a.localeCompare(b));
+}
 
 function isDoneStatus(status: string): boolean {
 	const normalized = status.trim().toLowerCase();
@@ -331,6 +351,8 @@ export async function renderBoardTui(
 		screen?: ScreenInterface;
 		/** Leave a supplied screen alive after releasing Board-owned resources. */
 		preserveScreen?: boolean;
+		/** Called after the initial render and all board key handlers are ready for input. */
+		onReady?: () => void;
 		taskComposer?: (options: TaskComposerOptions) => Promise<Task | null>;
 	},
 ): Promise<void> {
@@ -445,15 +467,7 @@ export async function renderBoardTui(
 		const priorityOptions = getPriorityOptions(options?.priorities);
 		let availableMilestones = [...(options?.availableMilestones ?? [])];
 		const resolveMilestoneLabel = createMilestoneFilterValueResolver(options?.milestoneEntities ?? []);
-		availableMilestones = Array.from(
-			new Set([
-				...availableMilestones,
-				...initialTasks
-					.map((task) => task.milestone?.trim())
-					.filter((milestone): milestone is string => Boolean(milestone && milestone.length > 0))
-					.map((milestone) => resolveMilestoneLabel(milestone)),
-			]),
-		).sort((a, b) => a.localeCompare(b));
+		availableMilestones = collectBoardMilestoneLabels(availableMilestones, initialTasks, resolveMilestoneLabel);
 
 		let filterHeader: FilterHeader | null = null;
 		const hasActiveSharedFilters = () =>
@@ -881,27 +895,7 @@ export async function renderBoardTui(
 		};
 
 		const focusFilterControl = (filterId: "search" | "type" | "project" | "priority" | "milestone" | "labels") => {
-			if (!filterHeader) return;
-			switch (filterId) {
-				case "search":
-					filterHeader.focusSearch();
-					break;
-				case "type":
-					filterHeader.focusType();
-					break;
-				case "project":
-					filterHeader.focusProject();
-					break;
-				case "priority":
-					filterHeader.focusPriority();
-					break;
-				case "milestone":
-					filterHeader.focusMilestone();
-					break;
-				case "labels":
-					filterHeader.focusLabels();
-					break;
-			}
+			if (filterHeader) focusTaskFilterControl(filterHeader, filterId);
 		};
 
 		const openFilterPicker = async (filterId: "type" | "project" | "priority" | "milestone" | "labels") => {
@@ -1078,20 +1072,20 @@ export async function renderBoardTui(
 				const filterFocus = filterHeader?.getCurrentFocus();
 				if (filterFocus === "search") {
 					setFooterContent(
-						" {cyan-fg}[←/→]{/} Cursor (edge=Prev/Next) | {cyan-fg}[↑/↓]{/} Back to Board | {cyan-fg}[Esc]{/} Cancel | {gray-fg}(Live search){/}",
+						` {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Cursor (edge=Prev/Next) | {cyan-fg}[${formatKeymap("board", "navUp")}/${formatKeymap("board", "navDown")}]{/} Back to Board | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel | {gray-fg}(Live search){/}`,
 					);
 					syncBoardAreaLayout();
 					return;
 				}
 				setFooterContent(
-					" {cyan-fg}[Enter/Space]{/} Open Picker | {cyan-fg}[←/→]{/} Prev/Next | {cyan-fg}[Esc]{/} Back",
+					` {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Open Picker | {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Prev/Next | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Back`,
 				);
 				syncBoardAreaLayout();
 				return;
 			}
 			if (moveOp) {
 				setFooterContent(
-					" {green-fg}MOVE MODE{/} | {cyan-fg}[←→]{/} Change Column | {cyan-fg}[↑↓]{/} Reorder | {cyan-fg}[Shift+↑↓]{/} Highlight | {cyan-fg}[Shift+M]{/} Select | {cyan-fg}[Enter]{/} Confirm | {cyan-fg}[Esc]{/} Cancel",
+					` {green-fg}MOVE MODE{/} | {cyan-fg}[${formatKeymap("board", "navPrevious")}${formatKeymap("board", "navNext")}]{/} Change Column | {cyan-fg}[${formatKeymap("board", "navUp")}${formatKeymap("board", "navDown")}]{/} Reorder | {cyan-fg}[${formatKeymap("board", "moveHighlight")}]{/} Highlight | {cyan-fg}[${formatKeymap("board", "recruit")}]{/} Select | {cyan-fg}[${formatKeymap("board", "open")}]{/} Confirm | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel`,
 				);
 			} else {
 				const base = getBoardFooterContent({ hasProjects: configuredProjects.length > 0 });
@@ -1210,15 +1204,11 @@ export async function renderBoardTui(
 				currentStatuses = nextStatuses;
 			}
 			configuredLabels = collectAvailableLabels(currentTasks, options?.availableLabels ?? []);
-			availableMilestones = Array.from(
-				new Set([
-					...(options?.availableMilestones ?? []),
-					...currentTasks
-						.map((task) => task.milestone?.trim())
-						.filter((milestone): milestone is string => Boolean(milestone && milestone.length > 0))
-						.map((milestone) => resolveMilestoneLabel(milestone)),
-				]),
-			).sort((a, b) => a.localeCompare(b));
+			availableMilestones = collectBoardMilestoneLabels(
+				options?.availableMilestones ?? [],
+				currentTasks,
+				resolveMilestoneLabel,
+			);
 
 			if (taskCreationOpen) {
 				taskCreationPendingUpdate = true;
@@ -1250,14 +1240,14 @@ export async function renderBoardTui(
 			return columnData.tasks.length;
 		};
 
-		bindKey(["/", "C-f"], () => {
+		bindKey(keymapKeys("board", "search"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			pendingSearchWrap = null;
 			focusFilterControl("search");
 			updateFooter();
 		});
 
-		bindKey(["n", "N", "S-n"], async () => {
+		bindKey(keymapKeys("board", "create"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp || currentFocus === "filters") return;
 			taskCreationOpen = true;
 			let task: Task | null = null;
@@ -1308,12 +1298,12 @@ export async function renderBoardTui(
 			renderView(outcome.focusTaskId);
 		});
 
-		bindKey(["p", "P"], () => {
+		bindKey(keymapKeys("board", "filterPriority"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("priority");
 		});
 
-		bindKey(["t", "T"], () => {
+		bindKey(keymapKeys("board", "filterType"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("type");
 		});
@@ -1322,62 +1312,50 @@ export async function renderBoardTui(
 			// "v"/"V", not "g"/"G": kept consistent with the task-list view's project filter
 			// shortcut, which had to move off "g"/"G" to avoid colliding with that view's
 			// detail-pane scroll-to-top/bottom keys.
-			bindKey(["v", "V"], () => {
+			bindKey(keymapKeys("board", "filterProject"), () => {
 				if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 				void openFilterPicker("project");
 			});
 		}
 
-		bindKey(["f", "F"], () => {
+		bindKey(keymapKeys("board", "filterLabels"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("labels");
 		});
 
-		bindKey(["i", "I"], () => {
+		bindKey(keymapKeys("board", "filterMilestone"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			void openFilterPicker("milestone");
 		});
 
-		bindKey(["left", "h"], () => {
+		const moveToAdjacentColumn = (direction: "previous" | "next") => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (moveOp) {
 				if (movePending) return;
 				if (collapseHighlight()) return;
-				const currentStatusIndex = currentStatuses.indexOf(moveOp.targetStatus);
-				if (currentStatusIndex > 0) {
-					const prevStatus = currentStatuses[currentStatusIndex - 1];
-					if (prevStatus) {
-						const prevColumnSize = getTargetColumnSize(prevStatus);
-						moveOp.targetStatus = prevStatus;
-						// Clamp index to valid range for new column (0 to size, where size means append at end)
-						moveOp.targetIndex = Math.min(moveOp.targetIndex, prevColumnSize);
-						renderView();
-					}
+				const target = moveTargetToAdjacentColumn(
+					currentStatuses,
+					moveOp.targetStatus,
+					moveOp.targetIndex,
+					direction,
+					getTargetColumnSize,
+				);
+				if (target) {
+					moveOp.targetStatus = target.status;
+					moveOp.targetIndex = target.index;
+					renderView();
 				}
 			} else {
-				focusColumn(currentCol - 1);
+				focusColumn(currentCol + (direction === "previous" ? -1 : 1));
 			}
+		};
+
+		bindKey(keymapKeys("board", "navPrevious"), () => {
+			moveToAdjacentColumn("previous");
 		});
 
-		bindKey(["right", "l"], () => {
-			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
-			if (moveOp) {
-				if (movePending) return;
-				if (collapseHighlight()) return;
-				const currentStatusIndex = currentStatuses.indexOf(moveOp.targetStatus);
-				if (currentStatusIndex < currentStatuses.length - 1) {
-					const nextStatus = currentStatuses[currentStatusIndex + 1];
-					if (nextStatus) {
-						const nextColumnSize = getTargetColumnSize(nextStatus);
-						moveOp.targetStatus = nextStatus;
-						// Clamp index to valid range for new column
-						moveOp.targetIndex = Math.min(moveOp.targetIndex, nextColumnSize);
-						renderView();
-					}
-				}
-			} else {
-				focusColumn(currentCol + 1);
-			}
+		bindKey(keymapKeys("board", "navNext"), () => {
+			moveToAdjacentColumn("next");
 		});
 
 		const moveBoardSelection = (direction: "up" | "down", key: BoundaryNavigationKey) => {
@@ -1424,10 +1402,10 @@ export async function renderBoardTui(
 			screen.render();
 		};
 
-		bindKey(["up"], () => moveBoardSelection("up", "arrow"));
-		bindKey(["k"], () => moveBoardSelection("up", "vim"));
-		bindKey(["down"], () => moveBoardSelection("down", "arrow"));
-		bindKey(["j"], () => moveBoardSelection("down", "vim"));
+		bindKey(keymapKeys("board", "navUp"), () => moveBoardSelection("up", "arrow"));
+		bindKey(keymapKeys("board", "navUpVim"), () => moveBoardSelection("up", "vim"));
+		bindKey(keymapKeys("board", "navDown"), () => moveBoardSelection("down", "arrow"));
+		bindKey(keymapKeys("board", "navDownVim"), () => moveBoardSelection("down", "vim"));
 
 		const lanePageAmount = () => {
 			const column = columns[currentCol];
@@ -1439,7 +1417,7 @@ export async function renderBoardTui(
 		const isBoardLaneNavigationBlocked = () =>
 			popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || Boolean(moveOp);
 
-		bindKey(["pageup", "C-u"], () => {
+		bindKey(keymapKeys("board", "pageUp"), () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -1449,7 +1427,7 @@ export async function renderBoardTui(
 			screen.render();
 		});
 
-		bindKey(["pagedown", "C-d"], () => {
+		bindKey(keymapKeys("board", "pageDown"), () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -1461,7 +1439,7 @@ export async function renderBoardTui(
 			screen.render();
 		});
 
-		bindKey(["home"], () => {
+		bindKey(keymapKeys("board", "first"), () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column || column.tasks.length === 0) return;
@@ -1469,7 +1447,7 @@ export async function renderBoardTui(
 			screen.render();
 		});
 
-		bindKey(["end"], () => {
+		bindKey(keymapKeys("board", "last"), () => {
 			if (isBoardLaneNavigationBlocked()) return;
 			const column = columns[currentCol];
 			if (!column || column.tasks.length === 0) return;
@@ -1539,6 +1517,64 @@ export async function renderBoardTui(
 			}
 		};
 
+		const confirmBoardTaskLifecycleAction = async (task: Task, action: "complete" | "archive") => {
+			if (task.branch) {
+				showTransientFooter(` {red-fg}Cannot ${action} task from branch "${task.branch}".{/}`);
+				return false;
+			}
+			const confirmed = await runWithModalGuard(() =>
+				confirmTaskLifecycleAction(screen, task, action, openConfirmPopup),
+			);
+			return confirmed;
+		};
+
+		const completeBoardTask = async (task: Task, afterSuccess?: () => void): Promise<void> => {
+			if (!(await confirmBoardTaskLifecycleAction(task, "complete"))) return;
+
+			try {
+				const core = await getCore();
+				const result = await completeTaskFromTui(core, task);
+				if (result.success) {
+					currentTasks = currentTasks.filter((candidate) => candidate.id !== task.id);
+					showTransientFooter(` {green-fg}Moved ${task.id} to completed{/}`);
+					afterSuccess?.();
+					renderView();
+					return;
+				}
+				if (result.reason === "not-terminal") {
+					showTransientFooter(` {red-fg}${formatTaskCompletionBlockedMessage(task.id, result.terminalStatus)}{/}`);
+				} else {
+					showTransientFooter(` {red-fg}Failed to complete ${task.id}{/}`);
+				}
+			} catch (error) {
+				showTransientFooter(
+					` {red-fg}Error completing task: ${error instanceof Error ? error.message : "Unknown error"}{/}`,
+				);
+			}
+		};
+
+		const archiveBoardTask = async (task: Task, afterSuccess?: () => void): Promise<void> => {
+			if (!(await confirmBoardTaskLifecycleAction(task, "archive"))) return;
+
+			try {
+				const core = await getCore();
+				const config = await core.fs.loadConfig();
+				const { success, cleanedTaskIds } = await core.archiveTask(task.id, config?.autoCommit ?? false);
+				if (success) {
+					currentTasks = currentTasks.filter((candidate) => candidate.id !== task.id);
+					showTransientFooter(` {green-fg}${formatTaskArchivedMessage(task.id, cleanedTaskIds)}{/}`);
+					afterSuccess?.();
+					renderView();
+					return;
+				}
+				showTransientFooter(` {red-fg}Failed to archive ${task.id}{/}`);
+			} catch (error) {
+				showTransientFooter(
+					` {red-fg}Error archiving task: ${error instanceof Error ? error.message : "Unknown error"}{/}`,
+				);
+			}
+		};
+
 		const openTaskPopup = async (task: Task): Promise<void> => {
 			popupOpen = true;
 
@@ -1552,7 +1588,7 @@ export async function renderBoardTui(
 			const { contentArea, close } = popup;
 			openPopup = { taskId: task.id, signature: taskContentSignature(task), close };
 
-			contentArea.key(["escape", "q"], () => {
+			contentArea.key(keymapKeys("shared", "cancel"), () => {
 				closeOpenPopup();
 				// A status change while the popup was open moves the task to another column,
 				// so follow it instead of returning to the column it was opened from.
@@ -1563,11 +1599,11 @@ export async function renderBoardTui(
 				);
 			});
 
-			contentArea.key(["e", "E", "S-e"], async () => {
+			contentArea.key(keymapKeys("board", "edit"), async () => {
 				await openTaskEditor(task);
 			});
 
-			contentArea.key(["y", "Y"], async () => {
+			contentArea.key(keymapKeys("board", "copy"), async () => {
 				const success = await copyToClipboard(task.id);
 				if (success) {
 					showTransientFooter(` {green-fg}Copied ${task.id} to clipboard{/}`);
@@ -1576,77 +1612,12 @@ export async function renderBoardTui(
 				}
 			});
 
-			contentArea.key(["c", "C"], async () => {
-				if (task.branch) {
-					showTransientFooter(` {red-fg}Cannot complete task from branch "${task.branch}".{/}`);
-					return;
-				}
-
-				const confirmed = await runWithModalGuard(() =>
-					openConfirmPopup({
-						screen,
-						title: "Move to Completed",
-						message: `Move {bold}${task.id}{/bold} to completed?\nRemoves from board; keeps record\nand dependency links.`,
-					}),
-				);
-
-				if (confirmed) {
-					try {
-						const core = await getCore();
-						const result = await completeTaskFromTui(core, task);
-
-						if (result.success) {
-							currentTasks = currentTasks.filter((t) => t.id !== task.id);
-							showTransientFooter(` {green-fg}Moved ${task.id} to completed{/}`);
-							closeOpenPopup();
-							renderView();
-						} else if (result.reason === "not-terminal") {
-							showTransientFooter(` {red-fg}${formatTaskCompletionBlockedMessage(task.id, result.terminalStatus)}{/}`);
-						} else {
-							showTransientFooter(` {red-fg}Failed to complete ${task.id}{/}`);
-						}
-					} catch (error) {
-						showTransientFooter(
-							` {red-fg}Error completing task: ${error instanceof Error ? error.message : "Unknown error"}{/}`,
-						);
-					}
-				}
+			contentArea.key(keymapKeys("board", "complete"), async () => {
+				await completeBoardTask(task, closeOpenPopup);
 			});
 
-			contentArea.key(["a", "A"], async () => {
-				if (task.branch) {
-					showTransientFooter(` {red-fg}Cannot archive task from branch "${task.branch}".{/}`);
-					return;
-				}
-
-				const confirmed = await runWithModalGuard(() =>
-					openConfirmPopup({
-						screen,
-						title: "Archive Task",
-						message: `Archive {bold}${task.id}{/bold}?\nCanceled, duplicate, or invalid work.\nRemoves incoming task links.`,
-					}),
-				);
-
-				if (confirmed) {
-					try {
-						const core = await getCore();
-						const config = await core.fs.loadConfig();
-						const { success, cleanedTaskIds } = await core.archiveTask(task.id, config?.autoCommit ?? false);
-
-						if (success) {
-							currentTasks = currentTasks.filter((t) => t.id !== task.id);
-							showTransientFooter(` {green-fg}${formatTaskArchivedMessage(task.id, cleanedTaskIds)}{/}`);
-							closeOpenPopup();
-							renderView();
-						} else {
-							showTransientFooter(` {red-fg}Failed to archive ${task.id}{/}`);
-						}
-					} catch (error) {
-						showTransientFooter(
-							` {red-fg}Error archiving task: ${error instanceof Error ? error.message : "Unknown error"}{/}`,
-						);
-					}
-				}
+			contentArea.key(keymapKeys("board", "archive"), async () => {
+				await archiveBoardTask(task, closeOpenPopup);
 			});
 
 			screen.render();
@@ -1680,7 +1651,7 @@ export async function renderBoardTui(
 			await syncOpenPopup();
 		};
 
-		bindKey(["enter"], async () => {
+		bindKey(keymapKeys("board", "open"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 
 			// In move mode, Enter confirms the move
@@ -1698,15 +1669,15 @@ export async function renderBoardTui(
 			await openTaskPopup(task);
 		});
 
-		bindKey(["e", "E", "S-e"], async () => {
-			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
+		const withSelectedBoardTask = async (action: (task: Task) => Promise<void>) => {
 			const column = columns[currentCol];
-			if (!column) return;
-			const idx = column.list.selected ?? 0;
-			if (idx < 0 || idx >= column.tasks.length) return;
-			const task = column.tasks[idx];
-			if (!task) return;
-			await openTaskEditor(task);
+			const task = column?.tasks[column.list.selected ?? 0];
+			if (task) await action(task);
+		};
+
+		bindKey(keymapKeys("board", "edit"), async () => {
+			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
+			await withSelectedBoardTask(openTaskEditor);
 		});
 
 		// A second Enter while the confirm is writing must not start a second move.
@@ -1955,8 +1926,8 @@ export async function renderBoardTui(
 			renderView();
 		};
 
-		bindKey(["S-up"], () => walkRecruitHighlight("up"));
-		bindKey(["S-down"], () => walkRecruitHighlight("down"));
+		bindKey(keymapKeys("board", "moveHighlightUp"), () => walkRecruitHighlight("up"));
+		bindKey(keymapKeys("board", "moveHighlightDown"), () => walkRecruitHighlight("down"));
 
 		/**
 		 * M toggles a task in or out of the move set. It acts on the recruitment highlight
@@ -2015,7 +1986,7 @@ export async function renderBoardTui(
 			renderView();
 		};
 
-		bindKey(["m"], async () => {
+		bindKey(keymapKeys("board", "move"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (!moveOp) {
 				enterMoveMode();
@@ -2025,7 +1996,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		bindKey(["M", "S-m"], () => {
+		bindKey(keymapKeys("board", "recruit"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			if (!moveOp) {
 				enterMoveMode();
@@ -2034,7 +2005,7 @@ export async function renderBoardTui(
 			}
 		});
 
-		bindKey(["tab"], async () => {
+		bindKey(keymapKeys("board", "switchView"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			const column = columns[currentCol];
 			if (column) {
@@ -2056,17 +2027,17 @@ export async function renderBoardTui(
 			}
 		});
 
-		bindKey(["S-b"], async () => {
+		bindKey(keymapKeys("board", "workspace"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
 			if (options?.onWorkspacePress) await closeBoard(options.onWorkspacePress);
 		});
 
-		bindKey(["?"], async () => {
+		bindKey(keymapKeys("shared", "help"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || moveOp) return;
 			await runWithModalGuard(() => openHelpPopup(screen, "board", { hasProjects: configuredProjects.length > 0 }));
 		});
 
-		bindKey(["y", "Y"], async () => {
+		bindKey(keymapKeys("board", "copy"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters") return;
 			const column = columns[currentCol];
 			if (!column) return;
@@ -2082,89 +2053,14 @@ export async function renderBoardTui(
 			}
 		});
 
-		bindKey(["c", "C"], async () => {
+		bindKey(keymapKeys("board", "complete"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
-			const column = columns[currentCol];
-			if (!column) return;
-			const idx = column.list.selected ?? 0;
-			const task = column.tasks[idx];
-			if (!task) return;
-
-			if (task.branch) {
-				showTransientFooter(` {red-fg}Cannot complete task from branch "${task.branch}".{/}`);
-				return;
-			}
-
-			const confirmed = await runWithModalGuard(() =>
-				openConfirmPopup({
-					screen,
-					title: "Move to Completed",
-					message: `Move {bold}${task.id}{/bold} to completed?\nRemoves from board; keeps record\nand dependency links.`,
-				}),
-			);
-
-			if (confirmed) {
-				try {
-					const core = await getCore();
-					const result = await completeTaskFromTui(core, task);
-
-					if (result.success) {
-						currentTasks = currentTasks.filter((t) => t.id !== task.id);
-						showTransientFooter(` {green-fg}Moved ${task.id} to completed{/}`);
-						renderView();
-					} else if (result.reason === "not-terminal") {
-						showTransientFooter(` {red-fg}${formatTaskCompletionBlockedMessage(task.id, result.terminalStatus)}{/}`);
-					} else {
-						showTransientFooter(` {red-fg}Failed to complete ${task.id}{/}`);
-					}
-				} catch (error) {
-					showTransientFooter(
-						` {red-fg}Error completing task: ${error instanceof Error ? error.message : "Unknown error"}{/}`,
-					);
-				}
-			}
+			await withSelectedBoardTask(completeBoardTask);
 		});
 
-		bindKey(["a", "A"], async () => {
+		bindKey(keymapKeys("board", "archive"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
-			const column = columns[currentCol];
-			if (!column) return;
-			const idx = column.list.selected ?? 0;
-			const task = column.tasks[idx];
-			if (!task) return;
-
-			if (task.branch) {
-				showTransientFooter(` {red-fg}Cannot archive task from branch "${task.branch}".{/}`);
-				return;
-			}
-
-			const confirmed = await runWithModalGuard(() =>
-				openConfirmPopup({
-					screen,
-					title: "Archive Task",
-					message: `Archive {bold}${task.id}{/bold}?\nCanceled, duplicate, or invalid work.\nRemoves incoming task links.`,
-				}),
-			);
-
-			if (confirmed) {
-				try {
-					const core = await getCore();
-					const config = await core.fs.loadConfig();
-					const { success, cleanedTaskIds } = await core.archiveTask(task.id, config?.autoCommit ?? false);
-
-					if (success) {
-						currentTasks = currentTasks.filter((t) => t.id !== task.id);
-						showTransientFooter(` {green-fg}${formatTaskArchivedMessage(task.id, cleanedTaskIds)}{/}`);
-						renderView();
-					} else {
-						showTransientFooter(` {red-fg}Failed to archive ${task.id}{/}`);
-					}
-				} catch (error) {
-					showTransientFooter(
-						` {red-fg}Error archiving task: ${error instanceof Error ? error.message : "Unknown error"}{/}`,
-					);
-				}
-			}
+			await withSelectedBoardTask(archiveBoardTask);
 		});
 
 		const toggleHideEmptyColumns = async () => {
@@ -2194,7 +2090,7 @@ export async function renderBoardTui(
 
 		// Shift+H writes the shared hideEmptyColumns setting, so the board, the browser
 		// board and `backlog config` all read the same preference.
-		bindKey(["S-h"], () => {
+		bindKey(keymapKeys("board", "toggleHideEmpty"), () => {
 			if (popupOpen || filterPopupOpen || modalOpen || currentFocus === "filters" || moveOp) return;
 			// Ignore toggles while a write is in flight: overlapping load/save
 			// cycles would write back stale config snapshots (lost updates).
@@ -2207,12 +2103,12 @@ export async function renderBoardTui(
 				});
 		});
 
-		bindKey(["q", "C-c"], async () => {
+		bindKey(keymapKeys("shared", "quitWithoutEscape"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen) return;
 			await closeBoard();
 		});
 
-		bindKey(["escape"], async () => {
+		bindKey(keymapKeys("shared", "escape"), async () => {
 			if (popupOpen || filterPopupOpen || modalOpen) return;
 			if (currentFocus === "filters") {
 				focusColumn(currentCol);
@@ -2231,5 +2127,6 @@ export async function renderBoardTui(
 		});
 
 		screen.render();
+		options?.onReady?.();
 	});
 }

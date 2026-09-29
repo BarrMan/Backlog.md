@@ -5,7 +5,7 @@ import { $ } from "bun";
 import { CLI_AGENT_NUDGE, Core } from "../index.ts";
 import { BACKLOG_CWD_ENV } from "../utils/runtime-cwd.ts";
 import { LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -533,7 +533,7 @@ describe("CLI Integration", () => {
 
 		it("should leave a task unassigned when -a is empty while defaultAssignee is set", async () => {
 			await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
-			await $`bun ${CLI_PATH} task create "Explicitly unassigned task" -a ${""}`.cwd(TEST_DIR).quiet();
+			await runTestCli(["task", "create", "Explicitly unassigned task", "-a", ""], { cwd: TEST_DIR });
 
 			const core = new Core(TEST_DIR);
 			const task = await core.filesystem.loadTask("task-1");

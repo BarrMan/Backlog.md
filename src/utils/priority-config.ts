@@ -1,6 +1,6 @@
 import type { BacklogConfig } from "../types/index.ts";
 
-export const DEFAULT_PRIORITY_OPTIONS = [
+const DEFAULT_PRIORITY_OPTIONS = [
 	{ label: "High", value: "high" },
 	{ label: "Medium", value: "medium" },
 	{ label: "Low", value: "low" },

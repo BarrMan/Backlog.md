@@ -2,7 +2,9 @@ import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { $ } from "bun";
+import { DEFAULT_DIRECTORIES } from "../constants/index.ts";
 import type { BacklogConfig } from "../types/index.ts";
+import { MILLISECONDS_PER_DAY } from "../utils/time.ts";
 
 type GitPathContext = {
 	repoRoot: string;
@@ -12,6 +14,9 @@ type GitPathContext = {
 type GitConfigLoader = () => Promise<BacklogConfig | null>;
 
 const FETCH_TIMEOUT_MS = 10_000;
+const MILLISECONDS_PER_SECOND = 1_000;
+const TASK_COMMIT_MAX_ATTEMPTS = 3;
+const TASK_COMMIT_RETRY_DELAY_MS = 100;
 
 export interface GitBranchTip {
 	name: string;
@@ -151,7 +156,7 @@ export class GitOperations {
 	}
 
 	async commitFiles(message: string, filePaths: string[], repoRoot?: string | null): Promise<void> {
-		const uniqueFilePaths = Array.from(new Set(filePaths.map((path) => path.trim()).filter((path) => path.length > 0)));
+		const uniqueFilePaths = this.normalizeFilePaths(filePaths);
 		if (uniqueFilePaths.length === 0) {
 			return;
 		}
@@ -173,20 +178,9 @@ export class GitOperations {
 			requestedRepoRoot = pathsByRepo.keys().next().value;
 		}
 
-		const resolvedRepoRoot =
-			requestedRepoRoot ?? (await this.getPathContext(uniqueFilePaths[0] ?? ""))?.repoRoot ?? this.projectRoot;
-		if (!(await this.isRepository(resolvedRepoRoot))) {
-			return;
-		}
-		const relativePaths: string[] = [];
-		for (const filePath of uniqueFilePaths) {
-			const relativePath = await this.getRelativePathForRepo(filePath, resolvedRepoRoot);
-			relativePaths.push(relativePath ?? filePath);
-		}
-		const uniqueRelativePaths = Array.from(new Set(relativePaths.filter((path) => path.length > 0)));
-		if (uniqueRelativePaths.length === 0) {
-			return;
-		}
+		const paths = await this.resolveRepositoryPaths(uniqueFilePaths, requestedRepoRoot);
+		if (!paths) return;
+		const { repoRoot: resolvedRepoRoot, relativePaths: uniqueRelativePaths } = paths;
 
 		const { stdout: stagedForPaths } = await this.execGit(
 			["diff", "--name-only", "--cached", "--", ...uniqueRelativePaths],
@@ -420,27 +414,37 @@ export class GitOperations {
 	}
 
 	async resetPaths(filePaths: string[], repoRoot?: string | null): Promise<void> {
-		const uniqueFilePaths = Array.from(new Set(filePaths.map((path) => path.trim()).filter((path) => path.length > 0)));
+		const uniqueFilePaths = this.normalizeFilePaths(filePaths);
 		if (uniqueFilePaths.length === 0) {
 			return;
 		}
 
-		const resolvedRepoRoot =
-			repoRoot ?? (await this.getPathContext(uniqueFilePaths[0] ?? ""))?.repoRoot ?? this.projectRoot;
-		if (!(await this.isRepository(resolvedRepoRoot))) {
-			return;
-		}
-		const relativePaths: string[] = [];
-		for (const filePath of uniqueFilePaths) {
-			const relativePath = await this.getRelativePathForRepo(filePath, resolvedRepoRoot);
-			relativePaths.push(relativePath ?? filePath);
-		}
-		const uniqueRelativePaths = Array.from(new Set(relativePaths.filter((path) => path.length > 0)));
-		if (uniqueRelativePaths.length === 0) {
-			return;
-		}
+		const paths = await this.resolveRepositoryPaths(uniqueFilePaths, repoRoot);
+		if (!paths) return;
+		const { repoRoot: resolvedRepoRoot, relativePaths: uniqueRelativePaths } = paths;
 
 		await this.execGit(["reset", "HEAD", "--", ...uniqueRelativePaths], { cwd: resolvedRepoRoot });
+	}
+
+	private normalizeFilePaths(filePaths: readonly string[]): string[] {
+		return Array.from(new Set(filePaths.map((path) => path.trim()).filter((path) => path.length > 0)));
+	}
+
+	private async rebasePathsForRepo(filePaths: readonly string[], repoRoot: string): Promise<string[]> {
+		const relativePaths = await Promise.all(
+			filePaths.map(async (filePath) => (await this.getRelativePathForRepo(filePath, repoRoot)) ?? filePath),
+		);
+		return Array.from(new Set(relativePaths.filter((path) => path.length > 0)));
+	}
+
+	private async resolveRepositoryPaths(
+		filePaths: readonly string[],
+		requestedRepoRoot?: string | null,
+	): Promise<{ repoRoot: string; relativePaths: string[] } | null> {
+		const repoRoot = requestedRepoRoot ?? (await this.getPathContext(filePaths[0] ?? ""))?.repoRoot ?? this.projectRoot;
+		if (!(await this.isRepository(repoRoot))) return null;
+		const relativePaths = await this.rebasePathsForRepo(filePaths, repoRoot);
+		return relativePaths.length > 0 ? { repoRoot, relativePaths } : null;
 	}
 
 	async getIndexEntries(filePath: string): Promise<GitIndexEntry[]> {
@@ -485,35 +489,6 @@ export class GitOperations {
 		return true;
 	}
 
-	async retryGitOperation<T>(operation: () => Promise<T>, operationName: string, maxRetries = 3): Promise<T> {
-		let lastError: Error | undefined;
-
-		for (let attempt = 1; attempt <= maxRetries; attempt++) {
-			try {
-				return await operation();
-			} catch (error) {
-				lastError = error instanceof Error ? error : new Error(String(error));
-
-				if (process.env.DEBUG) {
-					console.warn(
-						`Git operation '${operationName}' failed on attempt ${attempt}/${maxRetries}:`,
-						lastError.message,
-					);
-				}
-
-				// Don't retry on the last attempt
-				if (attempt === maxRetries) {
-					break;
-				}
-
-				// Wait briefly before retrying (exponential backoff)
-				await new Promise((resolve) => setTimeout(resolve, 2 ** (attempt - 1) * 100));
-			}
-		}
-
-		throw new Error(`Git operation '${operationName}' failed after ${maxRetries} attempts: ${lastError?.message}`);
-	}
-
 	async getStatus(): Promise<string> {
 		if (!(await this.isRepository())) {
 			return "";
@@ -554,11 +529,6 @@ export class GitOperations {
 		} catch {
 			return [];
 		}
-	}
-
-	async hasUncommittedChanges(): Promise<boolean> {
-		const status = await this.getStatus();
-		return status.trim() !== "";
 	}
 
 	async getLastCommitMessage(): Promise<string> {
@@ -675,7 +645,7 @@ export class GitOperations {
 		let expectedIndexEntries = initialIndexEntries;
 		let lastError: Error | undefined;
 
-		for (let attempt = 1; attempt <= 3; attempt += 1) {
+		for (let attempt = 1; attempt <= TASK_COMMIT_MAX_ATTEMPTS; attempt += 1) {
 			if ((await this.hashFile(filePath)) !== expectedWorkingHash) {
 				throw lastError ?? new Error(`Task file changed before it could be committed: ${filePath}`);
 			}
@@ -687,18 +657,20 @@ export class GitOperations {
 				return;
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
-				if (attempt === 3) break;
+				if (attempt === TASK_COMMIT_MAX_ATTEMPTS) break;
 				const workingOwned = (await this.hashFile(filePath)) === expectedWorkingHash;
 				const indexOwned = indexEntriesEqual(await this.getIndexEntries(filePath), expectedIndexEntries);
 				if (!workingOwned || !indexOwned) throw lastError;
-				await new Promise((resolve) => setTimeout(resolve, 2 ** (attempt - 1) * 100));
+				await new Promise((resolve) => setTimeout(resolve, 2 ** (attempt - 1) * TASK_COMMIT_RETRY_DELAY_MS));
 			}
 		}
 
-		throw new Error(`Git operation 'commit task file ${filePath}' failed after 3 attempts: ${lastError?.message}`);
+		throw new Error(
+			`Git operation 'commit task file ${filePath}' failed after ${TASK_COMMIT_MAX_ATTEMPTS} attempts: ${lastError?.message}`,
+		);
 	}
 
-	async stageBacklogDirectory(backlogDir = "backlog"): Promise<string | null> {
+	async stageBacklogDirectory(backlogDir: string = DEFAULT_DIRECTORIES.BACKLOG): Promise<string | null> {
 		const context = await this.getPathContext(backlogDir);
 		if (context) {
 			const pathForAdd = context.relativePath === "." ? "." : context.relativePath;
@@ -764,7 +736,7 @@ export class GitOperations {
 				["for-each-ref", "--format=%(refname:short)|%(committerdate:iso8601)", `refs/remotes/${remote}`],
 				{ readOnly: true },
 			);
-			const since = Date.now() - daysAgo * 24 * 60 * 60 * 1000;
+			const since = Date.now() - daysAgo * MILLISECONDS_PER_DAY;
 			return (
 				stdout
 					.split("\n")
@@ -799,7 +771,7 @@ export class GitOperations {
 			return [];
 		}
 		try {
-			const since = Date.now() - daysAgo * 24 * 60 * 60 * 1000;
+			const since = Date.now() - daysAgo * MILLISECONDS_PER_DAY;
 
 			// Build refs to check based on remoteOperations config
 			const refs = ["refs/heads"];
@@ -819,7 +791,7 @@ export class GitOperations {
 				.filter(Boolean)
 				.map((line) => {
 					const [head, name, commit, timestamp] = line.split("\0");
-					return { name, commit, current: head === "*", timestamp: Number(timestamp) * 1000 };
+					return { name, commit, current: head === "*", timestamp: Number(timestamp) * MILLISECONDS_PER_SECOND };
 				})
 				.filter(
 					(entry): entry is GitBranchTip & { timestamp: number } =>
@@ -843,21 +815,6 @@ export class GitOperations {
 			return tips
 				.filter((tip): tip is GitBranchTip => tip !== null)
 				.sort((left, right) => left.name.localeCompare(right.name));
-		}
-	}
-
-	async listLocalBranches(): Promise<string[]> {
-		if (!(await this.isRepository())) {
-			return [];
-		}
-		try {
-			const { stdout } = await this.execGit(["branch", "--format=%(refname:short)"], { readOnly: true });
-			return stdout
-				.split("\n")
-				.map((l) => l.trim())
-				.filter(Boolean);
-		} catch {
-			return [];
 		}
 	}
 
@@ -898,21 +855,6 @@ export class GitOperations {
 					.map((s) => s.trim())
 					.filter(Boolean).length > 0
 			);
-		} catch {
-			return false;
-		}
-	}
-
-	/**
-	 * Returns true if a specific remote exists (default: origin)
-	 */
-	async hasRemote(remote = "origin"): Promise<boolean> {
-		if (!(await this.isRepository())) {
-			return false;
-		}
-		try {
-			const { stdout } = await this.execGit(["remote"], { readOnly: true });
-			return stdout.split("\n").some((r) => r.trim() === remote);
 		} catch {
 			return false;
 		}
@@ -1001,7 +943,7 @@ export class GitOperations {
 		if (typeof since === "number" && since) {
 			args.push(`--since=${since}.days`);
 		} else if (since instanceof Date) {
-			args.push(`--since=@${Math.floor(since.getTime() / 1000)}`);
+			args.push(`--since=@${Math.floor(since.getTime() / MILLISECONDS_PER_SECOND)}`);
 		}
 
 		args.push(ref, "--", dir);
@@ -1019,7 +961,7 @@ export class GitOperations {
 			if (timestampStr && /^\d+$/.test(timestampStr)) {
 				// This is a timestamp, files follow until next timestamp
 				const epoch = Number(timestampStr);
-				const date = new Date(epoch * 1000);
+				const date = new Date(epoch * MILLISECONDS_PER_SECOND);
 				i++;
 
 				// Process files until we hit another timestamp or end

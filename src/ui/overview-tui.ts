@@ -1,6 +1,7 @@
 import { box } from "neo-neo-bblessed";
 import type { TaskStatistics } from "../core/statistics.ts";
 import { formatPriorityLabel } from "../utils/priority-config.ts";
+import { formatKeymap, keymapKeys } from "./keymap.ts";
 import { getStatusIcon } from "./status-icon.ts";
 import { createScreen, formatTuiTitle } from "./tui.ts";
 
@@ -204,7 +205,7 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 			left: 0,
 			width: "100%",
 			height: 3,
-			content: "{center}Press q or Esc to exit{/center}",
+			content: `{center}Press ${formatKeymap("shared", "quit")} to exit{/center}`,
 			tags: true,
 			style: {
 				fg: "gray",
@@ -215,7 +216,7 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 		statusBox.focus();
 
 		// Exit handlers
-		screen.key(["escape", "q", "C-c"], () => {
+		screen.key(keymapKeys("shared", "quit"), () => {
 			screen.destroy();
 			resolve();
 		});

@@ -3,7 +3,7 @@ import type { LabelMatchMode } from "../types/index.ts";
 import { NO_MILESTONE_FILTER_LABEL, NO_MILESTONE_FILTER_VALUE } from "../utils/milestone-filter.ts";
 import type { PriorityOption } from "../utils/priority-config.ts";
 import type { TaskFilterOptions } from "../utils/task-search.ts";
-import type { FilterControlId, FilterState } from "./components/filter-header.ts";
+import type { FilterControlId, FilterHeader, FilterState } from "./components/filter-header.ts";
 import { openMultiSelectFilterPopup, openSingleSelectFilterPopup } from "./components/filter-popup.ts";
 
 export function taskFilterHeaderControls(projects: string[]): FilterControlId[] {
@@ -16,6 +16,19 @@ export function taskFilterHeaderControls(projects: string[]): FilterControlId[] 
 		"milestone",
 		"labels",
 	];
+}
+
+export function focusTaskFilterControl(header: FilterHeader, filterId: FilterControlId): void {
+	const controls: Record<FilterControlId, () => void> = {
+		search: () => header.focusSearch(),
+		status: () => header.focusStatus(),
+		type: () => header.focusType(),
+		project: () => header.focusProject(),
+		priority: () => header.focusPriority(),
+		milestone: () => header.focusMilestone(),
+		labels: () => header.focusLabels(),
+	};
+	controls[filterId]();
 }
 
 export function taskFilterOptions(

@@ -12,7 +12,7 @@ import { taskIdsEqual } from "./task-id.ts";
  * spelling: TASK-01 and TASK-1 are one task everywhere else, so a reference written either way is a
  * reference to the same record.
  */
-export function isExactTaskReference(reference: string, taskId: string): boolean {
+function isExactTaskReference(reference: string, taskId: string): boolean {
 	const trimmed = reference.trim();
 	if (!trimmed) {
 		return false;

@@ -237,12 +237,6 @@ describe("Task path utilities", () => {
 			const path = await getTaskPath("999", core);
 			expect(path).toBeNull();
 		});
-
-		it("should handle errors gracefully", async () => {
-			// Pass invalid core to trigger error
-			const path = await getTaskPath("123", null as unknown as Core);
-			expect(path).toBeNull();
-		});
 	});
 
 	describe("getTaskFilename", () => {
@@ -281,22 +275,6 @@ describe("Task path utilities", () => {
 		it("should work with task- prefix", async () => {
 			const exists = await taskFileExists("task-456", core);
 			expect(exists).toBe(true);
-		});
-	});
-
-	describe("integration with Core default", () => {
-		it("should work without explicit core parameter when in valid project", async () => {
-			// Change to test directory to use default Core
-			const originalCwd = process.cwd();
-			process.chdir(TEST_DIR);
-
-			try {
-				const path = await getTaskPath("123");
-				expect(path).toBeTruthy();
-				expect(path).toContain("task-123 - Test Task.md");
-			} finally {
-				process.chdir(originalCwd);
-			}
 		});
 	});
 

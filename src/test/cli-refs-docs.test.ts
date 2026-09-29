@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -132,7 +132,7 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 
 	describe("task create with empty --ref and --doc values", () => {
 		it("rejects an empty reference without creating the task", async () => {
-			const result = await $`bun ${cliPath} task create "Feature" --ref ""`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await runTestCli(["task", "create", "Feature", "--ref", ""], { cwd: TEST_DIR });
 
 			expect(result.exitCode).toBe(1);
 			// Create has nothing to clear, so the empty value stays an error here even though task edit clears.
@@ -143,17 +143,16 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		});
 
 		it("rejects an empty reference alongside a valid one", async () => {
-			const result = await $`bun ${cliPath} task create "Feature" --ref "" --ref src/api.ts`
-				.cwd(TEST_DIR)
-				.quiet()
-				.nothrow();
+			const result = await runTestCli(["task", "create", "Feature", "--ref", "", "--ref", "src/api.ts"], {
+				cwd: TEST_DIR,
+			});
 
 			expect(result.exitCode).toBe(1);
 			expect(result.stderr.toString()).toContain("Cannot use an empty value with --ref");
 		});
 
 		it("rejects an empty documentation entry without creating the task", async () => {
-			const result = await $`bun ${cliPath} task create "Feature" --doc ""`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await runTestCli(["task", "create", "Feature", "--doc", ""], { cwd: TEST_DIR });
 
 			expect(result.exitCode).toBe(1);
 			expect(result.stderr.toString()).toContain(
@@ -163,7 +162,7 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		});
 
 		it("rejects an empty reference on task create --draft without creating the draft", async () => {
-			const result = await $`bun ${cliPath} task create "Feature" --draft --ref ""`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await runTestCli(["task", "create", "Feature", "--draft", "--ref", ""], { cwd: TEST_DIR });
 
 			expect(result.exitCode).toBe(1);
 			expect(result.stderr.toString()).toContain("Cannot use an empty value with --ref");
@@ -284,7 +283,7 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		it("clears references with an explicit empty --ref value", async () => {
 			await createTaskWithRefsAndDocs();
 
-			const result = await $`bun ${cliPath} task edit 1 --ref ${""} --plain`.cwd(TEST_DIR).quiet();
+			const result = await runTestCli(["task", "edit", "1", "--ref", "", "--plain"], { cwd: TEST_DIR });
 
 			expect(result.exitCode).toBe(0);
 			const task = await new Core(TEST_DIR).filesystem.loadTask("TASK-1");
@@ -295,7 +294,7 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		it("clears documentation with an explicit empty --doc value", async () => {
 			await createTaskWithRefsAndDocs();
 
-			const result = await $`bun ${cliPath} task edit 1 --doc ${""} --plain`.cwd(TEST_DIR).quiet();
+			const result = await runTestCli(["task", "edit", "1", "--doc", "", "--plain"], { cwd: TEST_DIR });
 
 			expect(result.exitCode).toBe(0);
 			const task = await new Core(TEST_DIR).filesystem.loadTask("TASK-1");
@@ -306,11 +305,15 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		it("accepts an explicit empty value together with the matching clear flag", async () => {
 			await createTaskWithRefsAndDocs();
 
-			const refs = await $`bun ${cliPath} task edit 1 --clear-refs --ref ${""} --plain`.cwd(TEST_DIR).quiet().nothrow();
+			const refs = await runTestCli(["task", "edit", "1", "--clear-refs", "--ref", "", "--plain"], {
+				cwd: TEST_DIR,
+			});
 			expect(refs.exitCode).toBe(0);
 			expect((await new Core(TEST_DIR).filesystem.loadTask("TASK-1"))?.references).toEqual([]);
 
-			const docs = await $`bun ${cliPath} task edit 1 --clear-docs --doc ${""} --plain`.cwd(TEST_DIR).quiet().nothrow();
+			const docs = await runTestCli(["task", "edit", "1", "--clear-docs", "--doc", "", "--plain"], {
+				cwd: TEST_DIR,
+			});
 			expect(docs.exitCode).toBe(0);
 			expect((await new Core(TEST_DIR).filesystem.loadTask("TASK-1"))?.documentation).toEqual([]);
 		});
@@ -320,11 +323,15 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		it("ignores an empty value when a real value is also given", async () => {
 			await createTaskWithRefsAndDocs();
 
-			const refs = await $`bun ${cliPath} task edit 1 --ref ${""} --ref c --plain`.cwd(TEST_DIR).quiet();
+			const refs = await runTestCli(["task", "edit", "1", "--ref", "", "--ref", "c", "--plain"], {
+				cwd: TEST_DIR,
+			});
 			expect(refs.exitCode).toBe(0);
 			expect((await new Core(TEST_DIR).filesystem.loadTask("TASK-1"))?.references).toEqual(["c"]);
 
-			const docs = await $`bun ${cliPath} task edit 1 --doc ${""} --doc doc-c --plain`.cwd(TEST_DIR).quiet();
+			const docs = await runTestCli(["task", "edit", "1", "--doc", "", "--doc", "doc-c", "--plain"], {
+				cwd: TEST_DIR,
+			});
 			expect(docs.exitCode).toBe(0);
 			expect((await new Core(TEST_DIR).filesystem.loadTask("TASK-1"))?.documentation).toEqual(["doc-c"]);
 		});
@@ -427,17 +434,16 @@ await import(${JSON.stringify(pathToFileURL(cliPath).href)});
 		it("rejects empty values and conflicting flags without changing references", async () => {
 			await createTaskWithReferences();
 
-			const emptyAdd = await $`bun ${cliPath} task edit 1 --add-ref ""`.cwd(TEST_DIR).quiet().nothrow();
+			const emptyAdd = await runTestCli(["task", "edit", "1", "--add-ref", ""], { cwd: TEST_DIR });
 			expect(emptyAdd.exitCode).toBe(1);
 			expect(emptyAdd.stderr.toString()).toContain(
 				"Cannot use an empty value with --add-ref. Use --clear-refs to remove all references.",
 			);
 			expect(emptyAdd.stdout.toString()).not.toContain("Updated task");
 
-			const emptyRemove = await $`bun ${cliPath} task edit 1 --remove-ref seed:a --remove-ref ""`
-				.cwd(TEST_DIR)
-				.quiet()
-				.nothrow();
+			const emptyRemove = await runTestCli(["task", "edit", "1", "--remove-ref", "seed:a", "--remove-ref", ""], {
+				cwd: TEST_DIR,
+			});
 			expect(emptyRemove.exitCode).toBe(1);
 			expect(emptyRemove.stderr.toString()).toContain("Cannot use an empty value with --remove-ref");
 

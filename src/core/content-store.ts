@@ -449,18 +449,7 @@ export class ContentStore {
 			!completedTask
 		)
 			return;
-		const normalizedId = normalizeTaskId(taskId);
-		this.nextContentItemGeneration("tasks", normalizedId);
-		this.nextContentItemVersion("tasks", normalizedId, this.currentRoot());
-		this.activeTasks = activeTasks;
-		this.completedTasks = completedTasks;
-		if (this.taskIdentityIndex) {
-			this.taskIdentityIndex = this.taskIdentityIndex.withWorkingCopyCorpus(this.activeTasks, this.completedTasks);
-			this.replaceVisibleTasks(this.taskIdentityIndex.getTasks(false));
-		} else {
-			this.replaceVisibleTasks(this.activeTasks);
-		}
-		this.publishTaskChange();
+		this.replaceTaskCorpus(taskId, activeTasks, completedTasks);
 	}
 
 	/**
@@ -481,18 +470,26 @@ export class ContentStore {
 		const completedTasks = this.completedTasks.filter((candidate) => candidate.filePath !== filePath);
 		completedTasks.push({ ...task, source: "completed" });
 
-		const normalizedId = normalizeTaskId(task.id);
+		this.replaceTaskCorpus(task.id, activeTasks, completedTasks);
+	}
+
+	private replaceTaskCorpus(taskId: string, activeTasks: Task[], completedTasks: Task[]): void {
+		const normalizedId = normalizeTaskId(taskId);
 		this.nextContentItemGeneration("tasks", normalizedId);
 		this.nextContentItemVersion("tasks", normalizedId, this.currentRoot());
 		this.activeTasks = activeTasks;
 		this.completedTasks = completedTasks;
+		this.refreshVisibleTaskCorpus();
+		this.publishTaskChange();
+	}
+
+	private refreshVisibleTaskCorpus(): void {
 		if (this.taskIdentityIndex) {
 			this.taskIdentityIndex = this.taskIdentityIndex.withWorkingCopyCorpus(this.activeTasks, this.completedTasks);
 			this.replaceVisibleTasks(this.taskIdentityIndex.getTasks(false));
 		} else {
 			this.replaceVisibleTasks(this.activeTasks);
 		}
-		this.publishTaskChange();
 	}
 
 	getDocuments(): Document[] {
@@ -962,10 +959,7 @@ export class ContentStore {
 				(candidate.filePath !== undefined || task.filePath !== undefined || !taskIdsEqual(candidate.id, task.id)),
 		);
 		this.activeTasks.push(task);
-		if (this.taskIdentityIndex) {
-			this.taskIdentityIndex = this.taskIdentityIndex.withWorkingCopyCorpus(this.activeTasks, this.completedTasks);
-			this.replaceVisibleTasks(this.taskIdentityIndex.getTasks(false));
-		} else this.replaceVisibleTasks(this.activeTasks);
+		this.refreshVisibleTaskCorpus();
 		this.notify("tasks");
 	}
 
@@ -982,10 +976,7 @@ export class ContentStore {
 			this.nextContentItemGeneration("tasks", removedId);
 			this.nextContentItemVersion("tasks", removedId, this.currentRoot());
 		}
-		if (this.taskIdentityIndex) {
-			this.taskIdentityIndex = this.taskIdentityIndex.withWorkingCopyCorpus(this.activeTasks, this.completedTasks);
-			this.replaceVisibleTasks(this.taskIdentityIndex.getTasks(false));
-		} else this.replaceVisibleTasks(this.activeTasks);
+		this.refreshVisibleTaskCorpus();
 		this.notify("tasks");
 	}
 

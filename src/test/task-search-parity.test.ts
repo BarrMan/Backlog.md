@@ -348,4 +348,14 @@ describe("filter wiring across surfaces", () => {
 		// A task with no project never matches a non-empty project filter.
 		expect(both.some((task) => task.project === undefined)).toBe(false);
 	});
+
+	it("searches the local task corpus before applying task-list filters", async () => {
+		const matches = await core.queryTasks({
+			query: "Wiring",
+			filters: { project: "api" },
+			includeCrossBranch: false,
+		});
+
+		expect(matches.map((task) => task.title)).toEqual(["Wiring one label"]);
+	});
 });

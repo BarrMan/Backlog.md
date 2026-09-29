@@ -1,35 +1,34 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { buildMilestoneAliasMap, canonicalizeMilestone, getMilestoneLabel, milestoneKey } from "./core/milestones.ts";
 import type { Milestone, Task } from "./types/index.ts";
 
-export interface BoardOptions {
-	statuses?: string[];
-}
-
 export type BoardLayout = "horizontal" | "vertical";
-export type BoardFormat = "terminal" | "markdown";
 
-export function buildKanbanStatusGroups(
-	tasks: Task[],
-	statuses: string[],
-): { orderedStatuses: string[]; groupedTasks: Map<string, Task[]> } {
+function normalizeConfiguredStatuses(statuses: string[]): { ordered: string[]; canonicalByLower: Map<string, string> } {
 	const canonicalByLower = new Map<string, string>();
-	const orderedConfiguredStatuses: string[] = [];
-	const configuredSeen = new Set<string>();
+	const ordered: string[] = [];
+	const seen = new Set<string>();
 
 	for (const status of statuses ?? []) {
 		if (typeof status !== "string") continue;
 		const trimmed = status.trim();
 		if (!trimmed) continue;
 		const lower = trimmed.toLowerCase();
-		if (!canonicalByLower.has(lower)) {
-			canonicalByLower.set(lower, trimmed);
-		}
-		if (!configuredSeen.has(trimmed)) {
-			orderedConfiguredStatuses.push(trimmed);
-			configuredSeen.add(trimmed);
-		}
+		if (!canonicalByLower.has(lower)) canonicalByLower.set(lower, trimmed);
+		if (seen.has(trimmed)) continue;
+		ordered.push(trimmed);
+		seen.add(trimmed);
 	}
+
+	return { ordered, canonicalByLower };
+}
+
+export function buildKanbanStatusGroups(
+	tasks: Task[],
+	statuses: string[],
+): { orderedStatuses: string[]; groupedTasks: Map<string, Task[]> } {
+	const { ordered: orderedConfiguredStatuses, canonicalByLower } = normalizeConfiguredStatuses(statuses);
 
 	const groupedTasks = new Map<string, Task[]>();
 	for (const status of orderedConfiguredStatuses) {
@@ -46,14 +45,8 @@ export function buildKanbanStatusGroups(
 		groupedTasks.get(canonical)?.push(task);
 	}
 
-	const orderedStatuses: string[] = [];
-	const seen = new Set<string>();
-
-	for (const status of orderedConfiguredStatuses) {
-		if (seen.has(status)) continue;
-		orderedStatuses.push(status);
-		seen.add(status);
-	}
+	const orderedStatuses = [...orderedConfiguredStatuses];
+	const seen = new Set(orderedStatuses);
 
 	for (const status of groupedTasks.keys()) {
 		if (seen.has(status)) continue;
@@ -195,70 +188,21 @@ export function generateMilestoneGroupedBoard(
 	// Task values can be either IDs or titles, so normalize aliases to one key.
 	const milestoneSeen = new Set<string>();
 	const allMilestones: string[] = [];
-	const aliasToMilestone = new Map<string, string>();
-	const milestoneLabelsByKey = new Map<string, string>();
-	const titleCounts = new Map<string, number>();
-	for (const milestone of milestoneEntities) {
-		const titleKey = milestone.title.trim().toLowerCase();
-		if (!titleKey) continue;
-		titleCounts.set(titleKey, (titleCounts.get(titleKey) ?? 0) + 1);
-	}
+	const aliases = buildMilestoneAliasMap(milestoneEntities);
 
 	for (const milestone of milestoneEntities) {
 		const normalizedId = milestone.id.trim();
-		const normalizedTitle = milestone.title.trim();
-		const idKey = normalizedId.toLowerCase();
+		const idKey = milestoneKey(normalizedId);
 		if (normalizedId && !milestoneSeen.has(idKey)) {
 			milestoneSeen.add(idKey);
 			allMilestones.push(normalizedId);
 		}
-
-		if (normalizedId) {
-			aliasToMilestone.set(idKey, normalizedId);
-			const idAliasMatch = normalizedId.match(/^m-(\d+)$/i);
-			if (idAliasMatch?.[1]) {
-				const numericAlias = String(Number.parseInt(idAliasMatch[1], 10));
-				aliasToMilestone.set(`m-${numericAlias}`, normalizedId);
-				if (!aliasToMilestone.has(numericAlias)) {
-					aliasToMilestone.set(numericAlias, normalizedId);
-				}
-			}
-		}
-		if (normalizedTitle) {
-			const titleKey = normalizedTitle.toLowerCase();
-			if (titleCounts.get(titleKey) === 1 && !aliasToMilestone.has(titleKey)) {
-				aliasToMilestone.set(titleKey, normalizedId || normalizedTitle);
-			}
-			milestoneLabelsByKey.set(idKey, normalizedTitle);
-			if (titleCounts.get(titleKey) === 1 && !milestoneLabelsByKey.has(titleKey)) {
-				milestoneLabelsByKey.set(titleKey, normalizedTitle);
-			}
-		}
 	}
 
-	const canonicalizeMilestone = (value?: string | null): string => {
-		const normalized = value?.trim();
-		if (!normalized) return "";
-		const direct = aliasToMilestone.get(normalized.toLowerCase());
-		if (direct) {
-			return direct;
-		}
-		const idMatch = normalized.match(/^m-(\d+)$/i);
-		if (idMatch?.[1]) {
-			const numericAlias = String(Number.parseInt(idMatch[1], 10));
-			return aliasToMilestone.get(`m-${numericAlias}`) ?? aliasToMilestone.get(numericAlias) ?? normalized;
-		}
-		if (/^\d+$/.test(normalized)) {
-			const numericAlias = String(Number.parseInt(normalized, 10));
-			return aliasToMilestone.get(`m-${numericAlias}`) ?? aliasToMilestone.get(numericAlias) ?? normalized;
-		}
-		return normalized;
-	};
-
 	for (const task of tasks) {
-		const canonicalMilestone = canonicalizeMilestone(task.milestone);
-		if (canonicalMilestone && !milestoneSeen.has(canonicalMilestone.toLowerCase())) {
-			milestoneSeen.add(canonicalMilestone.toLowerCase());
+		const canonicalMilestone = canonicalizeMilestone(task.milestone, aliases);
+		if (canonicalMilestone && !milestoneSeen.has(milestoneKey(canonicalMilestone))) {
+			milestoneSeen.add(milestoneKey(canonicalMilestone));
 			allMilestones.push(canonicalMilestone);
 		}
 	}
@@ -280,10 +224,10 @@ Project: ${projectName}
 	// Each milestone section
 	for (const milestone of allMilestones) {
 		const milestoneTasks = tasks.filter(
-			(task) => canonicalizeMilestone(task.milestone).toLowerCase() === milestone.toLowerCase(),
+			(task) => milestoneKey(canonicalizeMilestone(task.milestone, aliases)) === milestoneKey(milestone),
 		);
 		if (milestoneTasks.length > 0) {
-			const milestoneLabel = milestoneLabelsByKey.get(milestone.toLowerCase()) ?? milestone;
+			const milestoneLabel = getMilestoneLabel(milestone, milestoneEntities);
 			sections.push(generateMilestoneSection(milestoneLabel, milestoneTasks, statuses));
 		}
 	}

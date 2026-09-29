@@ -15,6 +15,7 @@ import { getPriorityOptions } from "../utils/priority-config.ts";
 import { getProjectValues } from "../utils/project-config.ts";
 import { applyTaskFilters, createTaskSearchIndex } from "../utils/task-search.ts";
 import { getTaskTypeValues } from "../utils/task-type-config.ts";
+import { parsePresetEnvironment, updatePresetConfiguration } from "./agent-workspace-config-editor.ts";
 import {
 	buildWorkspaceEntries,
 	changedTaskFields,
@@ -34,8 +35,14 @@ import {
 } from "./components/filter-header.ts";
 import { openTaskComposer, type TaskComposerOptions } from "./components/task-composer.ts";
 import { formatFooterContent } from "./footer-content.ts";
+import { formatKeymap, keymapKeys, matchesKey } from "./keymap.ts";
 import { getStatusColor, wrapStatusColor } from "./status-icon.ts";
-import { openTaskFilterPicker, taskFilterHeaderControls, taskFilterOptions } from "./task-filter-wiring.ts";
+import {
+	focusTaskFilterControl,
+	openTaskFilterPicker,
+	taskFilterHeaderControls,
+	taskFilterOptions,
+} from "./task-filter-wiring.ts";
 import {
 	buildTaskViewerMilestoneFilterModel,
 	formatTaskViewerListItem,
@@ -247,12 +254,16 @@ export async function runAgentWorkspace(
 			resolve(result);
 		};
 		const footerHelp = () => {
-			if (mode === "details") return " [E/Enter] Edit | [↑↓] Field | [S] History | [Esc] Tasks ";
-			if (mode === "history") return " [↑↓] Session | [Enter] Preview | [Esc] Details ";
-			if (mode === "field") return " [Ctrl+S] Save | [Esc] Details ";
-			if (mode === "inline") return " [Ctrl+Q] Tasks | [q] Input | [↑↓] Input ";
-			if (mode === "config") return " [Tab] Next | [Ctrl+S] Save | [Esc] Tasks ";
-			return " [↑↓] Task | [/] Search | [Space] Details | [Tab] Input | [Enter] Start/Attach | [N] New | [Shift+B] Board | [q] Close ";
+			if (mode === "details")
+				return ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Field | [${formatKeymap("workspace", "history")}] History | [${formatKeymap("workspace", "close")}] Tasks `;
+			if (mode === "history")
+				return ` [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Session | [${formatKeymap("workspace", "open")}] Preview | [${formatKeymap("workspace", "close")}] Details `;
+			if (mode === "field")
+				return ` [${formatKeymap("workspace", "save")}] Save | [${formatKeymap("workspace", "close")}] Details `;
+			if (mode === "inline") return ` [${formatKeymap("workspace", "inlineClose")}] Tasks | Keys → session `;
+			if (mode === "config")
+				return ` [${formatKeymap("shared", "tab")}] Next | [${formatKeymap("workspace", "save")}] Save | [${formatKeymap("workspace", "close")}] Tasks `;
+			return ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "inlineInput")}] Input | [${formatKeymap("workspace", "open")}] Start/Attach | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close `;
 		};
 		const updateFooter = () => {
 			const formatted = formatFooterContent(footerHelp(), screen.width);
@@ -338,7 +349,7 @@ export async function runAgentWorkspace(
 			}
 			if (!session) {
 				if (token === generation) {
-					preview.setContent("No active session. Press Enter to start or attach.");
+					preview.setContent(`No active session. Press ${formatKeymap("workspace", "open")} to start or attach.`);
 					render();
 				}
 				return;
@@ -400,7 +411,7 @@ export async function runAgentWorkspace(
 			if (!unchanged) {
 				historySession = undefined;
 				details.setContent(detailsText(entry.task, drafts.get(entry.task.id)));
-				preview.setContent("No active session. Press Enter to start or attach.");
+				preview.setContent(`No active session. Press ${formatKeymap("workspace", "open")} to start or attach.`);
 			}
 			preview.setLabel?.(" Live preview ");
 			const token = ++generation;
@@ -518,7 +529,7 @@ export async function runAgentWorkspace(
 				width: `${100 - leftWidth}%`,
 				height: detailsHeight(),
 				border: "line",
-				label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · Ctrl+S save · Esc details `,
+				label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · ${formatKeymap("workspace", "save")} save · ${formatKeymap("workspace", "close")} details `,
 				keys: true,
 				mouse: true,
 				inputOnFocus: false,
@@ -537,7 +548,7 @@ export async function runAgentWorkspace(
 			}
 			widget.focus();
 			widget.readInput();
-			widget.key(["C-s"], () => {
+			widget.key(keymapKeys("workspace", "save"), () => {
 				closeField();
 				run(async () => {
 					const current = await core.getTask(task.id);
@@ -553,7 +564,7 @@ export async function runAgentWorkspace(
 				});
 				return false;
 			});
-			widget.key(["escape"], () => {
+			widget.key(keymapKeys("workspace", "close"), () => {
 				closeField();
 				return false;
 			});
@@ -563,9 +574,13 @@ export async function runAgentWorkspace(
 			if (!focusedTask()) return;
 			mode = "details";
 			showDetails();
-			details.setLabel?.(" Details · E/Enter edit field · S history · Esc task list ");
+			details.setLabel?.(
+				` Details · ${formatKeymap("workspace", "edit")} edit field · ${formatKeymap("workspace", "history")} history · ${formatKeymap("workspace", "close")} task list `,
+			);
 			details.focus();
-			tell(" E/Enter edit field  ↑↓ field  S history  Esc task list ");
+			tell(
+				` ${formatKeymap("workspace", "edit")} edit field  ${formatKeymap("shared", "up")}${formatKeymap("shared", "down")} field  ${formatKeymap("workspace", "history")} history  ${formatKeymap("workspace", "close")} task list `,
+			);
 		};
 		let detailField = 0;
 		const showHistory = async () => {
@@ -574,7 +589,9 @@ export async function runAgentWorkspace(
 			taskSessions = current;
 			mode = "history";
 			historySession = current.sessions.at(-1);
-			preview.setLabel?.(" History · ↑↓ choose · Enter preview · Esc details ");
+			preview.setLabel?.(
+				` History · ${formatKeymap("shared", "up")}${formatKeymap("shared", "down")} choose · ${formatKeymap("workspace", "open")} preview · ${formatKeymap("workspace", "close")} details `,
+			);
 			preview.setContent(
 				current.sessions
 					.map(
@@ -586,28 +603,32 @@ export async function runAgentWorkspace(
 			render();
 			preview.focus();
 		};
-		details.key(["escape"], () => {
+		details.key(keymapKeys("workspace", "close"), () => {
 			if (mode !== "details") return;
 			mode = "navigation";
 			details.setLabel?.(" Details ");
 			tree.focus();
 			return false;
 		});
-		details.key(["s"], () => {
+		details.key(keymapKeys("workspace", "history"), () => {
 			if (mode === "details") run(showHistory);
 			return false;
 		});
-		details.key(["up", "down"], (_character: unknown, key: unknown) => {
-			if (mode !== "details") return;
-			detailField = (detailField + ((key as { name?: string }).name === "up" ? FIELDS.length - 1 : 1)) % FIELDS.length;
-			tell(`${FIELDS[detailField]?.[1]} · Enter edits`);
-			return false;
-		});
-		details.key(["e", "enter"], () => {
+		details.key(
+			[...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")],
+			(_character: unknown, key: unknown) => {
+				if (mode !== "details") return;
+				detailField =
+					(detailField + ((key as { name?: string }).name === "up" ? FIELDS.length - 1 : 1)) % FIELDS.length;
+				tell(`${FIELDS[detailField]?.[1]} · ${formatKeymap("workspace", "edit")} edits`);
+				return false;
+			},
+		);
+		details.key(keymapKeys("workspace", "edit"), () => {
 			if (mode === "details") openField(FIELDS[detailField]?.[0] ?? "description");
 			return false;
 		});
-		preview.key(["escape"], () => {
+		preview.key(keymapKeys("workspace", "close"), () => {
 			if (mode !== "history") return;
 			mode = "details";
 			historySession = undefined;
@@ -617,37 +638,34 @@ export async function runAgentWorkspace(
 			details.focus();
 			return false;
 		});
-		preview.key(["up", "down"], (_character: unknown, key: unknown) => {
-			if (mode !== "history" || !taskSessions?.sessions.length) return;
-			const all = taskSessions.sessions;
-			const current = historySession ?? all[0];
-			if (!current) return false;
-			const index = Math.max(
-				0,
-				Math.min(all.length - 1, all.indexOf(current) + ((key as { name?: string }).name === "up" ? -1 : 1)),
-			);
-			historySession = all[index];
-			preview.setContent(
-				all
-					.map((item) => `${item.id === historySession?.id ? ">" : " "} ${item.createdAt}  ${item.status}  ${item.id}`)
-					.join("\n"),
-			);
-			render();
-			return false;
-		});
-		preview.key(["enter"], () => {
+		preview.key(
+			[...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")],
+			(_character: unknown, key: unknown) => {
+				if (mode !== "history" || !taskSessions?.sessions.length) return;
+				const all = taskSessions.sessions;
+				const current = historySession ?? all[0];
+				if (!current) return false;
+				const index = Math.max(
+					0,
+					Math.min(all.length - 1, all.indexOf(current) + ((key as { name?: string }).name === "up" ? -1 : 1)),
+				);
+				historySession = all[index];
+				preview.setContent(
+					all
+						.map(
+							(item) => `${item.id === historySession?.id ? ">" : " "} ${item.createdAt}  ${item.status}  ${item.id}`,
+						)
+						.join("\n"),
+				);
+				render();
+				return false;
+			},
+		);
+		preview.key(keymapKeys("workspace", "open"), () => {
 			if (mode === "history" && selectedTask) run(() => showPreview(selectedTask, historySession));
 			return false;
 		});
-		const focusFilterControl = (filterId: FilterControlId) => {
-			if (filterId === "search") filterHeader.focusSearch();
-			if (filterId === "status") filterHeader.focusStatus();
-			if (filterId === "type") filterHeader.focusType();
-			if (filterId === "project") filterHeader.focusProject();
-			if (filterId === "priority") filterHeader.focusPriority();
-			if (filterId === "milestone") filterHeader.focusMilestone();
-			if (filterId === "labels") filterHeader.focusLabels();
-		};
+		const focusFilterControl = (filterId: FilterControlId) => focusTaskFilterControl(filterHeader, filterId);
 		const openFilter = async (filterId: Exclude<FilterControlId, "search">) => {
 			if (filterPopupOpen) return;
 			filterPopupOpen = true;
@@ -808,8 +826,8 @@ export async function runAgentWorkspace(
 				return false;
 			};
 			const closeConfig = () => {
-				screen.unkey(["tab"], tabHandler);
-				screen.unkey(["C-s"], save);
+				screen.unkey(keymapKeys("shared", "tab"), tabHandler);
+				screen.unkey(keymapKeys("workspace", "save"), save);
 				for (const widget of widgets) widget.destroy();
 				disposeConfig = () => {};
 				mode = "navigation";
@@ -845,7 +863,7 @@ export async function runAgentWorkspace(
 			};
 			run(load);
 			focusWidget(0);
-			scopeList.key(["enter"], () => {
+			scopeList.key(keymapKeys("workspace", "open"), () => {
 				const next = ["root", "project", "card"][
 					(scopeList as unknown as { selected: number }).selected
 				] as AgentConfigScope;
@@ -855,7 +873,7 @@ export async function runAgentWorkspace(
 				}
 				return false;
 			});
-			presetList.key(["enter"], () => {
+			presetList.key(keymapKeys("workspace", "open"), () => {
 				const config = editable;
 				if (!config) return false;
 				const name = [...Object.keys(config.presets), "+ New preset"][
@@ -869,13 +887,13 @@ export async function runAgentWorkspace(
 						width: "44%",
 						height: 3,
 						border: "line",
-						label: " New preset name · Enter confirms · Esc cancels ",
+						label: ` New preset name · ${formatKeymap("workspace", "open")} confirms · ${formatKeymap("workspace", "close")} cancels `,
 						keys: true,
 						inputOnFocus: false,
 					});
 					prompt.focus();
 					prompt.readInput();
-					prompt.key(["enter"], () => {
+					prompt.key(keymapKeys("workspace", "open"), () => {
 						const next = prompt.getValue().trim();
 						if (next && !config.presets[next]) {
 							config.presets[next] = {
@@ -894,7 +912,7 @@ export async function runAgentWorkspace(
 						presetList.focus();
 						return false;
 					});
-					prompt.key(["escape"], () => {
+					prompt.key(keymapKeys("workspace", "close"), () => {
 						prompt.destroy();
 						presetList.focus();
 						return false;
@@ -905,12 +923,12 @@ export async function runAgentWorkspace(
 				}
 				return false;
 			});
-			worktreeBox.key(["space"], () => {
+			worktreeBox.key(keymapKeys("workspace", "toggleWorktree"), () => {
 				worktree = !worktree;
 				showWorktree();
 				return false;
 			});
-			bootstrapList.key(["enter"], () => {
+			bootstrapList.key(keymapKeys("workspace", "open"), () => {
 				const value = bootstraps[(bootstrapList as unknown as { selected: number }).selected];
 				if (value) bootstrap = value as AgentPreset["bootstrap"];
 				return false;
@@ -926,32 +944,18 @@ export async function runAgentWorkspace(
 					if (!editable) return;
 					const commandValue = command.getValue();
 					if (!commandValue.trim()) throw new Error("Command is required.");
-					const env: Record<string, string> = {};
-					for (const line of environment.getValue().split("\n")) {
-						if (!line.trim()) continue;
-						const index = line.indexOf("=");
-						const name = (index < 0 ? line : line.slice(0, index)).trim();
-						if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
-							throw new Error(`Invalid environment variable name: ${name || "(empty)"}.`);
-						env[name] = index < 0 ? "" : line.slice(index + 1);
-					}
+					const env = parsePresetEnvironment(environment.getValue());
 					await updateAgentConfiguration(
 						core,
 						scope,
-						(config) => ({
-							...config,
-							selectedPreset,
-							presets: {
-								...config.presets,
-								[selectedPreset]: {
-									command: commandValue,
-									env,
-									prepare: prepare.getValue(),
-									worktree,
-									bootstrap,
-								},
-							},
-						}),
+						(config) =>
+							updatePresetConfiguration(config, selectedPreset, {
+								command: commandValue,
+								environment: env,
+								prepare: prepare.getValue(),
+								worktree,
+								bootstrap,
+							}),
 						scope === "card" ? task.id : undefined,
 					);
 					closeConfig();
@@ -959,11 +963,11 @@ export async function runAgentWorkspace(
 				});
 				return false;
 			};
-			screen.key(["tab"], tabHandler);
-			screen.key(["C-s"], save);
-			for (const widget of widgets) widget.key(["C-s"], save);
+			screen.key(keymapKeys("shared", "tab"), tabHandler);
+			screen.key(keymapKeys("workspace", "save"), save);
+			for (const widget of widgets) widget.key(keymapKeys("workspace", "save"), save);
 			for (const widget of widgets)
-				widget.key(["escape"], () => {
+				widget.key(keymapKeys("workspace", "close"), () => {
 					closeConfig();
 					return false;
 				});
@@ -1002,13 +1006,135 @@ export async function runAgentWorkspace(
 				}
 			}
 		};
+		type NavigationAction =
+			| "quit"
+			| "board"
+			| "up"
+			| "down"
+			| "search"
+			| "shrinkSidebar"
+			| "expandSidebar"
+			| "shrinkDetails"
+			| "expandDetails"
+			| "details"
+			| "open"
+			| "inlineInput"
+			| "newTask"
+			| "handoff"
+			| "config";
+		const navigationBindings: Array<{ action: NavigationAction; keys: string[] }> = [
+			{ action: "quit", keys: keymapKeys("shared", "quitWithoutEscape") },
+			{ action: "board", keys: keymapKeys("workspace", "board") },
+			{ action: "up", keys: keymapKeys("workspace", "up") },
+			{ action: "down", keys: keymapKeys("workspace", "down") },
+			{ action: "search", keys: keymapKeys("workspace", "search") },
+			{ action: "shrinkSidebar", keys: keymapKeys("workspace", "shrinkSidebar") },
+			{ action: "expandSidebar", keys: keymapKeys("workspace", "expandSidebar") },
+			{ action: "shrinkDetails", keys: keymapKeys("workspace", "shrinkDetails") },
+			{ action: "expandDetails", keys: keymapKeys("workspace", "expandDetails") },
+			{ action: "details", keys: keymapKeys("workspace", "details") },
+			{ action: "open", keys: keymapKeys("workspace", "open") },
+			{ action: "inlineInput", keys: keymapKeys("workspace", "inlineInput") },
+			{ action: "newTask", keys: keymapKeys("workspace", "newTask") },
+			{ action: "handoff", keys: keymapKeys("workspace", "handoff") },
+			{ action: "config", keys: keymapKeys("workspace", "config") },
+		];
+		const startComposer = () => {
+			mode = "composer";
+			run(async () => {
+				try {
+					const created = await (options.taskComposer ?? openTaskComposer)({
+						screen,
+						statuses,
+						types: taskTypes,
+						priorities: priorityOptions.map((priority) => priority.value),
+						projects,
+						persist: async (input) => {
+							const config = await core.filesystem.loadConfig();
+							return (await core.createTaskFromInput(input, config?.autoCommit ?? false)).task;
+						},
+					});
+					if (created) {
+						state.selectedTaskId = created.id;
+						await reload();
+					}
+				} finally {
+					if (!closed) {
+						mode = "navigation";
+						tree.focus();
+						render();
+					}
+				}
+			});
+		};
+		const startOrAttachSession = () => {
+			const task = focusedTask();
+			if (!task || sessionAction) return;
+			sessionAction = true;
+			run(async () => {
+				try {
+					const session = active() ?? (await service.start(task.id));
+					if (!closed) await attach(task, session);
+					if (!closed && selectedTask?.id === task.id) await select(selected);
+				} finally {
+					attached = false;
+					sessionAction = false;
+				}
+			});
+		};
+		const moveSelection = (step: number) => {
+			const next = Math.max(0, Math.min(entries.length - 1, selected + step));
+			if (next !== selected) run(() => select(next));
+		};
+		const resizePanel = (panel: "sidebar" | "details", amount: number) => {
+			if (panel === "sidebar") leftWidth = Math.max(18, Math.min(50, leftWidth + amount));
+			else split = Math.max(30, Math.min(75, split + amount));
+			layout();
+			resizeAgent();
+			render();
+		};
+		const openSelectedEntry = () => {
+			if (entries[selected]?.kind === "header") run(() => toggleGroup(selected));
+			else startOrAttachSession();
+		};
+		const sendHandoffRequest = () => {
+			const task = focusedTask();
+			if (task)
+				run(async () => {
+					await service.requestHandoff(task.id);
+					await select(selected);
+				});
+		};
+		const navigationActions: Record<NavigationAction, () => void> = {
+			quit: () => close("exit"),
+			board: () => close("board"),
+			up: () => moveSelection(-1),
+			down: () => moveSelection(1),
+			search: () => filterHeader.focusSearch(),
+			shrinkSidebar: () => resizePanel("sidebar", -2),
+			expandSidebar: () => resizePanel("sidebar", 2),
+			shrinkDetails: () => resizePanel("details", -2),
+			expandDetails: () => resizePanel("details", 2),
+			details: enterDetails,
+			open: openSelectedEntry,
+			inlineInput: () => {
+				if (!focusedTask()) return;
+				if (active()) {
+					mode = "inline";
+					tell("Inline tmux input · Ctrl+Q returns");
+				} else tell("Start a session first.");
+			},
+			newTask: startComposer,
+			handoff: sendHandoffRequest,
+			config: openConfig,
+		};
 		const onKeypress = (character: unknown, raw: unknown) => {
 			if (attached) return;
 			const ch = typeof character === "string" ? character : "";
 			const key = raw as { name?: string; full?: string; sequence?: string; ctrl?: boolean };
 			if (filterFocused || filterPopupOpen || mode === "composer") return;
 			if (mode === "inline" && selectedTask) {
-				if (key.full === "C-q") {
+				if (matchesKey(keymapKeys("workspace", "inlineClose"), key)) {
 					const task = selectedTask;
 					const session = active();
 					mode = "navigation";
@@ -1027,127 +1153,8 @@ export async function runAgentWorkspace(
 				return;
 			}
 			if (mode === "field" || mode === "config" || mode === "details" || mode === "history") return;
-			if (key.name === "q" || key.full === "C-c") {
-				close("exit");
-				return;
-			}
-			if (key.full === "S-b") {
-				close("board");
-				return;
-			}
-			if (key.name === "up" || key.name === "down") {
-				const step = key.name === "up" ? -1 : 1;
-				const next = Math.max(0, Math.min(entries.length - 1, selected + step));
-				if (next !== selected) {
-					run(() => select(next));
-				}
-				return;
-			}
-			if (ch === "/" || key.sequence === "/") {
-				filterHeader.focusSearch();
-				return;
-			}
-			if (key.name === "[") {
-				leftWidth = Math.max(18, leftWidth - 2);
-				layout();
-				resizeAgent();
-				render();
-				return;
-			}
-			if (key.name === "]") {
-				leftWidth = Math.min(50, leftWidth + 2);
-				layout();
-				resizeAgent();
-				render();
-				return;
-			}
-			if (key.name === "{") {
-				split = Math.max(30, split - 2);
-				layout();
-				resizeAgent();
-				render();
-				return;
-			}
-			if (key.name === "}") {
-				split = Math.min(75, split + 2);
-				layout();
-				resizeAgent();
-				render();
-				return;
-			}
-			if (key.name === "space") {
-				enterDetails();
-				return;
-			}
-			if (key.name === "enter" && entries[selected]?.kind === "header") {
-				run(() => toggleGroup(selected));
-				return;
-			}
-			if (key.name === "tab") {
-				if (!focusedTask()) return;
-				if (active()) {
-					mode = "inline";
-					tell("Inline tmux input · Ctrl+Q returns");
-				} else tell("Start a session first.");
-				return;
-			}
-			if (key.name === "n") {
-				mode = "composer";
-				run(async () => {
-					try {
-						const created = await (options.taskComposer ?? openTaskComposer)({
-							screen,
-							statuses,
-							types: taskTypes,
-							priorities: priorityOptions.map((priority) => priority.value),
-							projects,
-							persist: async (input) => {
-								const config = await core.filesystem.loadConfig();
-								return (await core.createTaskFromInput(input, config?.autoCommit ?? false)).task;
-							},
-						});
-						if (created) {
-							state.selectedTaskId = created.id;
-							await reload();
-						}
-					} finally {
-						if (!closed) {
-							mode = "navigation";
-							tree.focus();
-							render();
-						}
-					}
-				});
-				return;
-			}
-			if (key.name === "h" && focusedTask()) {
-				const task = focusedTask();
-				if (!task) return;
-				run(async () => {
-					await service.requestHandoff(task.id);
-					await select(selected);
-				});
-				return;
-			}
-			if (key.name === "p" && focusedTask()) {
-				openConfig();
-				return;
-			}
-			if (key.name === "enter" && focusedTask()) {
-				const task = focusedTask();
-				if (!task || sessionAction) return;
-				sessionAction = true;
-				run(async () => {
-					try {
-						const session = active() ?? (await service.start(task.id));
-						if (!closed) await attach(task, session);
-						if (!closed && selectedTask?.id === task.id) await select(selected);
-					} finally {
-						attached = false;
-						sessionAction = false;
-					}
-				});
-			}
+			const action = navigationBindings.find((binding) => matchesKey(binding.keys, key))?.action;
+			if (action) navigationActions[action]();
 		};
 		const onResize = () => {
 			if (attached) return;

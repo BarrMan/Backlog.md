@@ -5,7 +5,7 @@ import type { PromptRunner } from "../commands/advanced-config-wizard.ts";
 import { configureAdvancedSettings } from "../commands/configure-advanced-settings.ts";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -285,7 +285,7 @@ describe("Config commands", () => {
 		const list = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).nothrow().quiet();
 		expect(list.stdout.toString()).toContain("defaultAssignee: [@alice, @bob]");
 
-		const cleared = await $`bun ${CLI_PATH} config set defaultAssignee ${""}`.cwd(TEST_DIR).nothrow().quiet();
+		const cleared = await runTestCli(["config", "set", "defaultAssignee", ""], { cwd: TEST_DIR });
 		expect(cleared.exitCode).toBe(0);
 
 		core.filesystem.invalidateConfigCache();
@@ -525,7 +525,7 @@ describe("Config commands", () => {
 		await core.filesystem.saveConfig(config);
 		expect((await core.filesystem.loadConfig())?.defaultEditor).toBe("code --wait");
 
-		const cleared = await $`bun ${CLI_PATH} config set defaultEditor ${""}`.cwd(TEST_DIR).nothrow().quiet();
+		const cleared = await runTestCli(["config", "set", "defaultEditor", ""], { cwd: TEST_DIR });
 		expect(cleared.exitCode).toBe(0);
 
 		core.filesystem.invalidateConfigCache();
@@ -540,12 +540,10 @@ describe("Config commands", () => {
 		await $`git init`.cwd(initDir).quiet();
 
 		const env = { ...process.env, EDITOR: "backlog-sentinel-editor", VISUAL: "backlog-sentinel-editor" };
-		const result =
-			await $`bun ${CLI_PATH} init "Editorless Project" --defaults --default-editor ${""} --integration-mode none`
-				.cwd(initDir)
-				.env(env)
-				.nothrow()
-				.quiet();
+		const result = await runTestCli(
+			["init", "Editorless Project", "--defaults", "--default-editor", "", "--integration-mode", "none"],
+			{ cwd: initDir, env },
+		);
 		expect(result.exitCode).toBe(0);
 
 		const initCore = new Core(initDir);
@@ -573,12 +571,10 @@ describe("Config commands", () => {
 		expect((await initCore.filesystem.loadConfig())?.defaultEditor).toBe("backlog-sentinel-editor");
 
 		// Re-init with an explicitly empty flag: clears the editor instead of keeping the existing value
-		const reinit =
-			await $`bun ${CLI_PATH} init "Editor Project" --defaults --default-editor ${""} --integration-mode none`
-				.cwd(initDir)
-				.env(env)
-				.nothrow()
-				.quiet();
+		const reinit = await runTestCli(
+			["init", "Editor Project", "--defaults", "--default-editor", "", "--integration-mode", "none"],
+			{ cwd: initDir, env },
+		);
 		expect(reinit.exitCode).toBe(0);
 		initCore.filesystem.invalidateConfigCache();
 		expect((await initCore.filesystem.loadConfig())?.defaultEditor).toBeUndefined();

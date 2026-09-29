@@ -8,6 +8,7 @@
 import { stdin as input, stdout as output } from "node:process";
 import type { ProgramInterface, ScreenInterface, ScreenOptions } from "neo-neo-bblessed";
 import { screen as blessedScreen, box, program as createProgram } from "neo-neo-bblessed";
+import { keymapKeys } from "./keymap.ts";
 
 type ErrorConstructor = new () => unknown;
 
@@ -57,7 +58,7 @@ export function addScrollKeys(
 		return height > 0 ? Math.max(1, height - 3) : 0;
 	};
 
-	widget.key(["pageup"], () => {
+	widget.key(keymapKeys("shared", "pageUp"), () => {
 		const delta = pageAmount();
 		if (delta > 0) {
 			scrollable.scroll?.(-delta);
@@ -65,7 +66,7 @@ export function addScrollKeys(
 		}
 		return false;
 	});
-	widget.key(["pagedown"], () => {
+	widget.key(keymapKeys("shared", "pageDown"), () => {
 		const delta = pageAmount();
 		if (delta > 0) {
 			scrollable.scroll?.(delta);
@@ -73,12 +74,12 @@ export function addScrollKeys(
 		}
 		return false;
 	});
-	widget.key(["home"], () => {
+	widget.key(keymapKeys("shared", "first"), () => {
 		scrollable.setScroll?.(0);
 		screen.render();
 		return false;
 	});
-	widget.key(["end"], () => {
+	widget.key(keymapKeys("shared", "last"), () => {
 		scrollable.setScrollPerc?.(100);
 		screen.render();
 		return false;
@@ -212,16 +213,6 @@ export function createScreen(options: Partial<ScreenOptions> = {}): ScreenInterf
 	return screen;
 }
 
-// Ask the user for a single line of input.  Falls back to readline.
-export async function promptText(message: string, defaultValue = ""): Promise<string> {
-	// Always use readline for simple text input to avoid blessed rendering quirks
-	const { createInterface } = await import("node:readline/promises");
-	const rl = createInterface({ input, output });
-	const answer = (await rl.question(`${message} `)).trim();
-	rl.close();
-	return answer || defaultValue;
-}
-
 // Display long content in a scrollable viewer.
 export async function scrollableViewer(content: string): Promise<void> {
 	if (output.isTTY === false) {
@@ -252,7 +243,7 @@ export async function scrollableViewer(content: string): Promise<void> {
 
 		addScrollKeys(viewer, screen);
 
-		screen.key(["escape", "q", "C-c"], () => {
+		screen.key(keymapKeys("shared", "quit"), () => {
 			screen.destroy();
 			resolve();
 		});

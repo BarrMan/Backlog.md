@@ -47,7 +47,7 @@ export function canonicalTaskId(taskId: string, prefix: string = DEFAULT_TASK_PR
 }
 
 /** Compare dotted decimal ID bodies without coercing segments to JavaScript numbers. */
-export function numericIdBodiesEqual(left: string, right: string): boolean {
+function numericIdBodiesEqual(left: string, right: string): boolean {
 	const leftSegments = left.split(".");
 	const rightSegments = right.split(".");
 	if (leftSegments.length !== rightSegments.length) {

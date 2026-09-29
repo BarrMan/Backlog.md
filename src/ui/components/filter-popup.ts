@@ -1,5 +1,6 @@
 import type { BoxInterface, ScreenInterface } from "neo-neo-bblessed";
 import { box, list, scrollablebox } from "neo-neo-bblessed";
+import { formatKeymap, keymapKeys } from "../keymap.ts";
 import { createGenericList } from "./generic-list.ts";
 
 export interface FilterPopupChoice {
@@ -15,7 +16,7 @@ export interface PopupChromeOptions {
 	height?: string | number;
 }
 
-function resolveDimension(value: string | number, total: number): number {
+function resolveNumericOrPercent(value: string | number, total: number, fallback: number): number {
 	if (typeof value === "number") {
 		return value;
 	}
@@ -26,7 +27,11 @@ function resolveDimension(value: string | number, total: number): number {
 		}
 	}
 	const parsed = Number.parseInt(value, 10);
-	return Number.isNaN(parsed) ? total : parsed;
+	return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function resolveDimension(value: string | number, total: number): number {
+	return resolveNumericOrPercent(value, total, total);
 }
 
 /** A viewport that clips its content, with `childBase` as the first visible row. */
@@ -49,20 +54,10 @@ function fitToScreen(value: string | number, total: number): string | number {
 }
 
 function resolvePosition(value: string | number, total: number, size: number): number {
-	if (typeof value === "number") {
-		return value;
-	}
 	if (value === "center") {
 		return Math.max(0, Math.floor((total - size) / 2));
 	}
-	if (value.endsWith("%")) {
-		const percent = Number.parseFloat(value.slice(0, -1));
-		if (!Number.isNaN(percent)) {
-			return Math.floor((percent / 100) * total);
-		}
-	}
-	const parsed = Number.parseInt(value, 10);
-	return Number.isNaN(parsed) ? 0 : parsed;
+	return resolveNumericOrPercent(value, total, 0);
 }
 
 export function createPopupChrome(options: PopupChromeOptions): {
@@ -107,7 +102,7 @@ export function createPopupChrome(options: PopupChromeOptions): {
 
 	const escBadge = box({
 		parent: popup,
-		content: " Esc ",
+		content: ` ${formatKeymap("shared", "escape")} `,
 		top: -1,
 		right: 1,
 		width: 5,
@@ -157,6 +152,52 @@ export function createPopupChrome(options: PopupChromeOptions): {
 	return { popup, close, reflow };
 }
 
+function createPopupFinish<T>(
+	screen: ScreenInterface,
+	close: () => void,
+	destroyables: Array<{ destroy(): void }>,
+	resolve: (value: T | null) => void,
+): (value: T | null) => void {
+	let settled = false;
+	return (value) => {
+		if (settled) return;
+		settled = true;
+		for (const item of destroyables) item.destroy();
+		close();
+		screen.render();
+		resolve(value);
+	};
+}
+
+function createFilterPopupContent(popup: BoxInterface): BoxInterface {
+	return box({
+		parent: popup,
+		top: 1,
+		left: 1,
+		width: "100%-4",
+		height: "100%-3",
+		style: { bg: "default" },
+	});
+}
+
+function createFilterPopup<T>(
+	options: Pick<PopupChromeOptions, "screen" | "title"> & Partial<Pick<PopupChromeOptions, "helpText">>,
+	helpText: string,
+	width: string,
+	height: string,
+	initialize: (
+		popup: BoxInterface,
+		contentBox: BoxInterface,
+		close: () => void,
+		resolve: (value: T | null) => void,
+	) => void,
+): Promise<T | null> {
+	return new Promise((resolve) => {
+		const { popup, close } = createPopupChrome({ ...options, helpText: options.helpText ?? helpText, width, height });
+		initialize(popup, createFilterPopupContent(popup), close, resolve);
+	});
+}
+
 export async function openSingleSelectFilterPopup(options: {
 	screen: ScreenInterface;
 	title: string;
@@ -168,103 +209,83 @@ export async function openSingleSelectFilterPopup(options: {
 		return null;
 	}
 
-	return new Promise<string | null>((resolve) => {
-		let settled = false;
-		const { popup, close } = createPopupChrome({
-			screen: options.screen,
-			title: options.title,
-			helpText:
-				options.helpText ?? " {cyan-fg}[↑↓/jk]{/} Navigate | {cyan-fg}[Enter]{/} Select | {cyan-fg}[Esc]{/} Cancel",
-			width: "48%",
-			height: "60%",
-		});
-		const contentBox = box({
-			parent: popup,
-			top: 1,
-			left: 1,
-			width: "100%-4",
-			height: "100%-3",
-			style: { bg: "default" },
-		});
+	return createFilterPopup(
+		options,
+		` {cyan-fg}[${formatKeymap("list", "up")}${formatKeymap("list", "down")}/${formatKeymap("list", "downVim")}${formatKeymap("list", "upVim")}]{/} Navigate | {cyan-fg}[${formatKeymap("list", "select")}]{/} Select | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel`,
+		"48%",
+		"60%",
+		(popup, contentBox, close, resolve) => {
+			const selectedIndex = Math.max(
+				0,
+				options.choices.findIndex((choice) => choice.value === options.selectedValue),
+			);
 
-		const selectedIndex = Math.max(
-			0,
-			options.choices.findIndex((choice) => choice.value === options.selectedValue),
-		);
+			const picker = list({
+				parent: contentBox,
+				top: 0,
+				left: 0,
+				width: "100%",
+				height: "100%",
+				items: options.choices.map((choice) => choice.label),
+				selected: selectedIndex,
+				keys: true,
+				mouse: true,
+				tags: true,
+				scrollable: true,
+				style: {
+					bg: "default",
+					selected: { inverse: true, bold: true },
+					item: { bg: "default", hover: { inverse: true } },
+				},
+			});
+			// The list widget always starts on the first row and ignores the `selected` option, so the
+			// current value has to be selected explicitly or Enter would silently confirm a different one.
+			picker.select(selectedIndex);
 
-		const picker = list({
-			parent: contentBox,
-			top: 0,
-			left: 0,
-			width: "100%",
-			height: "100%",
-			items: options.choices.map((choice) => choice.label),
-			selected: selectedIndex,
-			keys: true,
-			mouse: true,
-			tags: true,
-			scrollable: true,
-			style: {
-				bg: "default",
-				selected: { inverse: true, bold: true },
-				item: { bg: "default", hover: { inverse: true } },
-			},
-		});
-		// The list widget always starts on the first row and ignores the `selected` option, so the
-		// current value has to be selected explicitly or Enter would silently confirm a different one.
-		picker.select(selectedIndex);
+			const finish = createPopupFinish(options.screen, close, [picker, contentBox], resolve);
 
-		const finish = (value: string | null) => {
-			if (settled) return;
-			settled = true;
-			picker.destroy();
-			contentBox.destroy();
-			close();
-			options.screen.render();
-			resolve(value);
-		};
+			popup.key(keymapKeys("shared", "cancel"), () => {
+				finish(null);
+				return false;
+			});
 
-		popup.key(["escape", "q"], () => {
-			finish(null);
-			return false;
-		});
+			// Ensure cancel keys work while list widget has focus.
+			picker.key(keymapKeys("shared", "cancel"), () => {
+				finish(null);
+				return false;
+			});
 
-		// Ensure cancel keys work while list widget has focus.
-		picker.key(["escape", "q"], () => {
-			finish(null);
-			return false;
-		});
+			picker.key(keymapKeys("list", "select"), () => {
+				const index = picker.selected ?? 0;
+				const choice = options.choices[index];
+				finish(choice?.value ?? null);
+				return false;
+			});
 
-		picker.key(["enter"], () => {
-			const index = picker.selected ?? 0;
-			const choice = options.choices[index];
-			finish(choice?.value ?? null);
-			return false;
-		});
+			// The list widget binds j/k only under `vi`, which would also bind l=select, q=cancel,
+			// g/G, H/M/L and Ctrl+B/U/D/F on the picker. Every other list in the TUI wires the vim
+			// keys to plain up/down (see generic-list.ts, which drives the multi-select popup below),
+			// so match that. `select` clamps, which is what the arrow keys already do in this list.
+			const moveBy = (offset: number) => {
+				picker.select((picker.selected ?? 0) + offset);
+				options.screen.render();
+			};
+			picker.key(keymapKeys("list", "downVim"), () => moveBy(1));
+			picker.key(keymapKeys("list", "upVim"), () => moveBy(-1));
 
-		// The list widget binds j/k only under `vi`, which would also bind l=select, q=cancel,
-		// g/G, H/M/L and Ctrl+B/U/D/F on the picker. Every other list in the TUI wires the vim
-		// keys to plain up/down (see generic-list.ts, which drives the multi-select popup below),
-		// so match that. `select` clamps, which is what the arrow keys already do in this list.
-		const moveBy = (offset: number) => {
-			picker.select((picker.selected ?? 0) + offset);
-			options.screen.render();
-		};
-		picker.key(["j"], () => moveBy(1));
-		picker.key(["k"], () => moveBy(-1));
+			picker.on("select", (...args: unknown[]) => {
+				const index =
+					typeof args[1] === "number" ? args[1] : typeof args[0] === "number" ? args[0] : (picker.selected ?? 0);
+				const choice = options.choices[index];
+				finish(choice?.value ?? null);
+			});
 
-		picker.on("select", (...args: unknown[]) => {
-			const index =
-				typeof args[1] === "number" ? args[1] : typeof args[0] === "number" ? args[0] : (picker.selected ?? 0);
-			const choice = options.choices[index];
-			finish(choice?.value ?? null);
-		});
-
-		setImmediate(() => {
-			picker.focus();
-			options.screen.render();
-		});
-	});
+			setImmediate(() => {
+				picker.focus();
+				options.screen.render();
+			});
+		},
+	);
 }
 
 export async function openMultiSelectFilterPopup(options: {
@@ -278,84 +299,63 @@ export async function openMultiSelectFilterPopup(options: {
 		return [];
 	}
 
-	return new Promise<string[] | null>((resolve) => {
-		let settled = false;
-		const { popup, close } = createPopupChrome({
-			screen: options.screen,
-			title: options.title,
-			helpText:
-				options.helpText ??
-				" {cyan-fg}[↑↓/jk]{/} Navigate | {cyan-fg}[Space]{/} Toggle | {cyan-fg}[Enter]{/} Apply | {cyan-fg}[Esc]{/} Cancel",
-			width: "52%",
-			height: "72%",
-		});
-		const contentBox = box({
-			parent: popup,
-			top: 1,
-			left: 1,
-			width: "100%-4",
-			height: "100%-3",
-			style: { bg: "default" },
-		});
+	return createFilterPopup(
+		options,
+		` {cyan-fg}[${formatKeymap("list", "up")}${formatKeymap("list", "down")}/${formatKeymap("list", "downVim")}${formatKeymap("list", "upVim")}]{/} Navigate | {cyan-fg}[${formatKeymap("list", "toggle")}]{/} Toggle | {cyan-fg}[${formatKeymap("list", "select")}]{/} Apply | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel`,
+		"52%",
+		"72%",
+		(popup, contentBox, close, resolve) => {
+			const selectedSet = new Set(options.selectedItems.map((item) => item.toLowerCase()));
+			const selectableItems = options.items.map((label) => ({ id: label, title: label }));
+			const selectedIndices = selectableItems
+				.map((item, index) => (selectedSet.has(item.id.toLowerCase()) ? index : -1))
+				.filter((index) => index >= 0);
 
-		const selectedSet = new Set(options.selectedItems.map((item) => item.toLowerCase()));
-		const selectableItems = options.items.map((label) => ({ id: label, title: label }));
-		const selectedIndices = selectableItems
-			.map((item, index) => (selectedSet.has(item.id.toLowerCase()) ? index : -1))
-			.filter((index) => index >= 0);
+			const picker = createGenericList({
+				parent: contentBox,
+				title: "",
+				items: selectableItems,
+				multiSelect: true,
+				itemRenderer: (item) => item.title,
+				selectedIndices,
+				top: 0,
+				left: 0,
+				width: "100%",
+				height: "100%",
+				border: false,
+				showHelp: false,
+				style: {
+					bg: "default",
+					item: { bg: "default" },
+					selected: { inverse: true, bold: true },
+				},
+				keys: {
+					cancel: ["C-]"],
+				},
+				onSelect: (selected) => {
+					const chosen = Array.isArray(selected) ? selected.map((item) => item.id) : [];
+					finish(chosen);
+				},
+			});
 
-		const picker = createGenericList({
-			parent: contentBox,
-			title: "",
-			items: selectableItems,
-			multiSelect: true,
-			itemRenderer: (item) => item.title,
-			selectedIndices,
-			top: 0,
-			left: 0,
-			width: "100%",
-			height: "100%",
-			border: false,
-			showHelp: false,
-			style: {
-				bg: "default",
-				item: { bg: "default" },
-				selected: { inverse: true, bold: true },
-			},
-			keys: {
-				cancel: ["C-]"],
-			},
-			onSelect: (selected) => {
-				const chosen = Array.isArray(selected) ? selected.map((item) => item.id) : [];
-				finish(chosen);
-			},
-		});
+			const finish = createPopupFinish(options.screen, close, [picker, contentBox], resolve);
 
-		const finish = (value: string[] | null) => {
-			if (settled) return;
-			settled = true;
-			picker.destroy();
-			contentBox.destroy();
-			close();
-			options.screen.render();
-			resolve(value);
-		};
+			popup.key(keymapKeys("shared", "cancel"), () => {
+				finish(null);
+				return false;
+			});
 
-		popup.key(["escape", "q"], () => {
-			finish(null);
-			return false;
-		});
+			// Ensure cancel keys work while generic-list widget has focus.
+			const pickerList = picker.getListBox();
+			pickerList.key(keymapKeys("shared", "cancel"), () => {
+				finish(null);
+				return false;
+			});
 
-		// Ensure cancel keys work while generic-list widget has focus.
-		const pickerList = picker.getListBox();
-		pickerList.key(["escape", "q"], () => {
-			finish(null);
-			return false;
-		});
-
-		setImmediate(() => {
-			picker.focus();
-			options.screen.render();
-		});
-	});
+			setImmediate(() => {
+				picker.focus();
+				options.screen.render();
+			});
+		},
+	);
 }

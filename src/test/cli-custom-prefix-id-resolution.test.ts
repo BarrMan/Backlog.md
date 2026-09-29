@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import { LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import {
 	commitSamePathBranchTaskVariant,
 	createUniqueTestDir,
@@ -465,7 +465,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		await createTask(core, "BACK-2", "Other task");
 
 		for (const parent of ["   ", ""]) {
-			const result = await $`bun ${CLI_PATH} task list --parent ${parent} --plain`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await runTestCli(["task", "list", "--parent", parent, "--plain"], { cwd: TEST_DIR });
 
 			expect(result.exitCode).toBe(1);
 			expect(result.stderr.toString()).toContain(

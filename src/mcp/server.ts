@@ -38,7 +38,6 @@ import type {
 	ListResourcesResult,
 	ListResourceTemplatesResult,
 	ListToolsResult,
-	McpPromptHandler,
 	McpResourceHandler,
 	McpToolHandler,
 	ReadResourceResult,
@@ -88,7 +87,15 @@ export class McpServer extends Core {
 
 	private readonly tools = new Map<string, McpToolHandler>();
 	private readonly resources = new Map<string, McpResourceHandler>();
-	private readonly prompts = new Map<string, McpPromptHandler>();
+	private readonly prompts = new Map<
+		string,
+		{
+			name: string;
+			description?: string;
+			arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+			handler: (args: Record<string, unknown>) => Promise<GetPromptResult>;
+		}
+	>();
 
 	constructor(projectRoot: string, instructions: string, version = "0.0.0") {
 		super(projectRoot, { enableWatchers: true });
@@ -159,7 +166,6 @@ export class McpServer extends Core {
 
 	private async resolveFromRoots(extra: ServerRequestExtra, options?: { debug?: boolean }): Promise<void> {
 		this.rootsResolutionDirty = false;
-
 		const caps = this.server.getClientCapabilities();
 		if (!caps?.roots) {
 			this.log("Client does not support MCP roots capability, staying in fallback mode.", options);
@@ -169,42 +175,40 @@ export class McpServer extends Core {
 		try {
 			const { roots } = await extra.sendRequest({ method: "roots/list" }, ListRootsResultSchema);
 			this.log(`Received ${roots.length} root(s) from client.`, options);
-
-			const checkedPaths = new Set<string>();
-			for (const root of roots) {
-				const rootPath = await this.resolveRootSearchPath(root.uri);
-				if (!rootPath) continue;
-				checkedPaths.add(rootPath);
-
-				// Only check the root itself — don't walk up the tree, as that
-				// could match an unrelated ancestor project outside the workspace.
-				const resolution = resolveBacklogDirectory(rootPath);
-				if (!resolution.configPath) continue;
-
-				if (await this.upgradeToProject(rootPath, options)) {
-					return;
-				}
-			}
-
-			// No usable client root. A launch-directory (normal) baseline returns to its
-			// own project rather than a now-stale one; a fallback baseline reverts to init-required.
-			if (this.startupHasProject) {
-				await this.upgradeToProject(this.initialProjectRoot, options);
-			} else if (this.upgraded) {
-				await this.downgradeToFallback(options);
-			}
-
-			const checkedRoots =
-				checkedPaths.size > 0
-					? Array.from(checkedPaths)
-							.map((path) => `\`${path}\``)
-							.join(", ")
-					: "no usable file roots";
-			this.log(`No valid backlog project found in MCP roots: ${checkedRoots}`, options);
+			const checkedPaths = await this.upgradeFromRoots(roots, options);
+			if (checkedPaths === null) return;
+			await this.restoreRootFallback(options);
+			this.log(`No valid backlog project found in MCP roots: ${this.formatCheckedRoots(checkedPaths)}`, options);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.log(`Roots discovery failed: ${message}`, options);
 		}
+	}
+
+	private async upgradeFromRoots(
+		roots: Array<{ uri: string }>,
+		options?: { debug?: boolean },
+	): Promise<Set<string> | null> {
+		const checkedPaths = new Set<string>();
+		for (const root of roots) {
+			const rootPath = await this.resolveRootSearchPath(root.uri);
+			if (!rootPath) continue;
+			checkedPaths.add(rootPath);
+			if (resolveBacklogDirectory(rootPath).configPath && (await this.upgradeToProject(rootPath, options))) return null;
+		}
+		return checkedPaths;
+	}
+
+	private async restoreRootFallback(options?: { debug?: boolean }): Promise<void> {
+		if (this.startupHasProject) {
+			await this.upgradeToProject(this.initialProjectRoot, options);
+			return;
+		}
+		if (this.upgraded) await this.downgradeToFallback(options);
+	}
+
+	private formatCheckedRoots(checkedPaths: Set<string>): string {
+		return checkedPaths.size ? [...checkedPaths].map((path) => `\`${path}\``).join(", ") : "no usable file roots";
 	}
 
 	private async resolveRootSearchPath(rootUri: string): Promise<string | null> {
@@ -334,13 +338,6 @@ export class McpServer extends Core {
 	 */
 	public addResource(resource: McpResourceHandler): void {
 		this.resources.set(resource.uri, resource);
-	}
-
-	/**
-	 * Register a prompt implementation with the server.
-	 */
-	public addPrompt(prompt: McpPromptHandler): void {
-		this.prompts.set(prompt.name, prompt);
 	}
 
 	/**

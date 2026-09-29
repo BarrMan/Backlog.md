@@ -154,5 +154,3 @@ export const DependencyGraphSection: React.FC<{ graph: DependencyGraph }> = ({ g
     </div>
   );
 };
-
-export default DependencyGraphSection;

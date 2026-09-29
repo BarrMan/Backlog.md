@@ -11,6 +11,7 @@ import { collectAvailableLabels } from "../../utils/label-filter.ts";
 import { compareTaskIds, compareTaskIdsDescending } from "../../utils/task-sorting.ts";
 import { isTerminalStatus } from "../../utils/terminal-status.ts";
 import { collectArchivedMilestoneKeys, getMilestoneLabel, milestoneKey } from "../utils/milestones";
+import { canonicalizeMilestone, useMilestoneAliasMap } from "../utils/milestone-aliases";
 import { parseStoredUtcDate } from "../utils/date-display";
 import {
 	formatPriorityLabel,
@@ -18,11 +19,10 @@ import {
 	getPriorityRank,
 	resolvePriorityValue,
 } from "../../utils/priority-config.ts";
-import CleanupModal from "./CleanupModal";
 import StoredDate from "./StoredDate";
 import AcceptanceCriteriaProgress from "./AcceptanceCriteriaProgress";
 import LabelFilterDropdown from "./LabelFilterDropdown";
-import { SuccessToast } from "./SuccessToast";
+import { CleanupSuccess, useCleanupSuccess } from "./CleanupSuccess";
 
 interface TaskListProps {
 	onEditTask: (task: Task) => void;
@@ -152,8 +152,7 @@ const TaskList: React.FC<TaskListProps> = ({
 	const [labelFilter, setLabelFilter] = useState<string[]>(initialLabelParams);
 	const [displayTasks, setDisplayTasks] = useState<Task[]>(() => sortTasksByIdDescending(tasks));
 	const [error, setError] = useState<string | null>(null);
-	const [showCleanupModal, setShowCleanupModal] = useState(false);
-	const [cleanupSuccessMessage, setCleanupSuccessMessage] = useState<string | null>(null);
+	const cleanup = useCleanupSuccess(onRefreshData);
 	const [sortColumn, setSortColumn] = useState<TaskSortColumn>("id");
 	const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 	const priorityOptions = useMemo(
@@ -164,138 +163,11 @@ const TaskList: React.FC<TaskListProps> = ({
 	const tableBodyScrollRef = useRef<HTMLDivElement | null>(null);
 	const isSyncingTableScrollRef = useRef(false);
 	const isFilteringTerminalStatus = statusFilter.some((status) => isTerminalStatus(status, statusOptions));
-	const milestoneAliasToCanonical = useMemo(() => {
-		const aliasMap = new Map<string, string>();
-		const collectIdAliasKeys = (value: string): string[] => {
-			const normalized = value.trim();
-			const normalizedKey = normalized.toLowerCase();
-			if (!normalizedKey) return [];
-			const keys = new Set<string>([normalizedKey]);
-			if (/^\d+$/.test(normalized)) {
-				const numericAlias = String(Number.parseInt(normalized, 10));
-				keys.add(numericAlias);
-				keys.add(`m-${numericAlias}`);
-				return Array.from(keys);
-			}
-			const idMatch = normalized.match(/^m-(\d+)$/i);
-			if (idMatch?.[1]) {
-				const numericAlias = String(Number.parseInt(idMatch[1], 10));
-				keys.add(`m-${numericAlias}`);
-				keys.add(numericAlias);
-			}
-			return Array.from(keys);
-		};
-		const reservedIdKeys = new Set<string>();
-		for (const milestone of [...(milestoneEntities ?? []), ...(archivedMilestones ?? [])]) {
-			for (const key of collectIdAliasKeys(milestone.id)) {
-				reservedIdKeys.add(key);
-			}
-		}
-		const setAlias = (aliasKey: string, id: string, allowOverwrite: boolean) => {
-			const existing = aliasMap.get(aliasKey);
-			if (!existing) {
-				aliasMap.set(aliasKey, id);
-				return;
-			}
-			if (!allowOverwrite) {
-				return;
-			}
-			const existingKey = existing.toLowerCase();
-			const nextKey = id.toLowerCase();
-			const preferredRawId = /^\d+$/.test(aliasKey) ? `m-${aliasKey}` : /^m-\d+$/.test(aliasKey) ? aliasKey : null;
-			if (preferredRawId) {
-				const existingIsPreferred = existingKey === preferredRawId;
-				const nextIsPreferred = nextKey === preferredRawId;
-				if (existingIsPreferred && !nextIsPreferred) {
-					return;
-				}
-				if (nextIsPreferred && !existingIsPreferred) {
-					aliasMap.set(aliasKey, id);
-				}
-				return;
-			}
-			aliasMap.set(aliasKey, id);
-		};
-		const addIdAliases = (id: string, allowOverwrite = true) => {
-			const idKey = id.toLowerCase();
-			setAlias(idKey, id, allowOverwrite);
-			const idMatch = id.match(/^m-(\d+)$/i);
-			if (!idMatch?.[1]) return;
-			const numericAlias = String(Number.parseInt(idMatch[1], 10));
-			const canonicalId = `m-${numericAlias}`;
-			setAlias(canonicalId, id, allowOverwrite);
-			setAlias(numericAlias, id, allowOverwrite);
-		};
-		const activeTitleCounts = new Map<string, number>();
-		for (const milestone of milestoneEntities ?? []) {
-			const title = milestone.title.trim();
-			if (!title) continue;
-			const titleKey = title.toLowerCase();
-			activeTitleCounts.set(titleKey, (activeTitleCounts.get(titleKey) ?? 0) + 1);
-		};
-		const activeTitleKeys = new Set(activeTitleCounts.keys());
-		for (const milestone of milestoneEntities ?? []) {
-			const id = milestone.id.trim();
-			const title = milestone.title.trim();
-			if (!id) continue;
-			addIdAliases(id, true);
-			if (title && !reservedIdKeys.has(title.toLowerCase()) && activeTitleCounts.get(title.toLowerCase()) === 1) {
-				const titleKey = title.toLowerCase();
-				if (!aliasMap.has(titleKey)) {
-					aliasMap.set(titleKey, id);
-				}
-			}
-		}
-		const archivedTitleCounts = new Map<string, number>();
-		for (const milestone of archivedMilestones ?? []) {
-			const title = milestone.title.trim();
-			if (!title) continue;
-			const titleKey = title.toLowerCase();
-			if (activeTitleKeys.has(titleKey)) continue;
-			archivedTitleCounts.set(titleKey, (archivedTitleCounts.get(titleKey) ?? 0) + 1);
-		}
-		for (const milestone of archivedMilestones ?? []) {
-			const id = milestone.id.trim();
-			const title = milestone.title.trim();
-			if (!id) continue;
-			addIdAliases(id, false);
-			const titleKey = title.toLowerCase();
-			if (
-				title &&
-				!activeTitleKeys.has(titleKey) &&
-				!reservedIdKeys.has(titleKey) &&
-				archivedTitleCounts.get(titleKey) === 1
-			) {
-				if (!aliasMap.has(titleKey)) {
-					aliasMap.set(titleKey, id);
-				}
-			}
-		}
-		return aliasMap;
-	}, [milestoneEntities, archivedMilestones]);
+	const milestoneAliasToCanonical = useMilestoneAliasMap(milestoneEntities, archivedMilestones);
 	const archivedMilestoneKeys = useMemo(
 		() => new Set(collectArchivedMilestoneKeys(archivedMilestones, milestoneEntities).map((value) => milestoneKey(value))),
 		[archivedMilestones, milestoneEntities],
 	);
-	const canonicalizeMilestone = (value?: string | null): string => {
-		const normalized = (value ?? "").trim();
-		if (!normalized) return "";
-		const key = normalized.toLowerCase();
-		const direct = milestoneAliasToCanonical.get(key);
-		if (direct) {
-			return direct;
-		}
-		const idMatch = normalized.match(/^m-(\d+)$/i);
-		if (idMatch?.[1]) {
-			const numericAlias = String(Number.parseInt(idMatch[1], 10));
-			return milestoneAliasToCanonical.get(`m-${numericAlias}`) ?? milestoneAliasToCanonical.get(numericAlias) ?? normalized;
-		}
-		if (/^\d+$/.test(normalized)) {
-			const numericAlias = String(Number.parseInt(normalized, 10));
-			return milestoneAliasToCanonical.get(`m-${numericAlias}`) ?? milestoneAliasToCanonical.get(numericAlias) ?? normalized;
-		}
-		return normalized;
-	};
 
 	const sortedBaseTasks = useMemo(() => sortTasksByIdDescending(tasks), [tasks]);
 	const mergedAvailableLabels = useMemo(
@@ -374,10 +246,10 @@ const TaskList: React.FC<TaskListProps> = ({
 
 	useEffect(() => {
 		const filterByMilestone = (list: Task[]): Task[] => {
-			const normalized = canonicalizeMilestone(milestoneFilter);
+			const normalized = canonicalizeMilestone(milestoneFilter, milestoneAliasToCanonical);
 			if (!normalized) return list;
 			return list.filter((task) => {
-				const canonicalTaskMilestone = canonicalizeMilestone(task.milestone);
+				const canonicalTaskMilestone = canonicalizeMilestone(task.milestone, milestoneAliasToCanonical);
 				const taskKey = milestoneKey(canonicalTaskMilestone);
 				const normalizedTaskMilestone = taskKey && archivedMilestoneKeys.has(taskKey) ? "" : canonicalTaskMilestone;
 				if (normalized === "__none") {
@@ -516,21 +388,6 @@ const TaskList: React.FC<TaskListProps> = ({
 		syncUrl([], [], "", [], "");
 		setDisplayTasks(sortedBaseTasks);
 		setError(null);
-	};
-
-	const handleCleanupSuccess = async (movedCount: number) => {
-		setShowCleanupModal(false);
-		setCleanupSuccessMessage(`Successfully moved ${movedCount} task${movedCount !== 1 ? 's' : ''} to completed folder`);
-
-		// Refresh the data - existing effects will handle re-filtering automatically
-		if (onRefreshData) {
-			await onRefreshData();
-		}
-
-		// Auto-dismiss success message after 4 seconds
-		setTimeout(() => {
-			setCleanupSuccessMessage(null);
-		}, 4000);
 	};
 
 	const getStatusColor = (status: string) => {
@@ -784,7 +641,7 @@ const TaskList: React.FC<TaskListProps> = ({
 						{isFilteringTerminalStatus && currentCount > 0 && (
 								<button
 									type="button"
-									onClick={() => setShowCleanupModal(true)}
+									onClick={cleanup.openCleanup}
 									className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 flex items-center gap-2 whitespace-nowrap"
 									title="Clean up old completed tasks"
 								>
@@ -987,26 +844,14 @@ const TaskList: React.FC<TaskListProps> = ({
 				</div>
 			)}
 
-			{/* Cleanup Modal */}
-			<CleanupModal
-				isOpen={showCleanupModal}
-				onClose={() => setShowCleanupModal(false)}
-				onSuccess={handleCleanupSuccess}
+			<CleanupSuccess
+				isOpen={cleanup.isCleanupOpen}
+				onClose={cleanup.closeCleanup}
+				onSuccess={cleanup.handleCleanupSuccess}
+				message={cleanup.message}
+				onDismiss={cleanup.dismissMessage}
 				dateFormat={dateFormat}
 			/>
-
-			{/* Cleanup Success Toast */}
-			{cleanupSuccessMessage && (
-				<SuccessToast
-					message={cleanupSuccessMessage}
-					onDismiss={() => setCleanupSuccessMessage(null)}
-					icon={
-						<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-						</svg>
-					}
-				/>
-			)}
 		</div>
 	);
 };

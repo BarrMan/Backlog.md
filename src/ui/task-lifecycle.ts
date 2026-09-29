@@ -1,3 +1,4 @@
+import type { ScreenInterface } from "neo-neo-bblessed";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
 import type { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
@@ -20,6 +21,24 @@ export function formatTaskArchivedMessage(taskId: string, cleanedTaskIds: readon
 
 export function formatTaskCompletionBlockedMessage(taskId: string, terminalStatus: string): string {
 	return `Task ${taskId} is not ${terminalStatus}. Set status to "${terminalStatus}" before completing it.`;
+}
+
+export type TaskLifecycleAction = "complete" | "archive";
+
+export async function confirmTaskLifecycleAction(
+	screen: ScreenInterface,
+	task: Task,
+	action: TaskLifecycleAction,
+	confirm: (options: { screen: ScreenInterface; title: string; message: string }) => Promise<boolean>,
+): Promise<boolean> {
+	return confirm({
+		screen,
+		title: action === "complete" ? "Move to Completed" : "Archive Task",
+		message:
+			action === "complete"
+				? `Move {bold}${task.id}{/bold} to completed?\nRemoves from board; keeps record\nand dependency links.`
+				: `Archive {bold}${task.id}{/bold}?\nCanceled, duplicate, or invalid work.\nRemoves incoming task links.`,
+	});
 }
 
 export async function completeTaskFromTui(core: Core, task: Task): Promise<CompleteTaskFromTuiResult> {

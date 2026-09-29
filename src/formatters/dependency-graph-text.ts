@@ -25,7 +25,7 @@ const UNRESOLVED_LABELS: Record<Exclude<DependencyGraphNode["state"], "resolved"
  * in the completed corpus while its status string predates the current configuration. Unresolved
  * identities say so instead of borrowing a title they do not have.
  */
-export function formatDependencyNodeLabel(node: DependencyGraphNode): string {
+function formatDependencyNodeLabel(node: DependencyGraphNode): string {
 	if (node.state !== "resolved") {
 		return `${node.id} - ${UNRESOLVED_LABELS[node.state]}`;
 	}

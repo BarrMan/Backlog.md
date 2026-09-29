@@ -6,6 +6,7 @@ import type { Task } from "../types/index.ts";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
 import { ThemeProvider } from "../web/contexts/ThemeContext";
 import { apiClient } from "../web/lib/api.ts";
+import { BROWSER_SHORTCUTS } from "../web/lib/keyboard-shortcuts.ts";
 
 let activeRoot: Root | null = null;
 let activeDom: JSDOM | null = null;
@@ -256,6 +257,63 @@ describe("Web task popup keyboard shortcuts", () => {
 			activeRoot = null;
 			activeDom?.window.close();
 			activeDom = null;
+		}
+	});
+
+	it("uses the mutable edit shortcut configuration for its control hint and handler", async () => {
+		const originalKeys = BROWSER_SHORTCUTS.startTaskEdit.keys;
+		const originalLabel = BROWSER_SHORTCUTS.startTaskEdit.label;
+		BROWSER_SHORTCUTS.startTaskEdit.keys = ["r"];
+		BROWSER_SHORTCUTS.startTaskEdit.label = "R";
+		try {
+			const container = await mountModal();
+			const editButton = findButton(container, "Edit");
+			expect(editButton?.getAttribute("title")).toBe("Edit (R)");
+			expect(editButton?.getAttribute("aria-keyshortcuts")).toBe("r");
+
+			const dialog = container.querySelector("[role='dialog']");
+			expect(dialog).toBeTruthy();
+			expect((await press(dialog as Element, "e")).defaultPrevented).toBe(false);
+			expect((await press(dialog as Element, "r")).defaultPrevented).toBe(true);
+			expect(findButton(container, "Save")).toBeTruthy();
+		} finally {
+			BROWSER_SHORTCUTS.startTaskEdit.keys = originalKeys;
+			BROWSER_SHORTCUTS.startTaskEdit.label = originalLabel;
+		}
+	});
+
+	it("does not roll back a replacement task when an earlier metadata request fails", async () => {
+		const originalUpdateTask = apiClient.updateTask.bind(apiClient);
+		let rejectUpdate: ((reason?: unknown) => void) | undefined;
+		apiClient.updateTask = () => new Promise<Task>((_, reject) => {
+			rejectUpdate = reject;
+		});
+		try {
+			const container = await mountModal();
+			const title = Array.from(container.querySelectorAll("input")).find((input) => input.value === task.title);
+			expect(title).toBeTruthy();
+			await act(async () => {
+				const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+				setValue?.call(title, "Optimistic title");
+				(title as HTMLInputElement).focus();
+				title?.dispatchEvent(new window.Event("input", { bubbles: true }));
+				(title as HTMLInputElement).blur();
+				await Promise.resolve();
+			});
+			await waitFor(() => Boolean(rejectUpdate));
+			const replacement = { ...task, id: "BACK-559", title: "Replacement task" };
+			await act(async () => {
+				activeRoot?.render(<ThemeProvider><TaskDetailsModal task={replacement} isOpen onClose={() => {}} /></ThemeProvider>);
+				await Promise.resolve();
+			});
+			await act(async () => {
+				rejectUpdate?.(new Error("Request failed"));
+				await Promise.resolve();
+			});
+			expect(Array.from(container.querySelectorAll("input")).some((input) => input.value === replacement.title)).toBe(true);
+			expect(container.textContent).not.toContain("Request failed");
+		} finally {
+			apiClient.updateTask = originalUpdateTask;
 		}
 	});
 

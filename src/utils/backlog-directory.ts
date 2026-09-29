@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES } from "../constants/index.ts";
+import { parseColonConfigLine } from "./config-line.ts";
 
 export type BacklogDirectorySource = "backlog" | ".backlog" | "custom";
 export type BacklogConfigSource = "folder" | "root";
@@ -42,19 +43,10 @@ function parseBacklogConfigMetadata(content: string): BacklogConfigMetadata {
 	let backlogDirectory: string | null = null;
 
 	for (const rawLine of content.split(/\r?\n/)) {
-		const line = rawLine.trim();
-		if (!line || line.startsWith("#")) {
-			continue;
-		}
-		const colonIndex = line.indexOf(":");
-		if (colonIndex === -1) {
-			continue;
-		}
-		const key = line.slice(0, colonIndex).trim();
-		const value = line
-			.slice(colonIndex + 1)
-			.trim()
-			.replace(/^['"]|['"]$/g, "");
+		const parsed = parseColonConfigLine(rawLine);
+		if (!parsed) continue;
+		const { key } = parsed;
+		const value = parsed.value.replace(/^['"]|['"]$/g, "");
 		if ((key === "project_name" || key === "projectName") && value) {
 			projectName = value;
 			continue;

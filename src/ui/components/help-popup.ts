@@ -1,4 +1,5 @@
 import type { ScreenInterface } from "neo-neo-bblessed";
+import { formatKeymap, keymapKeys } from "../keymap.ts";
 import { createPopupChrome, createScrollableViewport } from "./filter-popup.ts";
 
 export type HelpPopupContext = "board" | "task-list";
@@ -8,49 +9,53 @@ type Shortcut = {
 	desc: string;
 };
 
-// Letters are uppercase key indicators, matching the footer: `T` means "press the T key",
-// not Shift+T. The bound key is the lowercase letter.
 const BOARD_SHORTCUTS: Shortcut[] = [
-	{ key: "Tab", desc: "Switch View (Kanban/List)" },
-	{ key: "Shift+B", desc: "Open Workspace" },
-	{ key: "N", desc: "Create a task" },
-	{ key: "/", desc: "Search tasks" },
-	{ key: "T", desc: "Filter by Type" },
-	{ key: "V", desc: "Filter by Project" },
-	{ key: "P", desc: "Filter by Priority" },
-	{ key: "I", desc: "Filter by Milestone" },
-	{ key: "F", desc: "Filter by Labels" },
-	{ key: "←→", desc: "Navigate columns" },
-	{ key: "↑↓", desc: "Navigate tasks" },
-	{ key: "Enter", desc: "View task details" },
-	{ key: "E", desc: "Edit task" },
-	{ key: "M", desc: "Move tasks (Shift+M selects more in move mode)" },
-	{ key: "C", desc: "Complete task" },
-	{ key: "A", desc: "Archive task" },
-	{ key: "Y", desc: "Yank (Copy) task ID" },
-	{ key: "H", desc: "Hide/show empty columns" },
-	{ key: "?", desc: "Show this help menu" },
-	{ key: "q/Esc", desc: "Quit / Close" },
+	{ key: formatKeymap("shared", "tab"), desc: "Switch View (Kanban/List)" },
+	{ key: formatKeymap("board", "workspace"), desc: "Open Workspace" },
+	{ key: formatKeymap("board", "create"), desc: "Create a task" },
+	{ key: formatKeymap("board", "search"), desc: "Search tasks" },
+	{ key: formatKeymap("board", "filterType"), desc: "Filter by Type" },
+	{ key: formatKeymap("board", "filterProject"), desc: "Filter by Project" },
+	{ key: formatKeymap("board", "filterPriority"), desc: "Filter by Priority" },
+	{ key: formatKeymap("board", "filterMilestone"), desc: "Filter by Milestone" },
+	{ key: formatKeymap("board", "filterLabels"), desc: "Filter by Labels" },
+	{ key: `${formatKeymap("board", "navPrevious")}${formatKeymap("board", "navNext")}`, desc: "Navigate columns" },
+	{ key: `${formatKeymap("board", "navUp")}${formatKeymap("board", "navDown")}`, desc: "Navigate tasks" },
+	{ key: formatKeymap("board", "open"), desc: "View task details" },
+	{ key: formatKeymap("board", "edit"), desc: "Edit task" },
+	{
+		key: formatKeymap("board", "move"),
+		desc: `Move tasks (${formatKeymap("board", "recruit")} selects more in move mode)`,
+	},
+	{ key: formatKeymap("board", "complete"), desc: "Complete task" },
+	{ key: formatKeymap("board", "archive"), desc: "Archive task" },
+	{ key: formatKeymap("board", "copy"), desc: "Yank (Copy) task ID" },
+	{ key: formatKeymap("board", "toggleHideEmpty"), desc: "Hide/show empty columns" },
+	{ key: formatKeymap("shared", "help"), desc: "Show this help menu" },
+	{ key: formatKeymap("shared", "quit"), desc: "Quit / Close" },
 ];
 
 const TASK_LIST_SHORTCUTS: Shortcut[] = [
-	{ key: "Tab", desc: "Switch View (Kanban/List)" },
-	{ key: "/", desc: "Search tasks" },
-	{ key: "S", desc: "Filter by Status" },
-	{ key: "T", desc: "Filter by Type" },
-	{ key: "V", desc: "Filter by Project" },
-	{ key: "P", desc: "Filter by Priority" },
-	{ key: "I", desc: "Filter by Milestone" },
-	{ key: "L", desc: "Filter by Labels" },
-	{ key: "↑↓", desc: "Navigate tasks" },
-	{ key: "←→", desc: "Switch between list and details" },
-	{ key: "Enter", desc: "Focus task details" },
-	{ key: "E", desc: "Edit task" },
-	{ key: "C", desc: "Complete task" },
-	{ key: "A", desc: "Archive task" },
-	{ key: "Y", desc: "Yank (Copy) task ID" },
-	{ key: "?", desc: "Show this help menu" },
-	{ key: "q/Esc", desc: "Quit / Close" },
+	{ key: formatKeymap("shared", "tab"), desc: "Switch View (Kanban/List)" },
+	{ key: formatKeymap("shared", "search"), desc: "Search tasks" },
+	{ key: formatKeymap("taskList", "filterStatus"), desc: "Filter by Status" },
+	{ key: formatKeymap("taskList", "filterType"), desc: "Filter by Type" },
+	{ key: formatKeymap("taskList", "filterProject"), desc: "Filter by Project" },
+	{ key: formatKeymap("taskList", "filterPriority"), desc: "Filter by Priority" },
+	{ key: formatKeymap("taskList", "filterMilestone"), desc: "Filter by Milestone" },
+	{ key: formatKeymap("taskList", "filterLabels"), desc: "Filter by Labels" },
+	{ key: `${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}`, desc: "Navigate tasks" },
+	{
+		key: `${formatKeymap("taskList", "focusList")}/${formatKeymap("taskList", "focusDetail")}`,
+		desc: "Switch between list and details",
+	},
+	{ key: formatKeymap("list", "select"), desc: "Focus task details" },
+	{ key: formatKeymap("taskList", "edit"), desc: "Edit task" },
+	{ key: formatKeymap("taskList", "complete"), desc: "Complete task" },
+	{ key: formatKeymap("taskList", "archive"), desc: "Archive task" },
+	{ key: formatKeymap("taskList", "copy"), desc: "Yank (Copy) task ID" },
+	{ key: formatKeymap("shared", "help"), desc: "Show this help menu" },
+	{ key: formatKeymap("shared", "quit"), desc: "Quit / Close" },
 ];
 
 export function getHelpShortcuts(
@@ -58,7 +63,8 @@ export function getHelpShortcuts(
 	options: { hasProjects?: boolean } = {},
 ): Shortcut[] {
 	const shortcuts = context === "task-list" ? TASK_LIST_SHORTCUTS : BOARD_SHORTCUTS;
-	return options.hasProjects ? shortcuts : shortcuts.filter((shortcut) => shortcut.key !== "V");
+	const projectKey = formatKeymap(context === "task-list" ? "taskList" : "board", "filterProject");
+	return options.hasProjects ? shortcuts : shortcuts.filter((shortcut) => shortcut.key !== projectKey);
 }
 
 /** Popup rows spent on borders, the top spacer and the help line, leaving one row per shortcut. */
@@ -66,12 +72,15 @@ const HELP_POPUP_CHROME_ROWS = 4;
 const HELP_POPUP_WIDTH = 60;
 
 function getHelpText(scrolls: boolean): string {
-	return scrolls ? " {cyan-fg}[↑↓]{/} Scroll | {cyan-fg}[Esc/q]{/} Close Help" : " {cyan-fg}[Esc/q]{/} Close Help";
+	const close = formatKeymap("shared", "cancel");
+	return scrolls
+		? ` {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}]{/} Scroll | {cyan-fg}[${close}]{/} Close Help`
+		: ` {cyan-fg}[${close}]{/} Close Help`;
 }
 
 export function getHelpPopupHeight(shortcutCount: number, screenHeight: number): number {
 	const boundedScreenHeight = Math.max(1, screenHeight);
-	const preferredHeight = Math.max(5, Math.min(shortcutCount + HELP_POPUP_CHROME_ROWS, boundedScreenHeight - 2));
+	const preferredHeight = Math.max(5, Math.min(shortcutCount + HELP_POPUP_CHROME_ROWS, boundedScreenHeight - 1));
 	return Math.min(boundedScreenHeight, preferredHeight);
 }
 
@@ -137,7 +146,7 @@ export async function openHelpPopup(
 			resolve();
 		};
 
-		popup.key(["escape", "q", "Q", "?"], () => {
+		popup.key(keymapKeys("shared", "dismissHelp"), () => {
 			finish();
 			return false;
 		});
@@ -148,8 +157,8 @@ export async function openHelpPopup(
 			screen.render();
 			return false;
 		};
-		popup.key(["up"], () => scrollBy(-1));
-		popup.key(["down"], () => scrollBy(1));
+		popup.key(keymapKeys("shared", "up"), () => scrollBy(-1));
+		popup.key(keymapKeys("shared", "down"), () => scrollBy(1));
 		screen.on("resize", onResize);
 
 		setImmediate(() => {

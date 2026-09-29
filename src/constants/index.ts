@@ -43,22 +43,20 @@ export const DEFAULT_FILES = {
 /**
  * Default task statuses
  */
-export const DEFAULT_STATUSES = ["To Do", "In Progress", "Done"] as const;
+const DEFAULT_TODO_STATUS = "To Do";
+export const DEFAULT_IN_PROGRESS_STATUS = "In Progress";
+export const DEFAULT_DONE_STATUS = "Done";
+export const DEFAULT_STATUSES = [DEFAULT_TODO_STATUS, DEFAULT_IN_PROGRESS_STATUS, DEFAULT_DONE_STATUS] as const;
 
 /**
  * Fallback status when no default is configured
  */
-export const FALLBACK_STATUS = "To Do";
+export const FALLBACK_STATUS = DEFAULT_TODO_STATUS;
 
 /**
  * Default task types, used when no `types` are configured
  */
 export const DEFAULT_TASK_TYPES = ["bug", "feature", "enhancement", "task", "chore", "docs", "spike"] as const;
-
-/**
- * Maximum width for wrapped text lines in UI components
- */
-export const WRAP_LIMIT = 72;
 
 /**
  * Default values for advanced configuration options used during project initialization.
@@ -76,5 +74,28 @@ export const DEFAULT_INIT_CONFIG = {
 	defaultPort: 6420,
 	autoOpenBrowser: true,
 } as const;
+
+/** Values written by a newly initialized project. */
+export const DEFAULT_FRESH_INIT_POLICY = {
+	dateFormat: "yyyy-mm-dd",
+	maxColumnWidth: 20,
+	taskResolutionStrategy: "most_recent",
+} as const;
+
+/**
+ * Defaults added while migrating legacy config files. These intentionally differ
+ * from fresh-init values to preserve the established migration behavior.
+ */
+export const DEFAULT_MIGRATION_CONFIG = {
+	projectName: "Untitled Project",
+	defaultEditor: "",
+	defaultStatus: "",
+	labels: [] as readonly string[],
+	dateFormat: "YYYY-MM-DD",
+	maxColumnWidth: 80,
+} as const;
+
+/** Runtime fallback retained for config files that omit a resolution strategy. */
+export const DEFAULT_RUNTIME_TASK_RESOLUTION_STRATEGY = "most_progressed";
 
 export * from "../guidelines/index.ts";

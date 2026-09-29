@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 const CLI_PATH = getTestCliPath();
@@ -60,7 +60,7 @@ describe("CLI task projects", () => {
 			await $`bun ${CLI_PATH} task edit TASK-1 --title "Still projected"`.cwd(TEST_DIR).quiet();
 			expect((await core.filesystem.loadTask("TASK-1"))?.project).toBe("Web");
 
-			const cleared = await $`bun ${CLI_PATH} task edit TASK-1 --project "" --plain`.cwd(TEST_DIR).quiet();
+			const cleared = await runTestCli(["task", "edit", "TASK-1", "--project", "", "--plain"], { cwd: TEST_DIR });
 			expect(cleared.stdout.toString()).not.toContain("Project:");
 			expect((await core.filesystem.loadTask("TASK-1"))?.project).toBeUndefined();
 		});

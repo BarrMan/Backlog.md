@@ -7,6 +7,7 @@ import type { BoxInterface, ScreenInterface, TextboxInterface } from "neo-neo-bb
 import { box, textbox } from "neo-neo-bblessed";
 import { formatLabelSummary } from "../../utils/label-filter.ts";
 import { NO_MILESTONE_FILTER_LABEL, NO_MILESTONE_FILTER_VALUE } from "../../utils/milestone-filter.ts";
+import { keymapKeys } from "../keymap.ts";
 
 export type FilterControlId = "search" | "status" | "type" | "project" | "priority" | "labels" | "milestone";
 
@@ -187,13 +188,6 @@ export class FilterHeader {
 	}
 
 	/**
-	 * Get current filter state
-	 */
-	getFilters(): FilterState {
-		return { ...this.state };
-	}
-
-	/**
 	 * Update filter state externally
 	 */
 	setFilters(filters: Partial<FilterState>): void {
@@ -286,10 +280,6 @@ export class FilterHeader {
 		style.border = { ...(style.border ?? {}), fg: color };
 	}
 
-	getContainer(): BoxInterface {
-		return this.container;
-	}
-
 	getCurrentFocus(): FilterControlId | null {
 		return this.currentFocus;
 	}
@@ -317,12 +307,6 @@ export class FilterHeader {
 	destroy(): void {
 		this.destroyElements();
 		this.container.destroy();
-	}
-
-	setLabels(labels: string[]): void {
-		this.state.labels = labels;
-		this.updateLabelsButton();
-		this.emitFilterChange();
 	}
 
 	private requestExit(direction: "up" | "down" | "escape"): void {
@@ -501,7 +485,7 @@ export class FilterHeader {
 			}
 		});
 
-		this.searchInput.key(["left"], () => {
+		this.searchInput.key(keymapKeys("shared", "previous"), () => {
 			this.commitSearchValue();
 			this.searchInput?.cancel();
 			this.suppressNextHorizontalCycle();
@@ -509,7 +493,7 @@ export class FilterHeader {
 			return false;
 		});
 
-		this.searchInput.key(["right"], () => {
+		this.searchInput.key(keymapKeys("shared", "next"), () => {
 			const value = String(this.searchInput?.getValue?.() ?? this.state.search);
 			const behavior = resolveSearchHorizontalNavigation(
 				this.getSearchTextWidth(value),
@@ -526,21 +510,21 @@ export class FilterHeader {
 			return true;
 		});
 
-		this.searchInput.key(["down"], () => {
+		this.searchInput.key(keymapKeys("shared", "down"), () => {
 			this.commitSearchValue();
 			this.searchInput?.cancel();
 			this.requestExit("down");
 			return false;
 		});
 
-		this.searchInput.key(["up"], () => {
+		this.searchInput.key(keymapKeys("shared", "up"), () => {
 			this.commitSearchValue();
 			this.searchInput?.cancel();
 			this.requestExit("up");
 			return false;
 		});
 
-		this.searchInput.key(["escape"], () => {
+		this.searchInput.key(keymapKeys("shared", "escape"), () => {
 			this.searchInput?.cancel();
 			this.requestExit("escape");
 			return false;
@@ -603,12 +587,12 @@ export class FilterHeader {
 			style.bold = false;
 		});
 
-		button.key(["enter", "space"], () => {
+		button.key(keymapKeys("shared", "activate"), () => {
 			this.options.onFilterPickerOpen(field);
 			return false;
 		});
 
-		button.key(["right"], () => {
+		button.key(keymapKeys("shared", "next"), () => {
 			if (this.suppressHorizontalCycle) {
 				return false;
 			}
@@ -616,7 +600,7 @@ export class FilterHeader {
 			return false;
 		});
 
-		button.key(["left"], () => {
+		button.key(keymapKeys("shared", "previous"), () => {
 			if (this.suppressHorizontalCycle) {
 				return false;
 			}
@@ -624,12 +608,12 @@ export class FilterHeader {
 			return false;
 		});
 
-		button.key(["escape"], () => {
+		button.key(keymapKeys("shared", "escape"), () => {
 			this.requestExit("escape");
 			return false;
 		});
 
-		button.key(["down"], () => {
+		button.key(keymapKeys("shared", "down"), () => {
 			this.requestExit("down");
 			return false;
 		});

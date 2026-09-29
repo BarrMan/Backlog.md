@@ -1,5 +1,6 @@
 import type { ScreenInterface } from "neo-neo-bblessed";
 import { box } from "neo-neo-bblessed";
+import { formatKeymap, keymapKeys } from "../keymap.ts";
 import { createPopupChrome } from "./filter-popup.ts";
 
 export async function openConfirmPopup(options: {
@@ -14,7 +15,7 @@ export async function openConfirmPopup(options: {
 		const { popup, close } = createPopupChrome({
 			screen: options.screen,
 			title: options.title,
-			helpText: " {cyan-fg}[Enter/y]{/} Yes | {cyan-fg}[Esc/n]{/} No",
+			helpText: ` {cyan-fg}[${formatKeymap("shared", "confirm")}]{/} Yes | {cyan-fg}[${formatKeymap("shared", "decline")}]{/} No`,
 			width: 40,
 			height: 10,
 		});
@@ -39,12 +40,12 @@ export async function openConfirmPopup(options: {
 			resolve(value);
 		};
 
-		popup.key(["escape", "n", "N"], () => {
+		popup.key(keymapKeys("shared", "decline"), () => {
 			finish(false);
 			return false;
 		});
 
-		popup.key(["enter", "y", "Y"], () => {
+		popup.key(keymapKeys("shared", "confirm"), () => {
 			finish(true);
 			return false;
 		});

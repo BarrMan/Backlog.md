@@ -108,7 +108,7 @@ function logicalBranchTaskPath(path: string, id: string): string {
 	return `${canonicalTaskId(id).toLowerCase()}${filename.slice(separatorIndex)}`;
 }
 
-export async function findCrossBranchDuplicateTaskIds(
+async function findCrossBranchDuplicateTaskIds(
 	core: Core,
 	snapshot?: TaskCorpusSnapshot,
 ): Promise<CrossBranchDuplicateFinding[]> {

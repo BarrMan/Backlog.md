@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 const CLI_PATH = getTestCliPath();
@@ -42,7 +42,7 @@ describe("CLI task types", () => {
 		await $`bun ${CLI_PATH} task edit TASK-1 --title "Still typed"`.cwd(TEST_DIR).quiet();
 		expect((await core.filesystem.loadTask("TASK-1"))?.type).toBe("Bug");
 
-		const cleared = await $`bun ${CLI_PATH} task edit TASK-1 --type "" --plain`.cwd(TEST_DIR).quiet();
+		const cleared = await runTestCli(["task", "edit", "TASK-1", "--type", "", "--plain"], { cwd: TEST_DIR });
 		expect(cleared.stdout.toString()).not.toContain("Type:");
 		expect((await core.filesystem.loadTask("TASK-1"))?.type).toBeUndefined();
 	});
