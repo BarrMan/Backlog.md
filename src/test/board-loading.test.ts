@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { BacklogConfig, Task } from "../types/index.ts";
@@ -67,20 +67,10 @@ describe("Board Loading with checkActiveBranches", () => {
 			};
 			await core.filesystem.saveConfig(updatedConfig);
 
-			// Track progress messages
-			const progressMessages: string[] = [];
-			const tasks = await core.loadTasks((msg) => {
-				progressMessages.push(msg);
-			});
+			const tasks = await core.loadTasks();
 
 			// Verify we got tasks
 			expect(tasks).toHaveLength(3);
-
-			// Verify we didn't apply cross-branch state snapshots
-			const applySnapshotsMessage = progressMessages.find((msg) =>
-				msg.includes("Applying latest task states from branch scans..."),
-			);
-			expect(applySnapshotsMessage).toBeUndefined();
 		});
 
 		it("should perform cross-branch checking when checkActiveBranches is true", async () => {
@@ -102,12 +92,6 @@ describe("Board Loading with checkActiveBranches", () => {
 
 			// Verify we got tasks
 			expect(tasks).toHaveLength(3);
-
-			// Verify we applied cross-branch state snapshots
-			const applySnapshotsMessage = progressMessages.find((msg) =>
-				msg.includes("Applying latest task states from branch scans..."),
-			);
-			expect(applySnapshotsMessage).toBeDefined();
 		});
 
 		it("should respect activeBranchDays configuration", async () => {
@@ -136,30 +120,12 @@ describe("Board Loading with checkActiveBranches", () => {
 			};
 			await core.filesystem.saveConfig(updatedConfig);
 
-			// Track progress messages
-			const progressMessages: string[] = [];
-			const tasks = await core.loadTasks((msg) => {
-				progressMessages.push(msg);
-			});
+			const tasks = await core.loadTasks();
 
 			// The task-4 from old branch should not be included if branch checking is working
 			// However, since we're in main branch, we should only see the 3 main tasks
 			expect(tasks).toHaveLength(3);
 			expect(tasks.find((t) => t.id === "TASK-4")).toBeUndefined();
-
-			// Check that branch checking happened with the right days
-			const anyBranchMessage = progressMessages.find((msg) => msg.includes("branch"));
-			expect(anyBranchMessage).toBeDefined();
-		});
-
-		it("should handle cancellation via AbortSignal", async () => {
-			const controller = new AbortController();
-
-			// Cancel immediately
-			controller.abort();
-
-			// Should throw an error
-			await expect(core.loadTasks(undefined, controller.signal)).rejects.toThrow("Loading cancelled");
 		});
 
 		it("should handle empty task list gracefully", async () => {
@@ -168,25 +134,6 @@ describe("Board Loading with checkActiveBranches", () => {
 
 			const tasks = await core.loadTasks();
 			expect(tasks).toEqual([]);
-		});
-
-		it("should pass progress callbacks correctly", async () => {
-			const progressMessages: string[] = [];
-			const progressCallback = mock((msg: string) => {
-				progressMessages.push(msg);
-			});
-
-			await core.loadTasks(progressCallback);
-
-			// Verify callback was called
-			expect(progressCallback).toHaveBeenCalled();
-			expect(progressMessages.length).toBeGreaterThan(0);
-
-			// Should have some expected messages
-			const hasLoadingMessage = progressMessages.some(
-				(msg) => msg.includes("Loading") || msg.includes("Checking") || msg.includes("Skipping"),
-			);
-			expect(hasLoadingMessage).toBe(true);
 		});
 	});
 
@@ -218,20 +165,11 @@ describe("Board Loading with checkActiveBranches", () => {
 				false,
 			);
 
-			const progressMessages: string[] = [];
-			const tasks = await core.loadTasks((msg) => {
-				progressMessages.push(msg);
-			});
+			const tasks = await core.loadTasks();
 
 			// Should still work with defaults
 			expect(tasks).toBeDefined();
 			expect(tasks.length).toBeGreaterThanOrEqual(0);
-
-			// When checkActiveBranches is undefined, it defaults to true, so should perform checking
-			const applySnapshotsMessage = progressMessages.find((msg) =>
-				msg.includes("Applying latest task states from branch scans..."),
-			);
-			expect(applySnapshotsMessage).toBeDefined();
 		});
 
 		it("should handle config with checkActiveBranches explicitly set to false", async () => {

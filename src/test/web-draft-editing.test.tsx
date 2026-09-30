@@ -47,9 +47,9 @@ function setupDom(): HTMLElement {
 	return dom.window.document.getElementById("root") as unknown as HTMLElement;
 }
 
-function serveJson(body: () => unknown): void {
-	globalThis.fetch = (async () =>
-		new Response(JSON.stringify(body()), {
+function serveJson(body: (url: string) => unknown): void {
+	globalThis.fetch = (async (input: RequestInfo | URL) =>
+		new Response(JSON.stringify(body(String(input))), {
 			status: 200,
 			headers: { "Content-Type": "application/json" },
 		})) as unknown as typeof globalThis.fetch;
@@ -57,11 +57,15 @@ function serveJson(body: () => unknown): void {
 
 /** Serves /api/drafts from a mutable list so a reload can observe a saved edit. */
 function serveDrafts(current: () => Task[]): void {
-	serveJson(current);
+	serveJson((url) => (url === "/api/status" ? { initialized: true, projectScope: "test-project-scope" } : current()));
 }
 
 function serveStatuses(): void {
-	serveJson(() => ["To Do", "In Progress", "Done"]);
+	serveJson((url) =>
+		url === "/api/status"
+			? { initialized: true, projectScope: "test-project-scope" }
+			: ["To Do", "In Progress", "Done"],
+	);
 }
 
 async function renderDrafts(onEditTask: (task: Task) => void): Promise<HTMLElement> {

@@ -315,7 +315,7 @@ describe("Web board batch move", () => {
 
 			await act(async () => {
 				findButton(container, "Move").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-				await Promise.resolve();
+				await new Promise((resolve) => setTimeout(resolve, 10));
 			});
 
 			expect(calls).toEqual([{ taskIds: ["TASK-1", "TASK-3"], targetStatus: "Done" }]);
@@ -337,6 +337,7 @@ describe("Web board batch move", () => {
 			const container = renderBoard();
 			await clickCard(getCard(container, "TASK-1"), { ctrlKey: true });
 			await clickCard(getCard(container, "TASK-2"), { ctrlKey: true });
+			expect(container.textContent).toContain("2 selected");
 
 			await act(async () => {
 				dispatchDrop(getColumn(container, "In Progress"), { "text/plain": "TASK-1", "text/status": "To Do" });
@@ -649,10 +650,18 @@ describe("Web board batch move", () => {
 			await clickCard(getCard(container, "TASK-2"), { ctrlKey: true });
 
 			await act(async () => {
-				dispatchDrop(getColumn(container, "Done"), { "text/plain": "TASK-1", "text/status": "To Do" });
+				const select = container.querySelector("#batch-move-status") as HTMLSelectElement;
+				select.value = "Done";
+				select.dispatchEvent(new window.Event("change", { bubbles: true }));
 				await Promise.resolve();
 			});
+			expect(findButton(container, "Move").disabled).toBe(false);
+			await act(async () => {
+				findButton(container, "Move").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			});
 
+			await act(async () => await Promise.resolve());
 			expect(updates).toHaveLength(1);
 			expect(updates[0]?.tasks).toEqual(moved);
 			// The board matches the request task by identity, so it has to be the rendered object.

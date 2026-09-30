@@ -106,11 +106,8 @@ describe("Task comments", () => {
 		const memoryMatches = createTaskSearchIndex([loaded as Task]).search({ query: "needle-comment" });
 		expect(memoryMatches.map((task) => task.id)).toEqual(["TASK-1"]);
 
-		const searchService = await core.getSearchService();
-		const sharedMatches = searchService.search({ query: "needle-comment", types: ["task"] });
+		const sharedMatches = await core.searchPersistently({ query: "needle-comment", types: ["task"] });
 		expect(sharedMatches.map((result) => (result.type === "task" ? result.task.id : ""))).toContain("TASK-1");
-		core.disposeSearchService();
-		core.disposeContentStore();
 	});
 
 	it("keeps appended comments before final summary when notes are absent", async () => {

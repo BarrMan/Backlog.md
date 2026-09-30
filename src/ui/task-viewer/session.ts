@@ -1,5 +1,6 @@
-import type { TaskCorpus } from "../../core/task-detail.ts";
-import type { Task } from "../../types/index.ts";
+import { ProjectTaskGraph } from "../../core/project-task-graph.ts";
+import type { TaskCorpus, TaskDetail, TaskListItem } from "../../core/task-detail.ts";
+import type { BacklogConfig, Task } from "../../types/index.ts";
 import type { MilestoneFilterValueResolver } from "../../utils/milestone-filter.ts";
 import { createTaskSearchIndex } from "../../utils/task-search.ts";
 import { filterTaskViewerTasks, type TaskViewerFilterModel } from "./filters.ts";
@@ -8,63 +9,85 @@ import { replaceTaskByIdentity } from "./interactions.ts";
 /** Owns task-viewer corpus, filtering, selection generations, and pane lifetimes. */
 export class TaskViewerSession {
 	selected: Task;
-	filteredTasks: Task[] = [];
+	filteredTasks: TaskListItem[] = [];
+	private tasks: TaskListItem[];
+	private graph: ProjectTaskGraph;
 	private searchIndex: ReturnType<typeof createTaskSearchIndex>;
 	private selectionRequestId = 0;
 
 	constructor(
-		private tasks: Task[],
-		private filters: TaskViewerFilterModel,
+		tasks: Task[],
+		filters: TaskViewerFilterModel,
 		initialTask: Task,
 		private readonly resolveMilestoneLabel: MilestoneFilterValueResolver,
-		private readonly resolveDependencyCorpus: () => TaskCorpus,
+		private readonly resolveDependencyCorpus: (activeTasks: Task[]) => TaskCorpus,
 		private readonly readyFilter = false,
 	) {
 		this.selected = initialTask;
-		this.searchIndex = createTaskSearchIndex(tasks);
-		this.applyFilters();
+		this.graph = this.prepareGraph(tasks);
+		this.tasks = this.preparedTasks(tasks);
+		this.searchIndex = createTaskSearchIndex(this.tasks);
+		this.applyFilters(filters);
 	}
 
-	updateTasks(tasks: Task[]): void {
-		this.tasks = tasks;
-		this.searchIndex = createTaskSearchIndex(tasks);
-		this.applyFilters();
+	updateTasks(tasks: Task[], filters: TaskViewerFilterModel): void {
+		this.graph = this.prepareGraph(tasks);
+		this.tasks = this.preparedTasks(tasks);
+		this.searchIndex = createTaskSearchIndex(this.tasks);
+		this.applyFilters(filters);
 	}
 
 	getTasks(): Task[] {
 		return this.tasks;
 	}
 
-	replaceTask(task: Task): boolean {
+	getTaskDetail(task: Task): TaskDetail {
+		return this.graph.getTaskDetail(task);
+	}
+
+	replaceTask(task: Task, filters: TaskViewerFilterModel): boolean {
 		const replaced = replaceTaskByIdentity(this.tasks, task);
-		if (replaced) this.applyFilters();
+		if (replaced) this.updateTasks(this.tasks, filters);
 		return replaced;
 	}
 
-	removeTask(taskId: string): boolean {
+	removeTask(taskId: string, filters: TaskViewerFilterModel): boolean {
 		const nextTasks = this.tasks.filter((task) => task.id !== taskId);
 		if (nextTasks.length === this.tasks.length) return false;
-		this.updateTasks(nextTasks);
+		this.updateTasks(nextTasks, filters);
 		return true;
 	}
 
 	updateFilters(filters: TaskViewerFilterModel): void {
-		this.filters = filters;
-		this.applyFilters();
+		this.applyFilters(filters);
 	}
 
-	private applyFilters(): void {
+	private applyFilters(filters: TaskViewerFilterModel): void {
 		const filteredTasks = filterTaskViewerTasks(
 			this.tasks,
-			this.filters,
+			filters,
 			this.searchIndex,
 			this.resolveMilestoneLabel,
-			this.readyFilter ? this.resolveDependencyCorpus() : undefined,
+			this.readyFilter,
 		);
 		this.filteredTasks.splice(0, this.filteredTasks.length, ...filteredTasks);
 		if (this.filteredTasks.length > 0 && !this.filteredTasks.some((task) => task.id === this.selected.id)) {
 			this.selected = this.filteredTasks[0] as Task;
 		}
+	}
+
+	private prepareGraph(tasks: Task[]): ProjectTaskGraph {
+		const corpus = this.resolveDependencyCorpus(tasks);
+		return new ProjectTaskGraph({
+			tasks: corpus.tasks,
+			activeTasks: tasks,
+			completedTasks: corpus.completedTasks,
+			config: corpus.statuses ? ({ statuses: corpus.statuses } as BacklogConfig) : null,
+		});
+	}
+
+	private preparedTasks(tasks: Task[]): TaskListItem[] {
+		return tasks.map((task) => this.graph.getTaskListItem(task));
 	}
 
 	select(task: Task): boolean {

@@ -119,11 +119,10 @@ describe("malformed checklist edits preserve task bytes", () => {
 		await mkdir(testDir, { recursive: true });
 		core = new Core(testDir);
 		await initializeFilesystemTestProject(core, "Malformed checklist marks");
-		taskPath = join(core.fs.tasksDir, "task-1 - Mixed-checklist.md");
+		taskPath = join(core.filesystem.tasksDir, "task-1 - Mixed-checklist.md");
 	});
 
 	afterEach(async () => {
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 
@@ -183,7 +182,7 @@ describe("malformed checklist edits preserve task bytes", () => {
 	}
 
 	it("browser AC replacement and DoD indexed payloads reject malformed rows", async () => {
-		const fixture = createServerFixture(testDir);
+		const fixture = await createServerFixture(testDir);
 		try {
 			for (const family of families) {
 				const original = taskMarkdown(checklist(family, mixedRows));
@@ -224,10 +223,10 @@ describe("malformed checklist edits preserve task bytes", () => {
 	it("reads and unrelated metadata edits still accept mixed and all-invalid checklists", async () => {
 		for (const rows of [mixedRows, "- [~] alpha"]) {
 			await Bun.write(taskPath, taskMarkdown(checklist(families[0], rows)));
-			expect(await core.fs.loadTask("TASK-1")).not.toBeNull();
+			expect(await core.filesystem.loadTask("TASK-1")).not.toBeNull();
 			await core.updateTaskFromInput("TASK-1", { addLabels: ["review"] }, false);
 			expect(await Bun.file(taskPath).text()).toContain(rows);
-			expect((await core.fs.loadTask("TASK-1"))?.labels).toEqual(["review"]);
+			expect((await core.filesystem.loadTask("TASK-1"))?.labels).toEqual(["review"]);
 		}
 	});
 });

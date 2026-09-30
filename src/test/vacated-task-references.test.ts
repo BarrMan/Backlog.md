@@ -286,7 +286,7 @@ describe("references to a vacated task ID", () => {
 		expect(await core.filesystem.listDrafts()).toHaveLength(1);
 	});
 
-	it("serves the cleaned records from the content store as soon as the archive returns", async () => {
+	it("reads cleaned records from persistent storage as soon as the archive returns", async () => {
 		const { task: activeDependent } = await core.createTaskFromInput({ title: "Active dependent" });
 		const { task: completedDependent } = await core.createTaskFromInput({ title: "Completed dependent" });
 		const { task: target } = await core.createTaskFromInput({ title: "Archive target" });
@@ -294,21 +294,23 @@ describe("references to a vacated task ID", () => {
 		await core.updateTaskFromInput(completedDependent.id, { dependencies: [target.id] }, false);
 		expect(await core.completeTask(completedDependent.id, false)).toBe(true);
 
-		const store = await core.getContentStore();
-		expect(store.getTasks().find((task) => taskIdsEqual(task.id, activeDependent.id))?.dependencies).toEqual([
-			target.id,
-		]);
+		expect(
+			(await core.loadTaskSnapshot()).activeTasks.find((task) => taskIdsEqual(task.id, activeDependent.id))
+				?.dependencies,
+		).toEqual([target.id]);
 
 		expect((await core.archiveTask(target.id, false)).success).toBe(true);
 
-		// A reader served from the store must not still see the reference the archive removed.
-		expect(store.getTasks().find((task) => taskIdsEqual(task.id, activeDependent.id))?.dependencies ?? []).toEqual([]);
-		const snapshot = store.getTaskCorpusSnapshot();
+		// A new persistent read must not still see the reference the archive removed.
+		const snapshot = await core.loadTaskSnapshot();
+		expect(snapshot.activeTasks.find((task) => taskIdsEqual(task.id, activeDependent.id))?.dependencies ?? []).toEqual(
+			[],
+		);
 		expect(snapshot.completedTasks.find((task) => taskIdsEqual(task.id, completedDependent.id))?.dependencies).toEqual(
 			[],
 		);
-		// Rewriting the completed file must not republish it as an active task.
-		expect(store.getTasks().some((task) => taskIdsEqual(task.id, completedDependent.id))).toBe(false);
+		// Rewriting the completed file must not make it an active task.
+		expect(snapshot.activeTasks.some((task) => taskIdsEqual(task.id, completedDependent.id))).toBe(false);
 	});
 
 	it("removes the vacated ID from the demoted record's own references", async () => {
@@ -371,15 +373,11 @@ describe("references to a vacated task ID", () => {
 			serializeTask({ ...completedDependent, id: "TASK-02", title: "Active duplicate", dependencies: [] }),
 		);
 
-		// The store was initialized before that file existed, so give it the corpus that holds both
-		// claimants rather than asserting against a snapshot that never saw the conflict.
-		const store = await core.getContentStore();
-		await store.refreshTasks();
-		expect(store.getTaskCorpusSnapshot().activeTasks.some((task) => task.filePath === duplicatePath)).toBe(true);
+		expect((await core.loadTaskSnapshot()).activeTasks.some((task) => task.filePath === duplicatePath)).toBe(true);
 
 		expect((await core.archiveTask(target.id, false)).success).toBe(true);
 
-		const snapshot = store.getTaskCorpusSnapshot();
+		const snapshot = await core.loadTaskSnapshot();
 		expect(
 			snapshot.activeTasks.filter((task) => taskIdsEqual(task.id, completedDependent.id)).map((t) => t.filePath),
 		).toEqual([duplicatePath]);

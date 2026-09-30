@@ -287,11 +287,10 @@ function completeConfig(config: Partial<BacklogConfig>): BacklogConfig {
 function parseDefinitionOfDone(content: string): string[] | undefined {
 	const yaml = configKeyYaml(content, "definition_of_done");
 	const escaped = yaml ? escapeLegacyDefinitionOfDoneBackslashes(yaml) : undefined;
-	return (
-		(escaped ? parseDefinitionOfDoneFromYaml(escaped) : undefined) ??
-		parseDefinitionOfDoneFromYaml(content) ??
-		(yaml ? parseDefinitionOfDoneFromYaml(yaml) : undefined)
-	);
+	const legacy = escaped ? parseDefinitionOfDoneFromYaml(escaped) : undefined;
+	const parsed = parseDefinitionOfDoneFromYaml(content) ?? (yaml ? parseDefinitionOfDoneFromYaml(yaml) : undefined);
+	// JSON serialization represents multiline values as \n; legacy configs use bare backslashes literally.
+	return parsed?.some((item) => item.includes("\n")) ? parsed : (legacy ?? parsed);
 }
 
 export function parseConfig(content: string, configPath: string): BacklogConfig {

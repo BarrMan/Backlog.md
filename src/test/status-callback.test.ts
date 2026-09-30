@@ -130,7 +130,7 @@ onStatusChange: 'echo "$TASK_ID:$OLD_STATUS->$NEW_STATUS" > "${callbackOutputPat
 			});
 
 			// Invalidate config cache to ensure fresh read
-			core.fs.invalidateConfigCache();
+			core.filesystem.invalidateConfigCache();
 
 			// Update status
 			await core.updateTaskFromInput(task.id, { status: "In Progress" });
@@ -279,7 +279,7 @@ onStatusChange: 'echo "$TASK_ID:$OLD_STATUS->$NEW_STATUS" >> "${callbackOutputPa
 			});
 
 			// Invalidate config cache
-			core.fs.invalidateConfigCache();
+			core.filesystem.invalidateConfigCache();
 
 			// Reorder task to "In Progress" column (simulating board drag)
 			await core.reorderTask({

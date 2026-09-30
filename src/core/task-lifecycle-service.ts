@@ -12,7 +12,7 @@ import { validateDependencies } from "../utils/task-builders.ts";
 import { withoutVacatedTaskLinks } from "../utils/task-links.ts";
 import { extractDraftIdFromFilename, getTaskPath, normalizeTaskId } from "../utils/task-path.ts";
 import { getTerminalStatus, isTerminalStatus } from "../utils/terminal-status.ts";
-import type { ProjectSession, VacatedTaskResult } from "./backlog.ts";
+import type { VacatedTaskResult } from "./backlog.ts";
 import type { ProjectTaskMutations } from "./task-mutation-service.ts";
 import type { TaskReadOptions } from "./task-query-workflow.ts";
 import { markVacatedTaskMoved, type VacatedTaskReferenceService } from "./vacated-task-reference-service.ts";
@@ -36,7 +36,6 @@ export class TaskLifecycleService {
 	constructor(
 		private readonly filesystem: FileSystem,
 		private readonly git: GitOperations,
-		private readonly session: ProjectSession,
 		private readonly mutations: ProjectTaskMutations,
 		private readonly vacatedTaskReferences: VacatedTaskReferenceService,
 	) {}
@@ -82,7 +81,6 @@ export class TaskLifecycleService {
 			});
 
 			const savedTask = await this.filesystem.loadTask(promotedTask.id);
-			if (savedTask) this.session.publishActiveTask(savedTask);
 			if (await this.mutations.shouldAutoCommit(autoCommit)) {
 				await this.mutations.commitWrittenFile(
 					`backlog: Promote draft ${normalizeId(reference.canonicalId, "draft")}`,
@@ -178,7 +176,6 @@ export class TaskLifecycleService {
 			} catch {
 				return { success: false, cleanedTaskIds: [] };
 			}
-			this.session.publishTaskTransition(current.id);
 			try {
 				const { cleanedTaskIds, filePaths } = await this.vacatedTaskReferences.write(cleanup);
 				if (await this.mutations.shouldAutoCommit(autoCommit)) {
@@ -217,8 +214,7 @@ export class TaskLifecycleService {
 					normalizeAssignee(promotedTask);
 					const savedPath = await this.filesystem.saveTask(promotedTask);
 					await unlink(sourcePath);
-					const savedTask = await this.filesystem.loadTask(promotedTask.id);
-					if (savedTask) this.session.publishActiveTask(savedTask);
+					await this.filesystem.loadTask(promotedTask.id);
 					return { previousPath: sourcePath, savedPath };
 				});
 			} catch (error) {
@@ -255,7 +251,6 @@ export class TaskLifecycleService {
 				demotion.success = success;
 				demotion.moved = movedPaths[0];
 				if (success) {
-					this.session.publishTaskTransition(task.id);
 					try {
 						const written = await this.vacatedTaskReferences.write(cleanup);
 						demotion.cleanedTaskIds = written.cleanedTaskIds;
@@ -300,7 +295,6 @@ export class TaskLifecycleService {
 		} catch {
 			return false;
 		}
-		this.session.publishTaskTransition(task.id, { ...task, filePath: targetPath, source: "completed" });
 		if (await this.mutations.shouldAutoCommit(autoCommit)) {
 			const repoRoot = await this.git.stageFileMove(taskPath, targetPath);
 			await this.git.commitFiles(`backlog: Complete task ${task.id}`, [taskPath, targetPath], repoRoot);

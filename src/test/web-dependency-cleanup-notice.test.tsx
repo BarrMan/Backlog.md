@@ -97,7 +97,7 @@ class FakeResizeObserver {
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
 const staticResponses = new Map<string, unknown>([
-	["/api/status", { initialized: true, projectPath: "/tmp/project" }],
+	["/api/status", { initialized: true, projectPath: "/tmp/project", projectScope: "test-project-scope" }],
 	["/api/statuses", defaultConfig.statuses],
 	["/api/config", defaultConfig],
 	["/api/milestones", []],
@@ -134,6 +134,18 @@ const respondToArchive = (url: URL, init?: RequestInit): Response | null => {
 const respond = async (url: URL, init?: RequestInit): Promise<Response> => {
 	const staticResponse = staticResponses.get(url.pathname);
 	if (staticResponse) return json(staticResponse);
+	if (url.pathname === "/api/tasks") {
+		return json(
+			tasks.map((task) => ({
+				...task,
+				acceptanceCriteriaCount: task.acceptanceCriteriaItems?.length ?? 0,
+				checkedAcceptanceCriteriaCount: task.acceptanceCriteriaItems?.filter((item) => item.checked).length ?? 0,
+				definitionOfDoneCount: task.definitionOfDoneItems?.length ?? 0,
+				checkedDefinitionOfDoneCount: task.definitionOfDoneItems?.filter((item) => item.checked).length ?? 0,
+				isReady: true,
+			})),
+		);
+	}
 	const searchResponse = await respondToSearch(url);
 	if (searchResponse) return searchResponse;
 	if (url.pathname === "/api/tasks/duplicates") return json(emptyDuplicatePlan());

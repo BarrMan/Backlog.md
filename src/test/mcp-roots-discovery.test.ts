@@ -5,13 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { $ } from "bun";
-import { registerWorkflowResources } from "../mcp/resources/workflow/index.ts";
 import { createMcpServer, McpServer } from "../mcp/server.ts";
-import { registerDefinitionOfDoneTools } from "../mcp/tools/definition-of-done/index.ts";
-import { registerDocumentTools } from "../mcp/tools/documents/index.ts";
-import { registerMilestoneTools } from "../mcp/tools/milestones/index.ts";
-import { registerTaskTools } from "../mcp/tools/tasks/index.ts";
-import { registerWorkflowTools } from "../mcp/tools/workflow/index.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -100,43 +94,6 @@ describe("MCP roots discovery", () => {
 
 		const tools = await server.testInterface.listTools();
 		expect(tools.tools).toEqual([]);
-
-		await server.stop();
-	});
-
-	it("reinitializeProjectRoot switches Core to a different project", async () => {
-		const { uninitializedDir, projectRoot } = await setupDirs();
-
-		const server = new McpServer(uninitializedDir, "Fallback instructions");
-
-		const configBefore = await server.application.filesystem.loadConfig();
-		expect(configBefore).toBeNull();
-
-		server.application.reinitializeProjectRoot(projectRoot);
-		await server.application.ensureConfigLoaded();
-		const configAfter = await server.application.filesystem.loadConfig();
-		expect(configAfter).toBeTruthy();
-		expect(configAfter?.projectName).toBe("Roots Test Project");
-		if (!configAfter) {
-			throw new Error("Expected config after reinitializing to a valid project");
-		}
-
-		registerWorkflowResources(server);
-		registerWorkflowTools(server);
-		registerTaskTools(server, configAfter);
-		registerMilestoneTools(server);
-		registerDefinitionOfDoneTools(server);
-		registerDocumentTools(server, configAfter);
-
-		const tools = await server.testInterface.listTools();
-		const toolNames = tools.tools.map((tool) => tool.name);
-		expect(toolNames).toContain("task_create");
-		expect(toolNames).toContain("task_list");
-		expect(toolNames).toContain("get_backlog_instructions");
-
-		const resources = await server.testInterface.listResources();
-		const uris = resources.resources.map((resource) => resource.uri);
-		expect(uris).toContain("backlog://workflow/overview");
 
 		await server.stop();
 	});

@@ -5,11 +5,14 @@ import { $ } from "bun";
 import { CLI_AGENT_NUDGE, Core } from "../index.ts";
 import { BACKLOG_CWD_ENV } from "../utils/runtime-cwd.ts";
 import { LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+let INIT_FIXTURE_DIR: string;
+let CREATE_FIXTURE_DIR: string;
+let initFixtureDirectoryNumber = 0;
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI Integration", () => {
 	// Every CLI subprocess below inherits this process's environment. A BACKLOG_CWD exported in
@@ -40,10 +43,23 @@ describe("CLI Integration", () => {
 	});
 
 	describe("backlog init command", () => {
-		it("should create all required directories", async () => {
-			// Set up a git repository
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
+		beforeAll(async () => {
+			INIT_FIXTURE_DIR = createUniqueTestDir("test-cli-init");
+			await mkdir(INIT_FIXTURE_DIR, { recursive: true });
+			await $`git init -b main`.cwd(INIT_FIXTURE_DIR).quiet();
+		});
 
+		beforeEach(async () => {
+			await safeCleanup(TEST_DIR);
+			TEST_DIR = join(INIT_FIXTURE_DIR, `${++initFixtureDirectoryNumber}`);
+			await mkdir(TEST_DIR, { recursive: true });
+		});
+
+		afterAll(async () => {
+			await safeCleanup(INIT_FIXTURE_DIR);
+		});
+
+		it("should create all required directories", async () => {
 			const core = new Core(TEST_DIR);
 			await initializeTestProject(core, "Directory Test");
 
@@ -73,9 +89,6 @@ describe("CLI Integration", () => {
 		});
 
 		it("should handle project names with special characters", async () => {
-			// Set up a git repository
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
 			const core = new Core(TEST_DIR);
 			const specialProjectName = "My-Project_2024 (v1.0)";
 			await initializeTestProject(core, specialProjectName);
@@ -85,9 +98,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should allow skipping agent instructions with 'none' selection", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init TestProj --defaults --agent-instructions none`.cwd(TEST_DIR).text();
+			const output = await $`${CLI_COMMAND} init TestProj --defaults --agent-instructions none`.cwd(TEST_DIR).text();
 
 			const agentsFile = await Bun.file(join(TEST_DIR, "AGENTS.md")).exists();
 			const claudeFile = await Bun.file(join(TEST_DIR, "CLAUDE.md")).exists();
@@ -98,11 +109,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should print minimal summary when advanced settings are skipped", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init SummaryProj --defaults --agent-instructions none`
-				.cwd(TEST_DIR)
-				.text();
+			const output = await $`${CLI_COMMAND} init SummaryProj --defaults --agent-instructions none`.cwd(TEST_DIR).text();
 
 			expect(output).toContain("Initialization Summary");
 			expect(output).toContain("Project Name: SummaryProj");
@@ -113,9 +120,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should support MCP integration mode via flag", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init McpProj --defaults --integration-mode mcp`.cwd(TEST_DIR).text();
+			const output = await $`${CLI_COMMAND} init McpProj --defaults --integration-mode mcp`.cwd(TEST_DIR).text();
 
 			expect(output).toContain("AI Integration: MCP connector");
 			expect(output).toContain("Agent instruction files: guidance is provided through the MCP connector.");
@@ -128,9 +133,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should default to CLI instructions when no mode is specified", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init DefaultCliProj --defaults`.cwd(TEST_DIR).text();
+			const output = await $`${CLI_COMMAND} init DefaultCliProj --defaults`.cwd(TEST_DIR).text();
 
 			expect(output).toContain("AI Integration: CLI instructions");
 			expect(output).toContain("Agent instructions: AGENTS.md");
@@ -144,16 +147,15 @@ describe("CLI Integration", () => {
 		});
 
 		it("maps Cursor to AGENTS.md while preserving existing instructions and user Cursor rules", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
 			await Bun.write(join(TEST_DIR, "AGENTS.md"), "Existing team instructions\n");
 			await mkdir(join(TEST_DIR, ".cursor", "rules"), { recursive: true });
 			const userRulePath = join(TEST_DIR, ".cursor", "rules", "team-owned.mdc");
 			await Bun.write(userRulePath, "User-managed Cursor rule\n");
 
-			const firstOutput = await $`bun ${CLI_PATH} init CursorProj --defaults --agent-instructions cursor`
+			const firstOutput = await $`${CLI_COMMAND} init CursorProj --defaults --agent-instructions cursor`
 				.cwd(TEST_DIR)
 				.text();
-			const secondOutput = await $`bun ${CLI_PATH} init CursorProj --defaults --agent-instructions cursor`
+			const secondOutput = await $`${CLI_COMMAND} init CursorProj --defaults --agent-instructions cursor`
 				.cwd(TEST_DIR)
 				.text();
 
@@ -169,9 +171,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("deduplicates Cursor and agents in combined instruction selections", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init CombinedCursor --defaults --agent-instructions cursor,claude,agents`
+			const output = await $`${CLI_COMMAND} init CombinedCursor --defaults --agent-instructions cursor,claude,agents`
 				.cwd(TEST_DIR)
 				.text();
 
@@ -182,24 +182,23 @@ describe("CLI Integration", () => {
 		});
 
 		it("documents the Cursor AGENTS.md target in init help", async () => {
-			const help = await $`bun ${CLI_PATH} init --help`.cwd(TEST_DIR).text();
+			const help = await $`${CLI_COMMAND} init --help`.cwd(TEST_DIR).text();
 
 			expect(help).toContain("cursor (writes AGENTS.md)");
 			expect(help).toContain("cursor writes AGENTS.md");
 		});
 
 		it("documents reserved task prefixes in init help", async () => {
-			const help = await $`bun ${CLI_PATH} init --help`.cwd(TEST_DIR).text();
+			const help = await $`${CLI_COMMAND} init --help`.cwd(TEST_DIR).text();
 
 			expect(help).toContain("--task-prefix");
 			expect(help).toContain("draft, doc, and decision are reserved");
 		});
 
 		it("should label created and updated agent instruction files separately", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
 			await Bun.write(join(TEST_DIR, "AGENTS.md"), "Existing instructions\n");
 
-			const output = await $`bun ${CLI_PATH} init MixedAgentFiles --defaults --agent-instructions agents,claude`
+			const output = await $`${CLI_COMMAND} init MixedAgentFiles --defaults --agent-instructions agents,claude`
 				.cwd(TEST_DIR)
 				.text();
 
@@ -214,9 +213,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should allow skipping AI integration via flag", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init SkipProj --defaults --integration-mode none`.cwd(TEST_DIR).text();
+			const output = await $`${CLI_COMMAND} init SkipProj --defaults --integration-mode none`.cwd(TEST_DIR).text();
 
 			expect(output).not.toContain("AI Integration:");
 			expect(output).toContain("AI integration: skipped");
@@ -227,9 +224,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should support non-interactive .backlog selection via --backlog-dir", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const output = await $`bun ${CLI_PATH} init HiddenProj --defaults --integration-mode none --backlog-dir .backlog`
+			const output = await $`${CLI_COMMAND} init HiddenProj --defaults --integration-mode none --backlog-dir .backlog`
 				.cwd(TEST_DIR)
 				.text();
 
@@ -239,10 +234,8 @@ describe("CLI Integration", () => {
 		});
 
 		it("should store custom non-interactive backlog dir in root backlog.config.yml", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
 			const output =
-				await $`bun ${CLI_PATH} init CustomProj --defaults --integration-mode none --backlog-dir planning/backlog-data`
+				await $`${CLI_COMMAND} init CustomProj --defaults --integration-mode none --backlog-dir planning/backlog-data`
 					.cwd(TEST_DIR)
 					.text();
 
@@ -254,10 +247,8 @@ describe("CLI Integration", () => {
 		});
 
 		it("should reject invalid --backlog-dir values", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
 			const result =
-				await $`bun ${CLI_PATH} init InvalidDirProj --defaults --integration-mode none --backlog-dir ../outside`
+				await $`${CLI_COMMAND} init InvalidDirProj --defaults --integration-mode none --backlog-dir ../outside`
 					.cwd(TEST_DIR)
 					.nothrow();
 			const output = result.stdout.toString() + result.stderr.toString();
@@ -266,11 +257,9 @@ describe("CLI Integration", () => {
 		});
 
 		it("should reject --backlog-dir during re-initialization", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} init ReinitProj --defaults --integration-mode none`.cwd(TEST_DIR).quiet();
 
-			await $`bun ${CLI_PATH} init ReinitProj --defaults --integration-mode none`.cwd(TEST_DIR).quiet();
-
-			const result = await $`bun ${CLI_PATH} init ReinitProj --defaults --integration-mode none --backlog-dir .backlog`
+			const result = await $`${CLI_COMMAND} init ReinitProj --defaults --integration-mode none --backlog-dir .backlog`
 				.cwd(TEST_DIR)
 				.nothrow();
 			const output = result.stdout.toString() + result.stderr.toString();
@@ -279,12 +268,10 @@ describe("CLI Integration", () => {
 		});
 
 		it("should reject MCP integration when agent instruction flags are provided", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
 			let failed = false;
 			let combinedOutput = "";
 			try {
-				await $`bun ${CLI_PATH} init ConflictProj --defaults --integration-mode mcp --agent-instructions claude`
+				await $`${CLI_COMMAND} init ConflictProj --defaults --integration-mode mcp --agent-instructions claude`
 					.cwd(TEST_DIR)
 					.text();
 			} catch (err) {
@@ -298,9 +285,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should ignore 'none' when other agent instructions are provided", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			await $`bun ${CLI_PATH} init TestProj --defaults --agent-instructions agents,none`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} init TestProj --defaults --agent-instructions agents,none`.cwd(TEST_DIR).quiet();
 
 			const agentsFile = await Bun.file(join(TEST_DIR, "AGENTS.md")).exists();
 			expect(agentsFile).toBe(true);
@@ -312,15 +297,13 @@ describe("CLI Integration", () => {
 				const processDir = join(TEST_DIR, "process-dir");
 				await mkdir(pinnedDir, { recursive: true });
 				await mkdir(processDir, { recursive: true });
-				await $`git init -b main`.cwd(pinnedDir).quiet();
-				await $`git init -b main`.cwd(processDir).quiet();
 				return { pinnedDir, processDir };
 			}
 
 			it("initializes the pinned directory and leaves the process directory untouched", async () => {
 				const { pinnedDir, processDir } = await createSiblingRepos();
 
-				const output = await $`bun ${CLI_PATH} init PinnedProj --defaults --agent-instructions agents`
+				const output = await $`${CLI_COMMAND} init PinnedProj --defaults --agent-instructions agents`
 					.cwd(processDir)
 					.env({ ...process.env, [BACKLOG_CWD_ENV]: pinnedDir })
 					.text();
@@ -335,7 +318,7 @@ describe("CLI Integration", () => {
 			it("initializes the process directory when the override is absent", async () => {
 				const { pinnedDir, processDir } = await createSiblingRepos();
 
-				const output = await $`bun ${CLI_PATH} init ProcessProj --defaults --agent-instructions agents`
+				const output = await $`${CLI_COMMAND} init ProcessProj --defaults --agent-instructions agents`
 					.cwd(processDir)
 					.text();
 
@@ -349,7 +332,7 @@ describe("CLI Integration", () => {
 				const { processDir } = await createSiblingRepos();
 				const missingDir = join(TEST_DIR, "missing");
 
-				const result = await $`bun ${CLI_PATH} init MissingProj --defaults --integration-mode none`
+				const result = await $`${CLI_COMMAND} init MissingProj --defaults --integration-mode none`
 					.cwd(processDir)
 					.env({ ...process.env, [BACKLOG_CWD_ENV]: missingDir })
 					.nothrow();
@@ -362,11 +345,9 @@ describe("CLI Integration", () => {
 		});
 
 		it("should error on invalid agent instruction value", async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
 			let failed = false;
 			try {
-				await $`bun ${CLI_PATH} init InvalidProj --defaults --agent-instructions notreal`.cwd(TEST_DIR).quiet();
+				await $`${CLI_COMMAND} init InvalidProj --defaults --agent-instructions notreal`.cwd(TEST_DIR).quiet();
 			} catch (e) {
 				failed = true;
 				const err = e as { stdout?: unknown; stderr?: unknown };
@@ -380,9 +361,7 @@ describe("CLI Integration", () => {
 
 		for (const reservedPrefix of ["draft", "DRAFT", "doc", "Doc", "decision", "DECISION"]) {
 			it(`should reject reserved --task-prefix value ${reservedPrefix}`, async () => {
-				await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-				const result = await $`bun ${CLI_PATH} init ReservedPrefixProj --defaults --task-prefix ${reservedPrefix}`
+				const result = await $`${CLI_COMMAND} init ReservedPrefixProj --defaults --task-prefix ${reservedPrefix}`
 					.cwd(TEST_DIR)
 					.nothrow();
 				const output = result.stdout.toString() + result.stderr.toString();
@@ -396,9 +375,7 @@ describe("CLI Integration", () => {
 		it("should reject a padded --task-prefix instead of persisting the padding", async () => {
 			// init writes --task-prefix into task_prefix verbatim, so accepting " JIRA " produced
 			// a config of task_prefix: " JIRA " and task files named ' jira -jira -1 - Title.md'.
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
-
-			const result = await $`bun ${CLI_PATH} init PaddedPrefixProj --defaults --task-prefix ${" JIRA "}`
+			const result = await $`${CLI_COMMAND} init PaddedPrefixProj --defaults --task-prefix ${" JIRA "}`
 				.cwd(TEST_DIR)
 				.nothrow();
 			const output = result.stdout.toString() + result.stderr.toString();
@@ -419,20 +396,22 @@ describe("CLI Integration", () => {
 			const core = new Core(TEST_DIR);
 			await initializeTestProject(core, "Git Integration Test", true);
 
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			expect(lastCommit).toBe("backlog: Initialize backlog project: Git Integration Test");
 
 			// Verify git status is clean after initialization
-			const isClean = await core.gitOps.isClean();
+			const isClean = await core.git.isClean();
 			expect(isClean).toBe(true);
 		});
 	});
 
 	describe("create commands", () => {
-		beforeEach(async () => {
-			await $`git init -b main`.cwd(TEST_DIR).quiet();
+		beforeAll(async () => {
+			CREATE_FIXTURE_DIR = createUniqueTestDir("test-cli-create");
+			await mkdir(CREATE_FIXTURE_DIR, { recursive: true });
+			await $`git init -b main`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			const core = new Core(TEST_DIR);
+			const core = new Core(CREATE_FIXTURE_DIR);
 			await initializeTestProject(core, "Create Command Test", true);
 
 			const config = await core.filesystem.loadConfig();
@@ -443,16 +422,20 @@ describe("CLI Integration", () => {
 			config.autoCommit = true;
 			await core.filesystem.saveConfig(config);
 			const git = await core.getGitOps();
-			await git.addFile(join(TEST_DIR, "backlog", "config.yml"));
+			await git.addFile(join(CREATE_FIXTURE_DIR, "backlog", "config.yml"));
 			await git.commitChanges("backlog: Enable autoCommit for CLI create tests");
 		});
 
-		it("should honor autoCommit config for task create", async () => {
-			const beforeCount = Number((await $`git rev-list --count HEAD`.cwd(TEST_DIR).text()).trim());
-			const output = await $`bun ${CLI_PATH} task create "CLI Auto Commit Task"`.cwd(TEST_DIR).text();
-			const afterCount = Number((await $`git rev-list --count HEAD`.cwd(TEST_DIR).text()).trim());
+		afterAll(async () => {
+			await safeCleanup(CREATE_FIXTURE_DIR);
+		});
 
-			const core = new Core(TEST_DIR);
+		it("should honor autoCommit config for task create", async () => {
+			const beforeCount = Number((await $`git rev-list --count HEAD`.cwd(CREATE_FIXTURE_DIR).text()).trim());
+			const output = await $`${CLI_COMMAND} task create "CLI Auto Commit Task"`.cwd(CREATE_FIXTURE_DIR).text();
+			const afterCount = Number((await $`git rev-list --count HEAD`.cwd(CREATE_FIXTURE_DIR).text()).trim());
+
+			const core = new Core(CREATE_FIXTURE_DIR);
 			const git = await core.getGitOps();
 			const task = await core.filesystem.loadTask("task-1");
 
@@ -465,11 +448,11 @@ describe("CLI Integration", () => {
 		});
 
 		it("should honor autoCommit config for draft create", async () => {
-			const beforeCount = Number((await $`git rev-list --count HEAD`.cwd(TEST_DIR).text()).trim());
-			const output = await $`bun ${CLI_PATH} draft create "CLI Auto Commit Draft"`.cwd(TEST_DIR).text();
-			const afterCount = Number((await $`git rev-list --count HEAD`.cwd(TEST_DIR).text()).trim());
+			const beforeCount = Number((await $`git rev-list --count HEAD`.cwd(CREATE_FIXTURE_DIR).text()).trim());
+			const output = await $`${CLI_COMMAND} draft create "CLI Auto Commit Draft"`.cwd(CREATE_FIXTURE_DIR).text();
+			const afterCount = Number((await $`git rev-list --count HEAD`.cwd(CREATE_FIXTURE_DIR).text()).trim());
 
-			const core = new Core(TEST_DIR);
+			const core = new Core(CREATE_FIXTURE_DIR);
 			const git = await core.getGitOps();
 			const draft = await core.filesystem.loadDraft("draft-1");
 
@@ -482,78 +465,78 @@ describe("CLI Integration", () => {
 		});
 
 		it("should split comma-separated assignees on task create", async () => {
-			await $`bun ${CLI_PATH} task create "Comma assignee task" -a "@alice,@bob"`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} task create "Comma assignee task" -a "@alice,@bob"`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-2");
 			expect(task?.assignee).toEqual(["@alice", "@bob"]);
 		});
 
 		it("should collect repeated assignee flags on task create", async () => {
-			await $`bun ${CLI_PATH} task create "Repeated assignee task" -a @alice -a @bob,@carol`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} task create "Repeated assignee task" -a @alice -a @bob,@carol`
+				.cwd(CREATE_FIXTURE_DIR)
+				.quiet();
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-3");
 			expect(task?.assignee).toEqual(["@alice", "@bob", "@carol"]);
 		});
 
 		it("should split comma-separated labels on task create", async () => {
-			await $`bun ${CLI_PATH} task create "Comma label task" -l "ui,bug"`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} task create "Comma label task" -l "ui,bug"`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-4");
 			expect(task?.labels).toEqual(["ui", "bug"]);
 		});
 
 		it("should collect repeated label flags on task create", async () => {
-			await $`bun ${CLI_PATH} task create "Repeated label task" -l ui -l bug,api`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} task create "Repeated label task" -l ui -l bug,api`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-5");
 			expect(task?.labels).toEqual(["ui", "bug", "api"]);
 		});
 
 		it("should apply the configured defaultAssignee when task create has no -a", async () => {
-			await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
-			await $`bun ${CLI_PATH} task create "Default assignee task"`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} config set defaultAssignee ${"@alice,@bob"}`.cwd(CREATE_FIXTURE_DIR).quiet();
+			await $`${CLI_COMMAND} task create "Default assignee task"`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-6");
 			expect(task?.assignee).toEqual(["@alice", "@bob"]);
 		});
 
 		it("should let an explicit -a override the configured defaultAssignee on task create", async () => {
-			await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
-			await $`bun ${CLI_PATH} task create "Explicit assignee task" -a @carol`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} task create "Explicit assignee task" -a @carol`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-7");
 			expect(task?.assignee).toEqual(["@carol"]);
 		});
 
 		it("should leave a task unassigned when -a is empty while defaultAssignee is set", async () => {
-			await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
-			await runTestCli(["task", "create", "Explicitly unassigned task", "-a", ""], { cwd: TEST_DIR });
+			await runTestCli(["task", "create", "Explicitly unassigned task", "-a", ""], { cwd: CREATE_FIXTURE_DIR });
 
-			const core = new Core(TEST_DIR);
-			const task = await core.filesystem.loadTask("task-1");
+			const core = new Core(CREATE_FIXTURE_DIR);
+			const task = await core.filesystem.loadTask("task-8");
 			expect(task?.assignee).toEqual([]);
 		});
 
 		// Dependency validation shares the working-copy corpus with every other task lookup, so a
 		// dependency the CLI could never resolve afterwards is refused up front.
 		it("should reject dependencies that exist only on another active branch", async () => {
-			const core = new Core(TEST_DIR);
+			const core = new Core(CREATE_FIXTURE_DIR);
 
-			const remoteDir = join(TEST_DIR, "remote.git");
+			const remoteDir = join(CREATE_FIXTURE_DIR, "remote.git");
 			await $`git init --bare -b main ${remoteDir}`.quiet();
-			await $`git remote add origin ${remoteDir}`.cwd(TEST_DIR).quiet();
-			await $`git push -u origin main`.cwd(TEST_DIR).quiet();
+			await $`git remote add origin ${remoteDir}`.cwd(CREATE_FIXTURE_DIR).quiet();
+			await $`git push -u origin main`.cwd(CREATE_FIXTURE_DIR).quiet();
 
-			await $`git checkout -b feature`.cwd(TEST_DIR).quiet();
+			await $`git checkout -b feature`.cwd(CREATE_FIXTURE_DIR).quiet();
 			await core.createTask(
 				{
-					id: "task-1",
+					id: "task-100",
 					title: "Cross-branch dependency target",
 					status: "To Do",
 					assignee: [],
@@ -564,25 +547,25 @@ describe("CLI Integration", () => {
 				},
 				true,
 			);
-			await $`git push -u origin feature`.cwd(TEST_DIR).quiet();
-			await $`git remote update origin --prune`.cwd(TEST_DIR).quiet();
-			await $`git checkout main`.cwd(TEST_DIR).quiet();
-			await core.gitOps.fetch();
+			await $`git push -u origin feature`.cwd(CREATE_FIXTURE_DIR).quiet();
+			await $`git remote update origin --prune`.cwd(CREATE_FIXTURE_DIR).quiet();
+			await $`git checkout main`.cwd(CREATE_FIXTURE_DIR).quiet();
+			await core.git.fetch();
 
 			const visibleTasks = await core.queryTasks();
-			expect(visibleTasks.some((task) => task.id === "TASK-1")).toBe(true);
-			expect((await core.filesystem.listTasks()).some((task) => task.id === "TASK-1")).toBe(false);
+			expect(visibleTasks.some((task) => task.id === "TASK-100")).toBe(true);
+			expect((await core.filesystem.listTasks()).some((task) => task.id === "TASK-100")).toBe(false);
 
-			const result = await $`bun ${CLI_PATH} task create "Depends on feature task" --depends-on task-1`
-				.cwd(TEST_DIR)
+			const result = await $`${CLI_COMMAND} task create "Depends on feature task" --depends-on task-100`
+				.cwd(CREATE_FIXTURE_DIR)
 				.nothrow()
 				.quiet();
 			const output = `${result.stdout.toString()}${result.stderr.toString()}`;
 
 			expect(result.exitCode).toBe(1);
-			expect(output).toContain("The following dependencies do not exist: task-1");
+			expect(output).toContain("The following dependencies do not exist: task-100");
 			expect(output).toContain(LOCAL_TASK_LOOKUP_HINT);
-			expect(await core.filesystem.loadTask("task-2")).toBeNull();
+			expect(await core.filesystem.loadTask("task-9")).toBeNull();
 		});
 	});
 });

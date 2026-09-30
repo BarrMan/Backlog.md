@@ -1,4 +1,5 @@
-import { Elysia, t } from "elysia";
+import { t } from "elysia";
+import type { Core } from "../../core/backlog.ts";
 import { isAmbiguousIdError } from "../../utils/entity-id.ts";
 import {
 	documentUpdateErrorResponse,
@@ -7,37 +8,57 @@ import {
 	parseDocumentType,
 } from "../transport.ts";
 import { parseDocumentUpdate } from "../validation.ts";
-import type { ResourceDependencies } from "./api.ts";
+import { type ResourceDependencies, scopedResource } from "./api.ts";
+import { documentListItemSchema, documentSchema, errorSchema } from "./schemas.ts";
 
 const params = t.Object({ id: t.String() });
-const documentBody = t.Object(
+const documentCreateBody = t.Object(
 	{
-		content: t.Optional(t.Any()),
-		title: t.Optional(t.Any()),
-		filename: t.Optional(t.Any()),
-		path: t.Optional(t.Any()),
-		type: t.Optional(t.Any()),
-		tags: t.Optional(t.Any()),
+		content: t.Optional(t.String()),
+		title: t.Optional(t.String()),
+		filename: t.Optional(t.String()),
+		path: t.Optional(t.String()),
+		type: t.Optional(
+			t.Union([t.Literal("readme"), t.Literal("guide"), t.Literal("specification"), t.Literal("other")]),
+		),
+		tags: t.Optional(t.Array(t.String())),
 	},
 	{ additionalProperties: true },
 );
+const documentUpdateBody = t.Object(
+	{
+		content: t.String(),
+		title: t.Optional(t.String({ minLength: 1 })),
+		path: t.Optional(t.Union([t.String(), t.Null()])),
+		type: t.Optional(
+			t.Union([t.Literal("readme"), t.Literal("guide"), t.Literal("specification"), t.Literal("other")]),
+		),
+		tags: t.Optional(t.Array(t.String())),
+	},
+	{ additionalProperties: true },
+);
+const documentMutationSchema = t.Object({ success: t.Boolean(), ...documentSchema.properties });
 
-export function documentsResource({ core, services }: ResourceDependencies): Elysia {
-	const app = new Elysia({ name: "documents" });
-	const get = async (id: string) => {
+export function documentsResource({ services }: ResourceDependencies) {
+	const app = scopedResource(services, "documents");
+	const get = async (core: Core, id: string, set: { status?: number | string }) => {
 		try {
 			const value = await core.getDocument(id);
-			return value ? Response.json(value) : Response.json({ error: "Document not found" }, { status: 404 });
+			if (value) return value;
+			set.status = 404;
+			return { error: "Document not found" };
 		} catch (error) {
-			if (isAmbiguousIdError(error)) return Response.json({ error: error.message }, { status: 409 });
+			if (isAmbiguousIdError(error)) throw error;
 			console.error("Error loading document:", error);
-			return Response.json({ error: "Document not found" }, { status: 404 });
+			set.status = 404;
+			return { error: "Document not found" };
 		}
 	};
-	app.get("/api/docs", async () => {
-		try {
-			return Response.json(
-				(await services.store()).getDocuments().map((doc) => ({
+	app.get(
+		"/api/docs",
+		async ({ core, set }) => {
+			try {
+				return (await core.filesystem.listDocuments()).map((doc) => ({
 					name: doc.path?.split(/[\\/]+/).pop() ?? `${doc.title}.md`,
 					id: doc.id,
 					title: doc.title,
@@ -47,20 +68,25 @@ export function documentsResource({ core, services }: ResourceDependencies): Ely
 					updatedDate: doc.updatedDate,
 					lastModified: doc.updatedDate || doc.createdDate,
 					tags: doc.tags || [],
-				})),
-			);
-		} catch (error) {
-			console.error("Error listing documents:", error);
-			return Response.json([]);
-		}
-	});
+				}));
+			} catch (error) {
+				console.error("Error listing documents:", error);
+				set.status = 200;
+				return [];
+			}
+		},
+		{ response: t.Array(documentListItemSchema) },
+	);
 	app.post(
 		"/api/docs",
-		async ({ body }) => {
+		async ({ body, core, set }) => {
 			try {
 				const filename = typeof body.filename === "string" ? body.filename : undefined;
 				const title = typeof body.title === "string" ? body.title : filename?.replace(/\.md$/i, "");
-				if (!title?.trim()) return Response.json({ error: "Document title is required" }, { status: 400 });
+				if (!title?.trim()) {
+					set.status = 400;
+					return { error: "Document title is required" };
+				}
 				const value = await core.createDocumentFromInput({
 					title,
 					content: typeof body.content === "string" ? body.content : "",
@@ -68,29 +94,49 @@ export function documentsResource({ core, services }: ResourceDependencies): Ely
 					path: parseCreateDocumentPath(body.path),
 					tags: parseDocumentTags(body.tags),
 				});
-				return Response.json({ success: true, ...value }, { status: 201 });
+				set.status = 201;
+				return { success: true, ...value };
 			} catch (error) {
 				if (
 					error instanceof Error &&
 					(error.name === "DocumentPayloadValidationError" ||
 						error.message.startsWith("Document type ") ||
 						error.message.startsWith("Document path "))
-				)
-					return Response.json({ error: error.message }, { status: 400 });
+				) {
+					set.status = 400;
+					return { error: error.message };
+				}
 				console.error("Error creating document:", error);
-				return Response.json({ error: "Failed to create document" }, { status: 500 });
+				set.status = 500;
+				return { error: "Failed to create document" };
 			}
 		},
-		{ body: documentBody },
+		{
+			body: documentCreateBody,
+			response: {
+				201: documentMutationSchema,
+				400: errorSchema,
+				500: errorSchema,
+			},
+		},
 	);
-	app.get("/api/doc/:id", ({ params }) => get(params.id), { params });
-	app.get("/api/docs/:id", ({ params }) => get(params.id), { params });
+	app.get("/api/doc/:id", ({ params, core, set }) => get(core, params.id, set), {
+		params,
+		response: { 200: documentSchema, 404: errorSchema, 409: errorSchema },
+	});
+	app.get("/api/docs/:id", ({ params, core, set }) => get(core, params.id, set), {
+		params,
+		response: { 200: documentSchema, 404: errorSchema, 409: errorSchema },
+	});
 	app.put(
 		"/api/docs/:id",
-		async ({ params, body }) => {
+		async ({ params, body, core, set }) => {
 			try {
 				const parsed = parseDocumentUpdate(body);
-				if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+				if ("error" in parsed) {
+					set.status = 400;
+					return { error: parsed.error };
+				}
 				const { content, title, path, type, tags } = parsed.value;
 				const value = await core.updateDocumentFromInput({
 					id: params.id,
@@ -100,12 +146,24 @@ export function documentsResource({ core, services }: ResourceDependencies): Ely
 					...(parseDocumentType(type) !== undefined && { type: parseDocumentType(type) }),
 					...(tags !== undefined && { tags }),
 				});
-				return Response.json({ success: true, ...value });
+				return { success: true, ...value };
 			} catch (error) {
-				return documentUpdateErrorResponse(error);
+				const failure = documentUpdateErrorResponse(error);
+				set.status = failure.status;
+				return failure.body;
 			}
 		},
-		{ params, body: documentBody },
+		{
+			params,
+			body: documentUpdateBody,
+			response: {
+				200: documentMutationSchema,
+				400: errorSchema,
+				404: errorSchema,
+				409: errorSchema,
+				500: errorSchema,
+			},
+		},
 	);
 	return app;
 }

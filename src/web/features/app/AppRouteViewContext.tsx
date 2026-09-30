@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 import { createContext, useContext } from "react";
-import type { Task } from "../../../types";
+import type { Task, TaskSummary } from "../../../types";
 
 type AppRouteView = {
 	showSuccessToast: boolean;
 	onDismissSuccessToast: () => void;
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: TaskSummary | Task) => void;
 	onNewTask: () => void;
 	onEditDraft: (task: Task) => void;
 	onNewDraft: () => void;

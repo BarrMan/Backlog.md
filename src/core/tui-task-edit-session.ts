@@ -13,7 +13,6 @@ import {
 	taskIdsEqual,
 } from "../utils/task-path.ts";
 import { upsertTaskUpdatedDate } from "../utils/task-updated-date.ts";
-import type { ContentStore } from "./content-store.ts";
 
 export interface TuiTaskEditResult {
 	changed: boolean;
@@ -113,9 +112,7 @@ async function prepareTuiTaskEditSession(
 		: failed(localTask, "not_found");
 }
 
-type EditorTransactionDependencies = SessionDependencies & {
-	getContentStore: () => ContentStore | undefined;
-};
+type EditorTransactionDependencies = SessionDependencies;
 
 async function openTuiEditor(filePath: string, screen: BlessedScreen | undefined, fs: FileSystem): Promise<boolean> {
 	const config = await fs.loadConfig();
@@ -211,6 +208,5 @@ export async function editTaskInTuiSession(
 	await Bun.write(filePath, upsertTaskUpdatedDate(afterContent, now));
 	const outcome = await reloadEditedTask(taskFilePath);
 	if ("failure" in outcome) return { changed: false, task: editableTask, reason: outcome.failure };
-	dependencies.getContentStore()?.upsertTask(outcome.task);
 	return { changed: true, task: outcome.task };
 }

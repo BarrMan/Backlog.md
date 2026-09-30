@@ -86,9 +86,9 @@ describe("CLI init without Git", () => {
 	test("local task, draft, document, decision, milestone, and list flows work without Git", async () => {
 		const core = await initFilesystemOnlyProject();
 
-		expect(await core.gitOps.listAllBranches()).toEqual([]);
-		expect(await core.gitOps.listRecentBranches(30)).toEqual([]);
-		expect(await core.gitOps.hasAnyRemote()).toBe(false);
+		expect(await core.git.listAllBranches()).toEqual([]);
+		expect(await core.git.listRecentBranches(30)).toEqual([]);
+		expect(await core.git.hasAnyRemote()).toBe(false);
 
 		const taskResult = await $`bun ${CLI_PATH} task create "No Git Task" --plain`.cwd(TEST_DIR).quiet();
 		expect(taskResult.exitCode).toBe(0);
@@ -124,7 +124,7 @@ describe("CLI init without Git", () => {
 		expect(documents.map((doc) => doc.title)).toContain("No Git Doc");
 		expect(decisions.map((decision) => decision.title)).toContain("No Git Decision");
 		expect(archivedMilestones.map((item) => item.title)).toContain("No Git Milestone");
-		expect(await core.gitOps.getStatus()).toBe("");
+		expect(await core.git.getStatus()).toBe("");
 	});
 
 	test("filesystem-only mode ignores stale Git branches before explicit config loading", async () => {
@@ -144,8 +144,8 @@ describe("CLI init without Git", () => {
 
 		const core = await initFilesystemOnlyProject("Nested No Git Project");
 
-		expect(await core.gitOps.listAllBranches()).toEqual([]);
-		expect(await core.gitOps.listRecentBranches(30)).toEqual([]);
+		expect(await core.git.listAllBranches()).toEqual([]);
+		expect(await core.git.listRecentBranches(30)).toEqual([]);
 
 		const docResult = await $`bun ${CLI_PATH} doc create "Fresh Doc"`.cwd(TEST_DIR).quiet();
 		expect(docResult.exitCode).toBe(0);

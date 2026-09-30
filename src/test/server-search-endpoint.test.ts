@@ -1,16 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
-import type { Core } from "../core/backlog.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Decision, Document, Milestone, Task } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup, withTimeout } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let server: BacklogServer | null = null;
 let filesystem: FileSystem;
 let serverPort = 0;
+let projectScope = "";
+const nativeFetch = globalThis.fetch;
+
+async function awaitNextTasksPublication(change: () => Promise<unknown>): Promise<void> {
+	const socket = new WebSocket(`ws://127.0.0.1:${serverPort}?projectScope=${encodeURIComponent(projectScope)}`);
+	let resolvePublication: () => void = () => {};
+	const publication = new Promise<void>((resolve) => {
+		resolvePublication = resolve;
+	});
+	await withTimeout(
+		new Promise<void>((resolve, reject) => {
+			socket.onopen = () => resolve();
+			socket.onerror = () => reject(new Error("Search test WebSocket failed to open"));
+		}),
+		"search test WebSocket",
+		2000,
+	);
+	socket.onmessage = (event) => {
+		if (String(event.data) === "tasks-updated") resolvePublication();
+	};
+	try {
+		await change();
+		await withTimeout(publication, "search task reconciliation", 5000);
+	} finally {
+		socket.close();
+	}
+}
 
 const baseTask: Task = {
 	id: "TASK-0007",
@@ -105,6 +131,17 @@ describe("BacklogServer search endpoint", () => {
 		expect(port).not.toBeNull();
 		serverPort = port ?? 0;
 		expect(serverPort).toBeGreaterThan(0);
+		projectScope = (
+			(await (await nativeFetch(`http://127.0.0.1:${serverPort}/api/status`)).json()) as { projectScope: string }
+		).projectScope;
+		globalThis.fetch = Object.assign(
+			(input: Parameters<typeof nativeFetch>[0], init?: Parameters<typeof nativeFetch>[1]) => {
+				const request = new Request(input, init);
+				request.headers.set("X-Backlog-Project-Scope", projectScope);
+				return nativeFetch(request);
+			},
+			nativeFetch,
+		);
 
 		await retry(
 			async () => {
@@ -122,6 +159,7 @@ describe("BacklogServer search endpoint", () => {
 			await server.stop();
 			server = null;
 		}
+		globalThis.fetch = nativeFetch;
 		await safeCleanup(TEST_DIR);
 	});
 
@@ -144,52 +182,25 @@ describe("BacklogServer search endpoint", () => {
 		expect(finalTypes.has("decision")).toBe(true);
 	});
 
-	it("refreshes task refs only when the requested result types include tasks", async () => {
-		if (!server) throw new Error("Server not started");
-		const core = (server as unknown as { core: Core }).core;
-		const originalRefreshTasksForTaskRead = core.refreshTasksForTaskRead.bind(core);
-		const originalListRecentBranchTips = core.git.listRecentBranchTips.bind(core.git);
-		let taskRefreshes = 0;
-		let branchSnapshots = 0;
-		core.refreshTasksForTaskRead = async () => {
-			taskRefreshes += 1;
-			return await originalRefreshTasksForTaskRead();
-		};
-		core.git.listRecentBranchTips = async () => {
-			branchSnapshots += 1;
-			return [];
-		};
+	it("limits persistent reads to the requested result types", async () => {
+		const nonTaskResults = await fetchJson<Array<{ type?: string }>>(
+			"/api/search?type=document&type=decision&query=alpha",
+		);
+		expect(new Set(nonTaskResults.map((item) => item.type))).toEqual(new Set(["document", "decision"]));
+		const invalidResponse = await fetch(`http://127.0.0.1:${serverPort}/api/search?type=milestone&query=alpha`);
+		expect(invalidResponse.status).toBe(400);
 
-		try {
-			const nonTaskResults = await fetchJson<Array<{ type?: string }>>(
-				"/api/search?type=document&type=decision&query=alpha",
-			);
-			expect(new Set(nonTaskResults.map((item) => item.type))).toEqual(new Set(["document", "decision"]));
-			expect(taskRefreshes).toBe(0);
-
-			const invalidResponse = await fetch(`http://127.0.0.1:${serverPort}/api/search?type=milestone&query=alpha`);
-			expect(invalidResponse.status).toBe(400);
-			expect(taskRefreshes).toBe(0);
-			expect(branchSnapshots).toBe(0);
-
-			const invalidStatusResponse = await fetch(
-				`http://127.0.0.1:${serverPort}/api/search?type=task&excludeStatus=Blocked&query=alpha`,
-			);
-			expect(invalidStatusResponse.status).toBe(400);
-			const invalidPriorityResponse = await fetch(
-				`http://127.0.0.1:${serverPort}/api/search?type=task&priority=urgent&query=alpha`,
-			);
-			expect(invalidPriorityResponse.status).toBe(400);
-			expect(taskRefreshes).toBe(0);
-			expect(branchSnapshots).toBe(0);
-
-			await fetchJson<Array<{ type?: string }>>("/api/search?type=task&query=alpha");
-			expect(taskRefreshes).toBe(1);
-			expect(branchSnapshots).toBeGreaterThan(0);
-		} finally {
-			core.refreshTasksForTaskRead = originalRefreshTasksForTaskRead;
-			core.git.listRecentBranchTips = originalListRecentBranchTips;
-		}
+		const invalidStatusResponse = await fetch(
+			`http://127.0.0.1:${serverPort}/api/search?type=task&excludeStatus=Blocked&query=alpha`,
+		);
+		expect(invalidStatusResponse.status).toBe(400);
+		const invalidPriorityResponse = await fetch(
+			`http://127.0.0.1:${serverPort}/api/search?type=task&priority=urgent&query=alpha`,
+		);
+		expect(invalidPriorityResponse.status).toBe(400);
+		expect(
+			(await fetchJson<Array<{ type?: string }>>("/api/search?type=task&query=alpha")).map((item) => item.type),
+		).toEqual(["task"]);
 	});
 
 	it("filters search results by priority and status", async () => {
@@ -233,6 +244,42 @@ describe("BacklogServer search endpoint", () => {
 		const tasks = await fetchJson<Task[]>("/api/tasks?priority=high");
 		expect(tasks).toHaveLength(1);
 		expect(tasks[0]?.id).toBe(baseTask.id);
+	});
+
+	it("returns collection summaries without Markdown detail bodies", async () => {
+		const tasks = await fetchJson<Array<Record<string, unknown>>>("/api/tasks?crossBranch=false");
+		const task = tasks.find((candidate) => candidate.id === baseTask.id);
+		expect(task).toMatchObject({
+			id: baseTask.id,
+			acceptanceCriteriaCount: 0,
+			checkedAcceptanceCriteriaCount: 0,
+			definitionOfDoneCount: 0,
+			checkedDefinitionOfDoneCount: 0,
+			isReady: true,
+		});
+		expect(task).not.toHaveProperty("description");
+		expect(task).not.toHaveProperty("rawContent");
+		expect(task).not.toHaveProperty("implementationPlan");
+	});
+
+	it("returns checklist counts without task bodies after persistent edits", async () => {
+		const updated = {
+			...baseTask,
+			description: "Persistent detail body",
+			acceptanceCriteriaItems: [{ index: 1, text: "Count me", checked: true }],
+		};
+		await awaitNextTasksPublication(() => filesystem.saveTask(updated));
+		const summaries = await fetchJson<Array<Record<string, unknown>>>("/api/tasks");
+		expect(summaries.find((task) => task.id === updated.id)).toMatchObject({
+			acceptanceCriteriaCount: 1,
+			checkedAcceptanceCriteriaCount: 1,
+		});
+		await awaitNextTasksPublication(() =>
+			filesystem.saveTask({ ...updated, description: "Body-only persistent edit" }),
+		);
+		const refreshed = await fetchJson<Array<Record<string, unknown>>>("/api/tasks");
+		expect(refreshed.find((task) => task.id === updated.id)).not.toHaveProperty("description");
+		expect((await fetchJson<Task>(`/api/tasks/${updated.id}`)).description).toBe("Body-only persistent edit");
 	});
 
 	it("rejects unsupported priority filters with 400", async () => {

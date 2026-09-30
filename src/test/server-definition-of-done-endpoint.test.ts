@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Core } from "../core/backlog.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup } from "./test-utils.ts";
 
 const operations = [
 	["definitionOfDoneCheck", 1],

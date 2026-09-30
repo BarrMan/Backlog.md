@@ -11,6 +11,18 @@ export type BoardScreenSession = {
 	boardArea: BoxInterface;
 };
 
+type EventEmitterScreen = ScreenInterface & {
+	removeListener(event: string, listener: (...args: unknown[]) => void): void;
+};
+
+export function removeBoardScreenListener(
+	screen: ScreenInterface,
+	event: string,
+	listener: (...args: unknown[]) => void,
+): void {
+	(screen as EventEmitterScreen).removeListener(event, listener);
+}
+
 export function createBoardScreenSession(
 	providedScreen: ScreenInterface | undefined,
 	preserveScreen: boolean | undefined,

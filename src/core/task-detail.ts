@@ -1,7 +1,8 @@
-import type { Task } from "../types/index.ts";
-import { buildDependencyGraph, type DependencyGraph } from "../utils/dependency-graph.ts";
+import type { Task, TaskSummary } from "../types/index.ts";
+import { buildDependencyGraph, createDependencyGraphContext, type DependencyGraph } from "../utils/dependency-graph.ts";
 import { createReadinessGraph, getTaskReadiness, type TaskReadiness } from "../utils/readiness.ts";
 import { canonicalTaskId } from "../utils/task-id.ts";
+import { createTaskRecordIndex } from "../utils/task-record-index.ts";
 import type { Core } from "./backlog.ts";
 
 /**
@@ -33,38 +34,16 @@ export async function loadTaskCorpus(
 	core: Core,
 	options: { includeCrossBranch: boolean } = { includeCrossBranch: false },
 ): Promise<TaskCorpus> {
-	const [workingCopyTasks, completedTasks, config] = await Promise.all([
-		core.queryTasks({ includeCrossBranch: false }),
-		core.filesystem.listCompletedTasks(),
-		core.filesystem.loadConfig(),
-	]);
-	const statuses = config?.statuses;
-
-	if (!options.includeCrossBranch) {
-		return { tasks: workingCopyTasks, completedTasks, statuses };
-	}
-
-	const storeTasks = await core.queryTasks({ includeCrossBranch: true });
-	const workingCopyIds = new Set(workingCopyTasks.map((task) => canonicalTaskId(task.id)));
-
-	// The cross-branch store's task list excludes completed records, so an identity that only exists
-	// as a completed record on some branch would otherwise read as missing here. Its identity index
-	// still knows those records; add the ones the local completed corpus does not already cover.
-	const identityIndex = (await core.getContentStore()).getTaskCorpusSnapshot().identityIndex;
-	const localCompletedIds = new Set(completedTasks.map((task) => canonicalTaskId(task.id)));
-	const crossBranchCompleted = (identityIndex?.getTasks(true) ?? []).filter(
-		(task) => task.source === "completed" && !localCompletedIds.has(canonicalTaskId(task.id)),
-	);
-
+	const snapshot = await core.loadTaskSnapshot(options.includeCrossBranch);
 	return {
-		tasks: [...workingCopyTasks, ...storeTasks.filter((task) => !workingCopyIds.has(canonicalTaskId(task.id)))],
-		completedTasks: [...completedTasks, ...crossBranchCompleted],
-		statuses,
-		// Both merges above resolve an ID the working copy also holds to the local record, which is
-		// the right answer for an identity only one file claims and a guess for one several do. The
-		// index knows which is which, so the collisions travel with the corpus rather than being
-		// re-derived from the records that survived the merge.
-		ambiguousIds: identityIndex?.getContestedIds(),
+		tasks: snapshot.activeTasks.concat(
+			snapshot.tasks.filter(
+				(task) => !snapshot.activeTasks.some((local) => canonicalTaskId(local.id) === canonicalTaskId(task.id)),
+			),
+		),
+		completedTasks: snapshot.identityIndex.getTasks(true).filter((task) => task.source === "completed"),
+		statuses: snapshot.config?.statuses,
+		ambiguousIds: snapshot.identityIndex.getContestedIds(),
 	};
 }
 
@@ -74,6 +53,50 @@ export async function loadTaskCorpus(
  * any size stays the size it already was.
  */
 export type TaskListItem = Task & { isReady: boolean };
+
+/** Strip Markdown body fields before a task crosses the browser collection boundary. */
+export function toTaskSummary(task: TaskListItem | TaskSummary): TaskSummary {
+	const counts =
+		"acceptanceCriteriaCount" in task
+			? task
+			: {
+					acceptanceCriteriaCount: task.acceptanceCriteriaItems?.length ?? 0,
+					checkedAcceptanceCriteriaCount: task.acceptanceCriteriaItems?.filter((item) => item.checked).length ?? 0,
+					definitionOfDoneCount: task.definitionOfDoneItems?.length ?? 0,
+					checkedDefinitionOfDoneCount: task.definitionOfDoneItems?.filter((item) => item.checked).length ?? 0,
+				};
+	return {
+		id: task.id,
+		title: task.title,
+		status: task.status,
+		assignee: task.assignee,
+		reporter: task.reporter,
+		createdDate: task.createdDate,
+		updatedDate: task.updatedDate,
+		dueDate: task.dueDate,
+		labels: task.labels,
+		milestone: task.milestone,
+		dependencies: task.dependencies,
+		references: task.references,
+		documentation: task.documentation,
+		modifiedFiles: task.modifiedFiles,
+		parentTaskId: task.parentTaskId,
+		parentTaskTitle: task.parentTaskTitle,
+		subtasks: task.subtasks,
+		subtaskSummaries: task.subtaskSummaries,
+		priority: task.priority,
+		type: task.type,
+		project: task.project,
+		branch: task.branch,
+		ordinal: task.ordinal,
+		source: task.source,
+		acceptanceCriteriaCount: counts.acceptanceCriteriaCount,
+		checkedAcceptanceCriteriaCount: counts.checkedAcceptanceCriteriaCount,
+		definitionOfDoneCount: counts.definitionOfDoneCount,
+		checkedDefinitionOfDoneCount: counts.checkedDefinitionOfDoneCount,
+		isReady: task.isReady,
+	};
+}
 
 /**
  * A task as a detail read returns it: the stored record plus the relationships derived from the
@@ -94,10 +117,11 @@ export type TaskDetail = Task & { dependencyGraph: DependencyGraph; readiness: T
  * two can never describe different records of the same project.
  */
 export function toTaskDetail(task: Task, corpus: TaskCorpus): TaskDetail {
+	const { dependencyContext, readinessGraph } = taskDetailGraphs(corpus);
 	return {
 		...task,
-		dependencyGraph: buildDependencyGraph(task, corpus),
-		readiness: getTaskReadiness(task, createReadinessGraph(corpus)),
+		dependencyGraph: buildDependencyGraph(task, dependencyContext),
+		readiness: getTaskReadiness(task, readinessGraph),
 	};
 }
 
@@ -109,8 +133,16 @@ export function toTaskDetail(task: Task, corpus: TaskCorpus): TaskDetail {
  * `--assignee` narrow what is displayed, and readiness must still see the dependencies they hid.
  */
 export function withReadiness(tasks: readonly Task[], corpus: TaskCorpus): TaskListItem[] {
-	const graph = createReadinessGraph(corpus);
-	return tasks.map((task) => ({ ...task, isReady: getTaskReadiness(task, graph).isReady }));
+	const { readinessGraph } = taskDetailGraphs(corpus);
+	return tasks.map((task) => ({ ...task, isReady: getTaskReadiness(task, readinessGraph).isReady }));
+}
+
+function taskDetailGraphs(corpus: TaskCorpus) {
+	const index = createTaskRecordIndex(corpus);
+	return {
+		dependencyContext: createDependencyGraphContext({ ...corpus, index }),
+		readinessGraph: createReadinessGraph({ ...corpus, index }),
+	};
 }
 
 /** Load the corpus and attach the derived relationships, for a surface that reads per detail view. */

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Task } from "../../types";
 import { formatPriorityLabel } from "../../utils/priority-config";
 import { compareTaskIds } from "../../utils/task-sorting";
+import { apiClient } from "../lib/api";
 import StoredDate from "./StoredDate";
 
 interface DraftsListProps {
@@ -19,11 +20,7 @@ const DraftsList: React.FC<DraftsListProps> = ({ onEditTask, onNewDraft, dateFor
 	const loadDrafts = useCallback(async () => {
 		try {
 			setLoading(true);
-			const response = await fetch("/api/drafts");
-			if (!response.ok) {
-				throw new Error(`Failed to load drafts: ${response.statusText}`);
-			}
-			const draftsData = await response.json();
+			const draftsData = await apiClient.fetchDrafts();
 			const sortedDrafts = [...draftsData].sort((a, b) => compareTaskIds(b.id, a.id));
 			setDrafts(sortedDrafts);
 			setError(null);
@@ -49,13 +46,7 @@ const DraftsList: React.FC<DraftsListProps> = ({ onEditTask, onNewDraft, dateFor
 
 	const handlePromoteDraft = async (draftId: string) => {
 		try {
-			const response = await fetch(`/api/drafts/${draftId}/promote`, {
-				method: "POST",
-			});
-
-			if (!response.ok) {
-				throw new Error(`Failed to promote draft: ${response.statusText}`);
-			}
+			await apiClient.promoteDraft(draftId);
 
 			// Reload drafts after successful promotion
 			await loadDrafts();

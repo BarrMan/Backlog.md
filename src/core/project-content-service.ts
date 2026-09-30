@@ -26,7 +26,7 @@ export class ProjectContentService {
 	constructor(private readonly core: Core) {}
 
 	async getDocument(documentId: string): Promise<Document | null> {
-		return findDocumentById(await this.core.fs.listDocuments(), documentId);
+		return findDocumentById(await this.core.filesystem.listDocuments(), documentId);
 	}
 
 	async getDocumentContent(documentId: string): Promise<string | null> {
@@ -34,7 +34,10 @@ export class ProjectContentService {
 		if (!document) return null;
 		try {
 			return await Bun.file(
-				join(this.core.fs.docsDir, ...normalizeDocumentSubPath(document.path ?? `${document.id}.md`).split("/")),
+				join(
+					this.core.filesystem.docsDir,
+					...normalizeDocumentSubPath(document.path ?? `${document.id}.md`).split("/"),
+				),
 			).text();
 		} catch {
 			return null;
@@ -62,13 +65,13 @@ export class ProjectContentService {
 	}
 
 	async createDecision(decision: Decision, autoCommit?: boolean): Promise<void> {
-		const { filepath, removedFilepaths } = await this.core.fs.saveDecision(decision);
+		const { filepath, removedFilepaths } = await this.core.filesystem.saveDecision(decision);
 		if (await this.core.shouldAutoCommit(autoCommit))
 			await this.core.commitWrittenFile(`backlog: Add decision ${decision.id}`, removedFilepaths, filepath);
 	}
 
 	async updateDecisionFromContent(decisionId: string, content: string, autoCommit?: boolean): Promise<void> {
-		const existing = await this.core.fs.loadDecision(decisionId);
+		const existing = await this.core.filesystem.loadDecision(decisionId);
 		if (!existing) throw new Error(`Decision ${decisionId} not found`);
 		const frontmatter = parseFrontmatter(content).data as Partial<Pick<Decision, "title" | "status" | "date">>;
 		const section = (name: string) =>
@@ -104,7 +107,7 @@ export class ProjectContentService {
 	}
 
 	async createDocument(document: Document, autoCommit?: boolean, subPath = ""): Promise<void> {
-		const { relativePath, removedFilepaths } = await this.core.fs.saveDocument(
+		const { relativePath, removedFilepaths } = await this.core.filesystem.saveDocument(
 			document,
 			normalizeDocumentSubPath(subPath),
 		);
@@ -113,7 +116,7 @@ export class ProjectContentService {
 			await this.core.commitWrittenFile(
 				`backlog: Add document ${document.id}`,
 				removedFilepaths,
-				join(this.core.fs.docsDir, ...relativePath.split("/")),
+				join(this.core.filesystem.docsDir, ...relativePath.split("/")),
 			);
 	}
 
@@ -166,7 +169,7 @@ export class ProjectContentService {
 		autoCommit?: boolean,
 	): Promise<{ success: boolean; sourcePath?: string; targetPath?: string; milestone?: Milestone }> {
 		const autoCommitEnabled = await this.core.shouldAutoCommit(autoCommit);
-		const result = await this.core.fs.archiveMilestone(identifier);
+		const result = await this.core.filesystem.archiveMilestone(identifier);
 		if (result.success && result.sourcePath && result.targetPath && autoCommitEnabled) {
 			const { sourcePath, targetPath } = result;
 			await this.commitMilestoneMove("Archive", { ...result, sourcePath, targetPath }, async () => {
@@ -189,12 +192,12 @@ export class ProjectContentService {
 		previousTitle?: string;
 		previousDueDate?: string;
 	}> {
-		const result = await this.core.fs.renameMilestone(identifier, title, dueDate);
+		const result = await this.core.filesystem.renameMilestone(identifier, title, dueDate);
 		if (!result.success || !result.sourcePath || !result.targetPath || !(await this.core.shouldAutoCommit(autoCommit)))
 			return result;
 		const { sourcePath, targetPath } = result;
 		await this.commitMilestoneMove("Rename", { ...result, sourcePath, targetPath }, async () => {
-			await this.core.fs
+			await this.core.filesystem
 				.renameMilestone(
 					result.milestone?.id ?? identifier,
 					result.previousTitle ?? title,

@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { rename } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { $ } from "bun";
 import { FileSystem } from "../file-system/operations.ts";
@@ -10,11 +9,11 @@ import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let filesystem: FileSystem;
-let fixture: ReturnType<typeof createServerFixture> | null = null;
+let fixture: Awaited<ReturnType<typeof createServerFixture>> | null = null;
 let auxiliaryWorktreeDir: string | null = null;
 let remoteRepoDir: string | null = null;
 
-function activeFixture(): ReturnType<typeof createServerFixture> {
+function activeFixture(): Awaited<ReturnType<typeof createServerFixture>> {
 	if (!fixture) throw new Error("Server fixture not initialized");
 	return fixture;
 }
@@ -40,21 +39,8 @@ async function request(path: string, init: RequestInit = {}, timeoutMs = 5000): 
 	}
 }
 
-async function replaceWatchedConfigFile(configPath: string, content: string): Promise<void> {
-	const replacementPath = `${configPath}.replacement`;
-	await Bun.write(replacementPath, content);
-	await retry(
-		async () => {
-			await rename(replacementPath, configPath);
-			return true;
-		},
-		10,
-		25,
-	);
-}
-
 async function startServer(): Promise<void> {
-	fixture = createServerFixture(TEST_DIR);
+	fixture = await createServerFixture(TEST_DIR);
 
 	await retry(
 		async () => {
@@ -393,21 +379,13 @@ describe("BacklogServer task SPA fallback", () => {
 		expect(await response.text()).toContain("ambiguous");
 	});
 
-	it("prefers the freshly read current-worktree task over stale store content", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const contentStore = await fixture.services.store();
-		const originalGetTasks = contentStore.getTasks.bind(contentStore);
+	it("reads the freshly persisted current-worktree task", async () => {
 		const liveTask = { ...routedTask, title: "Live current-worktree title" };
 		await filesystem.saveTask(liveTask);
-		contentStore.getTasks = () => [{ ...routedTask, title: "Stale cached title" }];
 
-		try {
-			const response = await request(`/api/task/${routedTask.id}`);
-			expect(response.status).toBe(200);
-			expect(((await response.json()) as Task).title).toBe(liveTask.title);
-		} finally {
-			contentStore.getTasks = originalGetTasks;
-		}
+		const response = await request(`/api/task/${routedTask.id}`);
+		expect(response.status).toBe(200);
+		expect(((await response.json()) as Task).title).toBe(liveTask.title);
 	});
 
 	it("serves an exact legacy task ID and distinguishes missing from malformed inputs", async () => {
@@ -505,74 +483,28 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	it("fails closed when a visible cross-branch task collides with a local padded ID", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const contentStore = await fixture.services.store();
-		const refreshTasks = contentStore.refreshTasks.bind(contentStore);
-		contentStore.refreshTasks = async () => {};
-		try {
-			contentStore.upsertTask(
-				{
-					...routedTask,
-					id: "REMOTE-1.2",
-					title: "Cross-branch collision",
-					branch: "feature/collision",
-					source: "remote",
-				},
-				{ root: filesystem.backlogDir },
-			);
-
-			const response = await request("/api/task/1.2");
-			expect(response.status).toBe(409);
-			expect((await response.json()) as { error: string }).toEqual({
-				error: "Task ID 1.2 is ambiguous. Repair duplicate task IDs before opening it.",
-			});
-		} finally {
-			contentStore.refreshTasks = refreshTasks;
-		}
-	});
-
-	it("takes exactly two branch-tip snapshots for a cold cross-branch task list", async () => {
-		await restartWithActiveBranchCollision("BACK-1", true);
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const coreGit = fixture.core.git;
-		const originalListRecentBranchTips = coreGit.listRecentBranchTips.bind(coreGit);
-		let tipSnapshotCount = 0;
-		coreGit.listRecentBranchTips = async (days) => {
-			tipSnapshotCount += 1;
-			return await originalListRecentBranchTips(days);
-		};
-
-		try {
-			const response = await request("/api/tasks?crossBranch=true", {}, 10000);
-			expect(response.status).toBe(200);
-			expect(((await response.json()) as Task[]).map((task) => task.id)).toContain("BACK-099");
-			expect(tipSnapshotCount).toBe(2);
-		} finally {
-			coreGit.listRecentBranchTips = originalListRecentBranchTips;
-		}
-	});
-
-	it("refreshes branch tips once for a warm parent-filtered task list", async () => {
 		await restartWithActiveBranchCollision("BACK-1");
-		expect((await request("/api/tasks?crossBranch=true", {}, 10000)).status).toBe(200);
+		await addCollisionBranchTask({ ...routedTask, id: "BACK-1.2", title: "Cross-branch collision" });
 
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const coreGit = fixture.core.git;
-		const originalListRecentBranchTips = coreGit.listRecentBranchTips.bind(coreGit);
-		let tipSnapshotCount = 0;
-		coreGit.listRecentBranchTips = async (days) => {
-			tipSnapshotCount += 1;
-			return await originalListRecentBranchTips(days);
-		};
+		const response = await request("/api/task/1.2");
+		expect(response.status).toBe(409);
+		expect((await response.json()) as { error: string }).toEqual({
+			error: "Task ID 1.2 is ambiguous. Repair duplicate task IDs before opening it.",
+		});
+	});
 
-		try {
-			const response = await request("/api/tasks?parent=BACK-1&crossBranch=true", {}, 10000);
-			expect(response.status).toBe(200);
-			expect(await response.json()).toEqual([]);
-			expect(tipSnapshotCount).toBe(1);
-		} finally {
-			coreGit.listRecentBranchTips = originalListRecentBranchTips;
-		}
+	it("reads active branch tips for each request-local collection", async () => {
+		await restartWithActiveBranchCollision("BACK-1", true);
+		const response = await request("/api/tasks?crossBranch=true", {}, 10000);
+		expect(response.status).toBe(200);
+		expect(((await response.json()) as Task[]).map((task) => task.id)).toContain("BACK-099");
+	});
+
+	it("resolves parent filters from the same active-branch snapshot as the collection", async () => {
+		await restartWithActiveBranchCollision("BACK-1");
+		const response = await request("/api/tasks?parent=BACK-1&crossBranch=true", {}, 10000);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual([]);
 	});
 
 	it("refreshes search results after an active branch ref moves", async () => {
@@ -595,86 +527,21 @@ describe("BacklogServer task SPA fallback", () => {
 		expect(results.map((result) => result.task?.id)).toContain("BACK-120");
 	});
 
-	it("coalesces concurrent ref fingerprints and skips full reloads while refs are unchanged", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const contentStore = await fixture.services.store();
-		const originalRefreshTasks = contentStore.refreshTasks.bind(contentStore);
-		const originalListRecentBranchTips = fixture.core.git.listRecentBranchTips.bind(fixture.core.git);
-		let refreshCount = 0;
-		let fingerprintCount = 0;
-		let releaseFingerprint: () => void = () => {};
-		let resolveFingerprintStarted: () => void = () => {};
-		const fingerprintStarted = new Promise<void>((resolve) => {
-			resolveFingerprintStarted = resolve;
-		});
-		const fingerprintGate = new Promise<void>((resolve) => {
-			releaseFingerprint = resolve;
-		});
-		contentStore.refreshTasks = async () => {
-			refreshCount += 1;
-			await originalRefreshTasks();
-		};
-		fixture.core.git.listRecentBranchTips = async (days) => {
-			fingerprintCount += 1;
-			resolveFingerprintStarted();
-			await fingerprintGate;
-			return await originalListRecentBranchTips(days);
-		};
-
-		try {
-			const requests = Array.from({ length: 8 }, () => request("/api/task/BACK-001.02", {}, 5000));
-			await fingerprintStarted;
-			await Bun.sleep(20);
-			expect(fingerprintCount).toBe(1);
-			releaseFingerprint();
-			const responses = await Promise.all(requests);
-			expect(responses.every((response) => response.status === 200)).toBe(true);
-			expect(refreshCount).toBe(0);
-
-			expect((await request("/api/task/BACK-001.02", {}, 5000)).status).toBe(200);
-			expect(refreshCount).toBe(0);
-		} finally {
-			releaseFingerprint();
-			contentStore.refreshTasks = originalRefreshTasks;
-			fixture.core.git.listRecentBranchTips = originalListRecentBranchTips;
-		}
+	it("answers concurrent request-local reads from the current branch state", async () => {
+		await restartWithActiveBranchCollision("BACK-1", true);
+		const responses = await Promise.all(
+			Array.from({ length: 8 }, () => request("/api/tasks?crossBranch=true", {}, 5000)),
+		);
+		expect(responses.every((response) => response.status === 200)).toBe(true);
+		for (const response of responses)
+			expect(((await response.json()) as Task[]).map((task) => task.id)).toContain("BACK-099");
 	});
 
-	it("coalesces one full reload when concurrent reads observe a changed ref snapshot", async () => {
+	it("fails closed consistently when concurrent reads observe a changed ref snapshot", async () => {
 		await restartWithActiveBranchCollision("BACK-001");
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const contentStore = await fixture.services.store();
-		const originalRefreshTasks = contentStore.refreshTasks.bind(contentStore);
-		let refreshCount = 0;
-		let releaseRefresh: () => void = () => {};
-		let resolveRefreshStarted: () => void = () => {};
-		const refreshStarted = new Promise<void>((resolve) => {
-			resolveRefreshStarted = resolve;
-		});
-		const refreshGate = new Promise<void>((resolve) => {
-			releaseRefresh = resolve;
-		});
-		contentStore.refreshTasks = async () => {
-			refreshCount += 1;
-			resolveRefreshStarted();
-			await refreshGate;
-			await originalRefreshTasks();
-		};
-
-		try {
-			await $`git branch fingerprint-only`.cwd(TEST_DIR).quiet();
-			const requests = Array.from({ length: 8 }, () => request("/api/task/BACK-1", {}, 5000));
-			await refreshStarted;
-			await Bun.sleep(20);
-			expect(refreshCount).toBe(1);
-			releaseRefresh();
-			const responses = await Promise.all(requests);
-			expect(responses.every((response) => response.status === 409)).toBe(true);
-			expect(refreshCount).toBe(1);
-		} finally {
-			releaseRefresh();
-			contentStore.refreshTasks = originalRefreshTasks;
-		}
+		await $`git branch fingerprint-only`.cwd(TEST_DIR).quiet();
+		const responses = await Promise.all(Array.from({ length: 8 }, () => request("/api/task/BACK-1", {}, 5000)));
+		expect(responses.every((response) => response.status === 409)).toBe(true);
 	});
 
 	it("returns the local task when an active branch changes the same task path", async () => {
@@ -729,38 +596,15 @@ describe("BacklogServer task SPA fallback", () => {
 		expect(((await response.json()) as Task).title).toBe("Local legacy task");
 	});
 
-	it("serves the default task list from the content store instead of re-reading the working copy", async () => {
+	it("serves default and local collections from fresh persistent sources", async () => {
 		await restartWithActiveBranchCollision("BACK-001", true);
-		// Warm the store so the counted requests measure steady-state list serving.
-		expect((await request("/api/tasks")).status).toBe(200);
+		const defaultList = await request("/api/tasks");
+		expect(defaultList.status).toBe(200);
+		expect(((await defaultList.json()) as Task[]).map((task) => task.id)).toContain("BACK-099");
 
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const serverFilesystem = fixture.core.filesystem;
-		const originalListTasks = serverFilesystem.listTasks.bind(serverFilesystem);
-		let workingCopyScans = 0;
-		serverFilesystem.listTasks = async (...args) => {
-			workingCopyScans += 1;
-			return await originalListTasks(...args);
-		};
-
-		try {
-			const defaultList = await request("/api/tasks");
-			expect(defaultList.status).toBe(200);
-			expect(((await defaultList.json()) as Task[]).map((task) => task.id)).toContain("BACK-099");
-			// The response still comes from the store's cross-branch corpus. The single working-copy
-			// pass is the cache-validated reconciliation every cross-branch read performs so a missed
-			// watcher event cannot leave the browser stale; it is not the read that builds the list.
-			expect(workingCopyScans).toBe(1);
-
-			// The explicit local view builds its response from a working-copy read of its own, which is
-			// why it must not be the default.
-			const localList = await request("/api/tasks?crossBranch=false");
-			expect(localList.status).toBe(200);
-			expect(((await localList.json()) as Task[]).map((task) => task.id)).not.toContain("BACK-099");
-			expect(workingCopyScans).toBeGreaterThan(1);
-		} finally {
-			serverFilesystem.listTasks = originalListTasks;
-		}
+		const localList = await request("/api/tasks?crossBranch=false");
+		expect(localList.status).toBe(200);
+		expect(((await localList.json()) as Task[]).map((task) => task.id)).not.toContain("BACK-099");
 	});
 
 	it("reopens the local task after a browser save with an inherited active branch", async () => {
@@ -849,156 +693,38 @@ describe("BacklogServer task SPA fallback", () => {
 		});
 	});
 
-	it("keeps config and duplicate-task reads fail-closed while a watched config is unusable", async () => {
+	it("fails closed on malformed config and reads a repaired config on the next request", async () => {
 		await fixture?.dispose();
 		fixture = null;
-		const cachedConfig = await filesystem.loadConfig();
-		if (!cachedConfig) throw new Error("Expected cached test config");
-		const customStatuses = ["Queued", "Working", "Complete"];
-		await filesystem.saveConfig({ ...cachedConfig, statuses: customStatuses });
 		await restartWithActiveBranchCollision("BACK-001");
 		expect((await request("/api/task/BACK-1")).status).toBe(409);
-		expect((await request("/api/tasks?crossBranch=true")).status).toBe(200);
 
-		const currentFixture = activeFixture();
-		const serverFilesystem = currentFixture.core.filesystem;
-		const contentStore = await currentFixture.services.store();
+		const serverFilesystem = activeFixture().core.filesystem;
 		const canonicalContent = await Bun.file(serverFilesystem.configFilePath).text();
 		const disabledContent = canonicalContent.replace("check_active_branches: true", "check_active_branches: false");
-		const unusableContents = [
-			[
-				'project_name: "Partial"',
-				"statuses: [",
-				"labels: []",
-				"date_format: YYYY-MM-DD",
-				"check_active_branches: false",
-				'task_prefix: "BACK"',
-				"",
-			].join("\n"),
-			[
-				'project_name: ""',
-				'statuses: ["Queued", "Working", "Complete"]',
-				'labels: ["web"]',
-				"date_format: YYYY-MM-DD",
-				"check_active_branches: false",
-				'task_prefix: "BACK"',
-				"",
-			].join("\n"),
-			[
-				'project_name: "Malformed boolean"',
-				'statuses: ["Queued", "Working", "Complete"]',
-				'labels: ["web"]',
-				"date_format: YYYY-MM-DD",
-				"check_active_branches: fals",
-				'task_prefix: "BACK"',
-				"",
-			].join("\n"),
-			[
-				'project_name: "Malformed active days"',
-				'statuses: ["Queued", "Working", "Complete"]',
-				'labels: ["web"]',
-				"date_format: YYYY-MM-DD",
-				"check_active_branches: true",
-				"active_branch_days: nope",
-				'task_prefix: "BACK"',
-				"",
-			].join("\n"),
-			[
-				'project_name: "Malformed task prefix"',
-				'statuses: ["Queued", "Working", "Complete"]',
-				'labels: ["web"]',
-				"date_format: YYYY-MM-DD",
-				"check_active_branches: true",
-				"active_branch_days: 30",
-				'task_prefix: "BACK-2"',
-				"",
-			].join("\n"),
-		];
-
-		const originalParseConfig = serverFilesystem.parseConfig.bind(serverFilesystem);
-		const unusableParseAttempts = new Map(unusableContents.map((content) => [content, 0]));
-		serverFilesystem.parseConfig = (content) => {
-			const attempts = unusableParseAttempts.get(content);
-			if (attempts !== undefined) {
-				unusableParseAttempts.set(content, attempts + 1);
-			}
-			// Counted before parsing: a rejected list value throws instead of returning.
-			return originalParseConfig(content);
-		};
-
-		let publicationAttempts = 0;
-		const unsubscribe = contentStore.subscribe((event) => {
-			if (event.type === "config") publicationAttempts += 1;
-		});
-
-		try {
-			for (const unusableContent of unusableContents) {
-				await replaceWatchedConfigFile(serverFilesystem.configFilePath, unusableContent);
-				await retry(
-					async () => {
-						if ((unusableParseAttempts.get(unusableContent) ?? 0) < 8) {
-							throw new Error("watchers have not exhausted the unusable candidate");
-						}
-						return true;
-					},
-					12,
-					25,
-				);
-				expect(publicationAttempts).toBe(0);
-
-				const concurrentReads = await Promise.all(
-					Array.from({ length: 8 }, async () => {
-						const [configResponse, coreConfig, taskResponse] = await Promise.all([
-							request("/api/config", {}, 5000),
-							serverFilesystem.loadConfig(),
-							request("/api/task/BACK-1", {}, 5000),
-						]);
-						return {
-							apiConfig: (await configResponse.json()) as BacklogConfig,
-							configStatus: configResponse.status,
-							coreConfig,
-							taskStatus: taskResponse.status,
-						};
-					}),
-				);
-				for (const read of concurrentReads) {
-					expect(read.configStatus).toBe(200);
-					expect(read.apiConfig.projectName).toBe("Task SPA Fallback");
-					expect(read.apiConfig.statuses).toEqual(customStatuses);
-					expect(read.apiConfig.checkActiveBranches).toBe(true);
-					expect(read.coreConfig?.projectName).toBe("Task SPA Fallback");
-					expect(read.coreConfig?.statuses).toEqual(customStatuses);
-					expect(read.coreConfig?.checkActiveBranches).toBe(true);
-					expect(read.taskStatus).toBe(409);
-				}
-				expect(publicationAttempts).toBe(0);
-			}
-
-			await replaceWatchedConfigFile(serverFilesystem.configFilePath, disabledContent);
-			await retry(
-				async () => {
-					const [configResponse, taskResponse] = await Promise.all([
-						request("/api/config", {}, 5000),
-						request("/api/task/BACK-1", {}, 5000),
-					]);
-					const config = (await configResponse.json()) as BacklogConfig;
-					if (publicationAttempts !== 1 || config.checkActiveBranches !== false || taskResponse.status !== 200) {
-						throw new Error("valid config has not published coherently");
-					}
-					return true;
-				},
-				12,
-				25,
-			);
-
-			await replaceWatchedConfigFile(serverFilesystem.configFilePath, disabledContent);
-			await Bun.sleep(250);
-			expect(publicationAttempts).toBe(1);
-			expect((await serverFilesystem.loadConfig())?.checkActiveBranches).toBe(false);
-		} finally {
-			unsubscribe();
-			serverFilesystem.parseConfig = originalParseConfig;
+		const malformedPublished = activeFixture().awaitNextPublication("error");
+		await Bun.write(serverFilesystem.configFilePath, "statuses: [\n");
+		await malformedPublished;
+		const malformedReads = await Promise.all(
+			Array.from({ length: 8 }, () =>
+				Promise.all([request("/api/config", {}, 5000), request("/api/task/BACK-1", {}, 5000)]),
+			),
+		);
+		for (const [configResponse, taskResponse] of malformedReads) {
+			expect(configResponse.status).toBe(500);
+			expect(taskResponse.status).toBe(500);
 		}
+
+		const repairedPublished = activeFixture().awaitNextPublication("config-updated");
+		await Bun.write(serverFilesystem.configFilePath, disabledContent);
+		await repairedPublished;
+		const [configResponse, taskResponse] = await Promise.all([
+			request("/api/config", {}, 5000),
+			request("/api/task/BACK-1", {}, 5000),
+		]);
+		expect(configResponse.status).toBe(200);
+		expect(((await configResponse.json()) as BacklogConfig).checkActiveBranches).toBe(false);
+		expect(taskResponse.status).toBe(200);
 	});
 
 	it("drops a cached collision after the active branch is removed", async () => {
@@ -1026,38 +752,19 @@ describe("BacklogServer task SPA fallback", () => {
 		expect(((await addedTask.json()) as Task).title).toBe("Branch replacement");
 	});
 
-	it("retries a branch scan when a ref moves after its tree was indexed", async () => {
+	it("uses the active branch ref observed by each request without retaining the prior scan", async () => {
 		await restartWithActiveBranchCollision("BACK-001");
 		expect((await request("/api/task/BACK-1")).status).toBe(409);
 
-		// Advance the branch to an uncached generation first. Unchanged commit trees are
-		// intentionally reused, so the movement trigger must run while a new SHA is indexed.
 		await replaceCollisionBranchTask("BACK-001", "Uncached collision generation");
-		const collisionCommit = (await $`git rev-parse collision-shadow`.cwd(TEST_DIR).quiet()).text().trim();
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const coreGit = fixture.core.git;
-		const originalListFilesInTree = coreGit.listFilesInTree.bind(coreGit);
-		let movedDuringScan = false;
-		coreGit.listFilesInTree = async (ref, path) => {
-			const files = await originalListFilesInTree(ref, path);
-			if (!movedDuringScan && ref === collisionCommit) {
-				movedDuringScan = true;
-				await replaceCollisionBranchTask("BACK-100", "Moved during scan");
-			}
-			return files;
-		};
+		expect((await request("/api/task/BACK-1", {}, 10000)).status).toBe(409);
 
-		try {
-			await $`git branch fingerprint-trigger`.cwd(TEST_DIR).quiet();
-			const response = await request("/api/task/BACK-1", {}, 10000);
-			expect(movedDuringScan).toBe(true);
-			expect(response.status).toBe(200);
-			expect(((await response.json()) as Task).title).toBe("Main collision task");
-			const replacement = await request("/api/task/BACK-100", {}, 5000);
-			expect(replacement.status).toBe(200);
-			expect(((await replacement.json()) as Task).title).toBe("Moved during scan");
-		} finally {
-			coreGit.listFilesInTree = originalListFilesInTree;
-		}
+		await replaceCollisionBranchTask("BACK-100", "Moved between requests");
+		const response = await request("/api/task/BACK-1", {}, 10000);
+		expect(response.status).toBe(200);
+		expect(((await response.json()) as Task).title).toBe("Main collision task");
+		const replacement = await request("/api/task/BACK-100", {}, 5000);
+		expect(replacement.status).toBe(200);
+		expect(((await replacement.json()) as Task).title).toBe("Moved between requests");
 	});
 });

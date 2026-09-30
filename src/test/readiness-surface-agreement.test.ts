@@ -25,7 +25,7 @@ describe("readiness agreement across surfaces", () => {
 	let core: Core;
 	let mcpServer: McpServer;
 	let server: BacklogServer | null;
-	let handlers: { handleGetTask(taskId: string): Promise<Response> };
+	let getBrowserTask: (taskId: string) => Promise<Response>;
 
 	/** The verdict every surface has to reach for this project, by task ID. */
 	const expectedReadiness: Record<string, boolean> = {
@@ -80,15 +80,20 @@ describe("readiness agreement across surfaces", () => {
 		registerTaskTools(mcpServer, mcpConfig);
 
 		server = new BacklogServer(testDir);
-		handlers = server as unknown as typeof handlers;
+		await server.start(0, false);
+		const port = server.getPort();
+		if (!port) throw new Error("Expected browser server port");
+		const status = (await (await fetch(`http://127.0.0.1:${port}/api/status`)).json()) as { projectScope: string };
+		getBrowserTask = async (taskId) =>
+			await fetch(`http://127.0.0.1:${port}/api/tasks/${taskId}`, {
+				headers: { "X-Backlog-Project-Scope": status.projectScope },
+			});
 	});
 
 	afterEach(async () => {
 		await server?.stop();
 		server = null;
 		await mcpServer.stop();
-		core.disposeSearchService();
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 
@@ -167,7 +172,7 @@ describe("readiness agreement across surfaces", () => {
 		// What the browser is handed when it opens a task: the modal renders this, it does not
 		// resolve anything of its own.
 		for (const [id, isReady] of Object.entries(expectedReadiness)) {
-			const response = await withTimeout(handlers.handleGetTask(id), `task detail ${id}`, 5_000);
+			const response = await withTimeout(getBrowserTask(id), `task detail ${id}`, 5_000);
 			expect(response.status).toBe(200);
 			const detail = (await response.json()) as TaskDetail;
 			expect([id, detail.readiness.isReady]).toEqual([id, isReady]);
@@ -233,7 +238,7 @@ describe("readiness agreement across surfaces", () => {
 		expect(viewed.isReady).toBe(false);
 		expect(viewed.readiness).toEqual(unresolved);
 
-		const response = await withTimeout(handlers.handleGetTask("8"), "task detail 8", 5_000);
+		const response = await withTimeout(getBrowserTask("8"), "task detail 8", 5_000);
 		expect(response.status).toBe(200);
 		expect(((await response.json()) as TaskDetail).readiness).toEqual(unresolved);
 

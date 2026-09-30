@@ -5,7 +5,7 @@ import { Core } from "../core/backlog.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { SearchResult, Task } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let server: BacklogServer | null = null;

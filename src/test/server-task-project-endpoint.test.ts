@@ -4,7 +4,7 @@ import { $ } from "bun";
 import { FileSystem } from "../file-system/operations.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
-import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, safeCleanup, withTimeout } from "./test-utils.ts";
 
 describe("BacklogServer task project field", () => {
 	let testDir: string;

@@ -84,8 +84,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	core.disposeSearchService();
-	core.disposeContentStore();
 	await safeCleanup(testDir);
 });
 

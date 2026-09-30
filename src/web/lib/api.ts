@@ -10,7 +10,9 @@ import type {
 	SearchResult,
 	SearchResultType,
 	Task,
+	TaskSummary,
 } from "../../types/index.ts";
+import { setTaskDetailCacheCapacity, TaskDetailCache } from "./task-detail-cache";
 
 const API_BASE = "/api";
 
@@ -80,6 +82,7 @@ export type TaskUpdateRequest = Omit<Partial<Task>, "milestone" | "dueDate" | "p
 
 export interface InitializationStatus {
 	initialized: boolean;
+	projectScope?: string;
 	projectPath: string;
 	backlogDirectory?: string | null;
 	backlogDirectorySource?: "backlog" | ".backlog" | "custom" | null;
@@ -106,7 +109,9 @@ export class ApiError extends Error {
 			typeof errorMessage === "string" && errorMessage.trim().length > 0
 				? errorMessage
 				: `HTTP ${response.status}: ${response.statusText}`;
-		return new ApiError(message, response.status, response.statusText, data);
+		const code =
+			typeof data === "object" && data !== null && "code" in data ? (data as { code?: unknown }).code : undefined;
+		return new ApiError(message, response.status, typeof code === "string" ? code : response.statusText, data);
 	}
 }
 
@@ -179,6 +184,8 @@ const buildSearchParams = (options: SearchOptions): URLSearchParams => {
 
 export class ApiClient {
 	private config: RequestConfig;
+	private projectScope: string | null = null;
+	private scopeBootstrap: Promise<InitializationStatus & { projectScope: string }> | null = null;
 
 	constructor(config: RequestConfig = {}) {
 		this.config = { ...DEFAULT_CONFIG, ...config };
@@ -186,13 +193,16 @@ export class ApiClient {
 
 	// Enhanced fetch with retry logic and better error handling
 	private async fetchWithRetry(url: string, options: RequestInit = {}, retriesOverride?: number): Promise<Response> {
+		const scope = await this.getProjectScope();
 		const { retries: configuredRetries = 3, timeout = 10000 } = this.config;
-		const retries = retriesOverride ?? configuredRetries;
+		const retries =
+			retriesOverride ??
+			(options.method === undefined || options.method === "GET" || options.method === "HEAD" ? configuredRetries : 0);
 		let lastError: Error | undefined;
 
 		for (let attempt = 0; attempt <= retries; attempt++) {
 			try {
-				return await this.fetchAttempt(url, options, timeout);
+				return await this.fetchAttempt(url, options, timeout, scope);
 			} catch (error) {
 				lastError = error as Error;
 
@@ -216,14 +226,14 @@ export class ApiClient {
 		throw new NetworkError(`Request failed after ${retries + 1} attempts: ${lastError?.message}`);
 	}
 
-	private async fetchAttempt(url: string, options: RequestInit, timeout: number): Promise<Response> {
+	private async fetchAttempt(url: string, options: RequestInit, timeout: number, scope: string): Promise<Response> {
 		const controller = new AbortController();
 		const timeoutId = setTimeout(() => controller.abort(), timeout);
 		try {
 			const response = await fetch(url, {
 				...options,
 				signal: controller.signal,
-				headers: { "Content-Type": "application/json", ...options.headers },
+				headers: { "Content-Type": "application/json", "X-Backlog-Project-Scope": scope, ...options.headers },
 			});
 			if (response.ok) return response;
 			const errorData = await response.json().catch(() => null);
@@ -243,6 +253,33 @@ export class ApiClient {
 		return response.json();
 	}
 
+	private async fetchStatus(): Promise<InitializationStatus & { projectScope: string }> {
+		const response = await fetch(`${API_BASE}/status`, { headers: { "Content-Type": "application/json" } });
+		if (!response.ok) throw await toApiError(response, "Failed to check initialization status");
+		const status = (await response.json()) as InitializationStatus;
+		if (!status.projectScope) throw new ApiError("Server did not provide a project scope");
+		if (this.projectScope && this.projectScope !== status.projectScope)
+			throw new ApiError("Server project scope changed", 409, "PROJECT_SCOPE_MISMATCH");
+		this.projectScope = status.projectScope;
+		return status as InitializationStatus & { projectScope: string };
+	}
+
+	async getProjectScope(): Promise<string> {
+		if (this.projectScope) return this.projectScope;
+		this.scopeBootstrap ??= this.fetchStatus().finally(() => {
+			this.scopeBootstrap = null;
+		});
+		return (await this.scopeBootstrap).projectScope;
+	}
+
+	private adoptExplicitProjectScope(scope: string) {
+		if (!scope) throw new ApiError("Successful project update did not provide a project scope");
+		this.projectScope = scope;
+		this.scopeBootstrap = null;
+		this.detailCache.invalidate();
+		if (typeof window !== "undefined") window.dispatchEvent(new window.Event("project-scope-changed"));
+	}
+
 	private appendNonBlankQueryValues(params: URLSearchParams, key: string, values?: string | string[]): void {
 		appendQueryValues(params, key, values);
 	}
@@ -254,7 +291,7 @@ export class ApiClient {
 		priority?: SearchPriorityFilter;
 		labels?: string[];
 		crossBranch?: boolean;
-	}): Promise<Task[]> {
+	}): Promise<TaskSummary[]> {
 		const params = new URLSearchParams();
 		if (options?.status) params.append("status", options.status);
 		this.appendNonBlankQueryValues(params, "excludeStatus", options?.excludeStatus);
@@ -266,7 +303,25 @@ export class ApiClient {
 		if (options?.crossBranch !== false) params.append("crossBranch", "true");
 
 		const url = `${API_BASE}/tasks${params.toString() ? `?${params.toString()}` : ""}`;
-		return this.fetchJson<Task[]>(url);
+		return this.fetchJson<TaskSummary[]>(url);
+	}
+
+	detailCache = new TaskDetailCache((id) => this.fetchTask(id));
+
+	async loadTaskDetail(id: string): Promise<TaskDetail> {
+		return this.detailCache.loadDetail(await this.getProjectScope(), id);
+	}
+
+	async fetchDrafts(): Promise<Task[]> {
+		return this.fetchJson<Task[]>(`${API_BASE}/drafts`);
+	}
+
+	async promoteDraft(id: string): Promise<void> {
+		await this.fetchWithRetry(`${API_BASE}/drafts/${encodeURIComponent(id)}/promote`, { method: "POST" });
+	}
+
+	setTaskDetailCacheCapacity(capacity: number) {
+		this.detailCache.setCapacity(setTaskDetailCacheCapacity(capacity));
 	}
 
 	async search(options: SearchOptions = {}): Promise<SearchResult[]> {
@@ -281,31 +336,42 @@ export class ApiClient {
 	}
 
 	async createTask(task: Omit<Task, "id" | "createdDate">): Promise<Task> {
-		return this.fetchJson<Task>(`${API_BASE}/tasks`, {
+		const created = await this.fetchJson<Task>(`${API_BASE}/tasks`, {
 			method: "POST",
 			body: JSON.stringify(task),
 		});
+		this.detailCache.invalidate();
+		return created;
 	}
 
 	async updateTask(id: string, updates: TaskUpdateRequest): Promise<Task> {
-		return this.fetchJson<Task>(`${API_BASE}/tasks/${id}`, {
+		const updated = await this.fetchJson<Task>(`${API_BASE}/tasks/${id}`, {
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
+		this.detailCache.invalidate();
+		return updated;
 	}
 
 	async reorderTask(payload: ReorderTaskPayload): Promise<{ success: boolean; task: Task; changedTasks: Task[] }> {
-		return this.fetchJson<{ success: boolean; task: Task; changedTasks: Task[] }>(`${API_BASE}/tasks/reorder`, {
-			method: "POST",
-			body: JSON.stringify(payload),
-		});
+		const result = await this.fetchJson<{ success: boolean; task: Task; changedTasks: Task[] }>(
+			`${API_BASE}/tasks/reorder`,
+			{
+				method: "POST",
+				body: JSON.stringify(payload),
+			},
+		);
+		this.detailCache.invalidate();
+		return result;
 	}
 
 	async moveTasks(payload: MoveTasksPayload): Promise<MoveTasksResult> {
-		return this.fetchJson<MoveTasksResult>(`${API_BASE}/tasks/move`, {
+		const result = await this.fetchJson<MoveTasksResult>(`${API_BASE}/tasks/move`, {
 			method: "POST",
 			body: JSON.stringify(payload),
 		});
+		this.detailCache.invalidate();
+		return result;
 	}
 
 	// Not retried, for the same reason demote is not: the second attempt would target a task the
@@ -314,20 +380,25 @@ export class ApiClient {
 		const response = await this.fetchWithoutRetry(`${API_BASE}/tasks/${id}`, {
 			method: "DELETE",
 		});
-		return response.json();
+		const result = await response.json();
+		this.detailCache.invalidate();
+		return result;
 	}
 
 	async completeTask(id: string): Promise<void> {
 		await this.fetchWithRetry(`${API_BASE}/tasks/${id}/complete`, {
 			method: "POST",
 		});
+		this.detailCache.invalidate();
 	}
 
 	async demoteTask(id: string): Promise<TaskVacancyResponse> {
 		const response = await this.fetchWithoutRetry(`${API_BASE}/tasks/${encodeURIComponent(id)}/demote`, {
 			method: "POST",
 		});
-		return response.json();
+		const result = await response.json();
+		this.detailCache.invalidate();
+		return result;
 	}
 
 	async getCleanupPreview(age: number): Promise<{
@@ -367,40 +438,30 @@ export class ApiClient {
 	}
 
 	async fetchStatuses(): Promise<string[]> {
-		const response = await fetch(`${API_BASE}/statuses`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch statuses");
-		}
+		const response = await this.fetchWithRetry(`${API_BASE}/statuses`);
 		return response.json();
 	}
 
 	async fetchConfig(): Promise<BacklogConfig> {
-		const response = await fetch(`${API_BASE}/config`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch config");
-		}
+		const response = await this.fetchWithRetry(`${API_BASE}/config`);
 		return response.json();
 	}
 
 	async updateConfig(config: BacklogConfig): Promise<BacklogConfig> {
-		const response = await fetch(`${API_BASE}/config`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/config`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify(config),
 		});
-		if (!response.ok) {
-			throw new Error("Failed to update config");
-		}
-		return response.json();
+		const updated = await response.json();
+		this.adoptExplicitProjectScope(response.headers.get("X-Backlog-Project-Scope") ?? "");
+		return updated;
 	}
 
 	async fetchDoc(filename: string): Promise<Document> {
-		const response = await fetch(`${API_BASE}/docs/${encodeURIComponent(filename)}`);
-		if (!response.ok) {
-			throw await toApiError(response, "Failed to fetch document");
-		}
+		const response = await this.fetchWithRetry(`${API_BASE}/docs/${encodeURIComponent(filename)}`);
 		return response.json();
 	}
 
@@ -413,96 +474,71 @@ export class ApiClient {
 			payload.path = path;
 		}
 
-		const response = await fetch(`${API_BASE}/docs/${encodeURIComponent(filename)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/docs/${encodeURIComponent(filename)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify(payload),
 		});
-		if (!response.ok) {
-			throw await toApiError(response, "Failed to update document");
-		}
 		return response.json();
 	}
 
 	async createDoc(filename: string, content: string, path?: string): Promise<Document & { success?: boolean }> {
-		const response = await fetch(`${API_BASE}/docs`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/docs`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({ filename, content, path }),
 		});
-		if (!response.ok) {
-			throw new Error("Failed to create document");
-		}
 		return response.json();
 	}
 
 	async fetchDecision(id: string): Promise<Decision> {
-		const response = await fetch(`${API_BASE}/decisions/${encodeURIComponent(id)}`);
-		if (!response.ok) {
-			throw await toApiError(response, "Failed to fetch decision");
-		}
+		const response = await this.fetchWithRetry(`${API_BASE}/decisions/${encodeURIComponent(id)}`);
 		return response.json();
 	}
 
 	async updateDecision(id: string, content: string): Promise<void> {
-		const response = await fetch(`${API_BASE}/decisions/${encodeURIComponent(id)}`, {
+		await this.fetchWithRetry(`${API_BASE}/decisions/${encodeURIComponent(id)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "text/plain",
 			},
 			body: content,
 		});
-		if (!response.ok) {
-			throw await toApiError(response, "Failed to update decision");
-		}
 	}
 
 	async createDecision(title: string): Promise<Decision> {
-		const response = await fetch(`${API_BASE}/decisions`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/decisions`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({ title }),
 		});
-		if (!response.ok) {
-			throw new Error("Failed to create decision");
-		}
 		return response.json();
 	}
 
 	async fetchMilestones(): Promise<Milestone[]> {
-		const response = await fetch(`${API_BASE}/milestones`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch milestones");
-		}
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones`);
 		return response.json();
 	}
 
 	async fetchArchivedMilestones(): Promise<Milestone[]> {
-		const response = await fetch(`${API_BASE}/milestones/archived`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch archived milestones");
-		}
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/archived`);
 		return response.json();
 	}
 
 	async createMilestone(title: string, description?: string, dueDate?: string): Promise<Milestone> {
-		const response = await fetch(`${API_BASE}/milestones`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({ title, description, dueDate }),
 		});
-		if (!response.ok) {
-			const data = await response.json().catch(() => ({}));
-			throw new Error(data.error || "Failed to create milestone");
-		}
 		return response.json();
 	}
 
@@ -511,17 +547,13 @@ export class ApiClient {
 		title: string,
 		dueDate?: string | null,
 	): Promise<{ success: boolean; milestone?: Milestone | null; message?: string }> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({ title, dueDate }),
 		});
-		if (!response.ok) {
-			const data = await response.json().catch(() => ({}));
-			throw new Error(data.error || "Failed to update milestone");
-		}
 		return response.json();
 	}
 
@@ -529,28 +561,20 @@ export class ApiClient {
 		id: string,
 		options: { taskHandling?: "clear" | "keep" | "reassign"; reassignTo?: string } = {},
 	): Promise<{ success: boolean; message?: string }> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
 			method: "DELETE",
 			headers: {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify(options),
 		});
-		if (!response.ok) {
-			const data = await response.json().catch(() => ({}));
-			throw new Error(data.error || "Failed to remove milestone");
-		}
 		return response.json();
 	}
 
 	async archiveMilestone(id: string): Promise<{ success: boolean; milestone?: Milestone | null }> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}/archive`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}/archive`, {
 			method: "POST",
 		});
-		if (!response.ok) {
-			const data = await response.json().catch(() => ({}));
-			throw new Error(data.error || "Failed to archive milestone");
-		}
 		return response.json();
 	}
 
@@ -563,7 +587,8 @@ export class ApiClient {
 	}
 
 	async checkStatus(): Promise<InitializationStatus> {
-		return this.fetchJson<InitializationStatus>(`${API_BASE}/status`);
+		if (this.scopeBootstrap) return this.scopeBootstrap;
+		return this.fetchStatus();
 	}
 
 	async initializeProject(options: {
@@ -588,14 +613,19 @@ export class ApiClient {
 			defaultPort?: number;
 			autoOpenBrowser?: boolean;
 		};
-	}): Promise<{ success: boolean; projectName: string; mcpResults?: Record<string, string> }> {
-		return this.fetchJson<{ success: boolean; projectName: string; mcpResults?: Record<string, string> }>(
-			`${API_BASE}/init`,
-			{
-				method: "POST",
-				body: JSON.stringify(options),
-			},
-		);
+	}): Promise<{ success: boolean; projectName: string; mcpResults?: Record<string, string>; projectScope: string }> {
+		const result = await this.fetchJson<{
+			success: boolean;
+			projectName: string;
+			mcpResults?: Record<string, string>;
+			projectScope: string;
+		}>(`${API_BASE}/init`, {
+			method: "POST",
+			body: JSON.stringify(options),
+		});
+		if (!result.success) throw new ApiError("Initialization failed");
+		this.adoptExplicitProjectScope(result.projectScope);
+		return result;
 	}
 }
 

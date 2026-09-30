@@ -42,7 +42,7 @@ auto_commit: false
 		expect(files.length).toBe(1);
 		expect(task.id).toBe("TASK-1");
 
-		const tasks = await core.listTasksWithMetadata();
+		const tasks = await core.queryTasks({ includeCrossBranch: false });
 		expect(tasks).toHaveLength(1);
 		expect(tasks[0]?.id).toBe("TASK-1");
 	});
@@ -98,7 +98,7 @@ auto_commit: false
 
 		await core.updateTasksBulk([{ ...current, ordinal: 2000 }], "Bulk symlink update", true);
 
-		expect(await core.gitOps.getLastCommitMessage()).toContain("Bulk symlink update");
+		expect(await core.git.getLastCommitMessage()).toContain("Bulk symlink update");
 		expect((await $`git status --short`.cwd(repoDir).text()).trim()).toBe("");
 	});
 });

@@ -138,7 +138,7 @@ export function useTaskDetailLoading({
 		if (detailSession === null || detailId === null) return;
 		let active = true;
 		void apiClient
-			.fetchTask(detailId)
+			.loadTaskDetail(detailId)
 			.then((detail) => {
 				if (active)
 					setModal((current) =>

@@ -43,16 +43,14 @@ async function enableGitTestProject(): Promise<void> {
 function installCrossBranchTripwires(server: McpServer) {
 	const error = new Error("MCP task search crossed the branch-loading boundary");
 	const loadTasks = spyOn(server.application, "loadTasks").mockRejectedValue(error);
-	const fetch = spyOn(server.application.gitOps, "fetch").mockRejectedValue(error);
-	const listRecentBranchTips = spyOn(server.application.gitOps, "listRecentBranchTips").mockRejectedValue(error);
-	const listRecentBranches = spyOn(server.application.gitOps, "listRecentBranches").mockRejectedValue(error);
-	const listRecentRemoteBranches = spyOn(server.application.gitOps, "listRecentRemoteBranches").mockRejectedValue(
-		error,
-	);
-	const listFilesInTree = spyOn(server.application.gitOps, "listFilesInTree").mockRejectedValue(error);
-	const showFile = spyOn(server.application.gitOps, "showFile").mockRejectedValue(error);
-	const getRepositoryRoot = spyOn(server.application.gitOps, "getRepositoryRoot").mockRejectedValue(error);
-	const resolveCommit = spyOn(server.application.gitOps, "resolveCommit").mockRejectedValue(error);
+	const fetch = spyOn(server.application.git, "fetch").mockRejectedValue(error);
+	const listRecentBranchTips = spyOn(server.application.git, "listRecentBranchTips").mockRejectedValue(error);
+	const listRecentBranches = spyOn(server.application.git, "listRecentBranches").mockRejectedValue(error);
+	const listRecentRemoteBranches = spyOn(server.application.git, "listRecentRemoteBranches").mockRejectedValue(error);
+	const listFilesInTree = spyOn(server.application.git, "listFilesInTree").mockRejectedValue(error);
+	const showFile = spyOn(server.application.git, "showFile").mockRejectedValue(error);
+	const getRepositoryRoot = spyOn(server.application.git, "getRepositoryRoot").mockRejectedValue(error);
+	const resolveCommit = spyOn(server.application.git, "resolveCommit").mockRejectedValue(error);
 
 	return {
 		expectUntouched() {
@@ -760,7 +758,6 @@ describe("MCP task tools (MVP)", () => {
 
 		// The setup mutations above moved task files; dispose the content store so
 		// pending fs-watcher reconciles can't fire inside the tripwire window.
-		mcpServer.application.disposeContentStore();
 
 		const tripwires = installCrossBranchTripwires(mcpServer);
 		try {

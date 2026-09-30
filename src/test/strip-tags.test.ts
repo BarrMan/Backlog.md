@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Task } from "../types/index.ts";
-import { formatTaskListItem } from "../ui/board.ts";
+import { formatTaskListItem } from "../ui/board/column-policy.ts";
 import { stripBlessedFgTags } from "../ui/utils/strip-tags.ts";
 
 describe("stripBlessedFgTags", () => {

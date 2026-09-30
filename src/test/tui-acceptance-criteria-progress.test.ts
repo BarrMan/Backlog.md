@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AcceptanceCriterion, Task } from "../types/index.ts";
 import { formatAcceptanceCriteriaProgress } from "../ui/acceptance-criteria-progress.ts";
-import { formatTaskListItem } from "../ui/board.ts";
+import { formatTaskListItem } from "../ui/board/column-policy.ts";
 import { formatTaskViewerListItem } from "../ui/task-viewer-with-search.ts";
 import { stripBlessedFgTags } from "../ui/utils/strip-tags.ts";
 

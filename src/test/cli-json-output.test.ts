@@ -368,7 +368,7 @@ describe("CLI JSON output", () => {
 
 			const core = new Core(customTestDir);
 			await initializeFilesystemTestProject(core, "Custom JSON Output Test", "planning/backlog-data");
-			await core.filesystem.saveDocument({
+			await new Core(customTestDir).filesystem.saveDocument({
 				id: "doc-1",
 				title: "Custom guide",
 				type: "guide",

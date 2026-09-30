@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { ScreenInterface } from "neo-neo-bblessed";
 import type { Core, TuiTaskEditResult } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { renderBoardTui } from "../ui/board.ts";
+import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { createScreen } from "../ui/tui.ts";
 import { withTimeout } from "./test-utils.ts";
 
@@ -90,17 +90,28 @@ async function withBoardPopup(
 	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 	const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget;
 	let subscriber: ((nextTasks: Task[], nextStatuses: string[]) => void) | undefined;
+	let resolveBoardReady: (() => void) | undefined;
+	const boardReady = new Promise<void>((resolve) => {
+		resolveBoardReady = resolve;
+	});
 	try {
 		const core = { editTaskInTui: options.editTaskInTui ?? (async () => ({ changed: false })) } as unknown as Core;
-		const boardPromise = renderBoardTui(options.tasks ?? [createTask(), OTHER_TASK], BOARD_STATUSES, "horizontal", 20, {
-			screen,
-			core,
-			hideEmptyColumns: options.hideEmptyColumns,
-			subscribeUpdates: (update) => {
-				subscriber = update;
+		const boardPromise = new TUIRenderer(
+			options.tasks ?? [createTask(), OTHER_TASK],
+			BOARD_STATUSES,
+			"horizontal",
+			20,
+			{
+				screen,
+				core,
+				hideEmptyColumns: options.hideEmptyColumns,
+				subscribeUpdates: (update) => {
+					subscriber = update;
+				},
+				onReady: () => resolveBoardReady?.(),
 			},
-		});
-		await Bun.sleep(20);
+		).run();
+		await withTimeout(boardReady, "board ready", 1000);
 
 		for (let step = 0; step < (options.startColumn ?? 0); step++) {
 			pressKey(screen, "right");

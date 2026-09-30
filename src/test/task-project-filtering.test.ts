@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { ContentStore } from "../core/content-store.ts";
-import { createTaskSearchIndex } from "../utils/task-search.ts";
 import { getTestCliPath } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
@@ -57,8 +55,6 @@ describe("task project filtering", () => {
 	});
 
 	afterEach(async () => {
-		core.disposeSearchService();
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 
@@ -89,28 +85,22 @@ describe("task project filtering", () => {
 		expect(tasks.map((task) => task.title)).toEqual(["Shared Web failure"]);
 	});
 
-	it("uses the same project semantics in direct filesystem, content-store, and interactive search helpers", async () => {
+	it("uses the same project semantics in direct filesystem and persistent search helpers", async () => {
 		const filesystemTasks = await core.filesystem.listTasks({ project: ["api", "MOBILE"] });
 		expect(filesystemTasks.map((task) => task.title).sort()).toEqual([
 			"Shared API capability",
 			"Shared Mobile exploration",
 		]);
 
-		const store = new ContentStore(core.filesystem);
-		try {
-			await store.ensureInitialized();
-			expect(store.getTasks({ project: "WEB" }).map((task) => task.title)).toEqual(["Shared Web failure"]);
-			const interactiveMatches = createTaskSearchIndex(store.getTasks()).search({
-				query: "Shared",
-				project: ["Web", "Mobile"],
-			});
-			expect(interactiveMatches.map((task) => task.title).sort()).toEqual([
-				"Shared Mobile exploration",
-				"Shared Web failure",
-			]);
-		} finally {
-			store.dispose();
-		}
+		const persistentMatches = await core.searchPersistently({
+			query: "Shared",
+			types: ["task"],
+			filters: { project: ["Web", "Mobile"] },
+		});
+		expect(persistentMatches.flatMap((result) => (result.type === "task" ? [result.task.title] : [])).sort()).toEqual([
+			"Shared Mobile exploration",
+			"Shared Web failure",
+		]);
 	});
 
 	it("filters CLI task list with repeated and comma-separated canonicalized values", async () => {

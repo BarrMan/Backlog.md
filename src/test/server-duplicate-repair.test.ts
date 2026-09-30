@@ -6,12 +6,14 @@ import type { DuplicateRepairPlan, DuplicateRepairResult } from "../core/duplica
 import { serializeTask } from "../markdown/serializer.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { SearchResult, Task } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup, sleep, withTimeout } from "./test-utils.ts";
+import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let server: BacklogServer | null = null;
 let serverPort = 0;
 let setupCore: Core;
+let projectScope = "";
+const nativeFetch = globalThis.fetch;
 
 function makeTask(id: string, title: string): Task {
 	return {
@@ -27,27 +29,30 @@ function makeTask(id: string, title: string): Task {
 }
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
-	return await fetch(`http://127.0.0.1:${serverPort}${path}`, init);
+	const request = new Request(`http://127.0.0.1:${serverPort}${path}`, init);
+	request.headers.set("X-Backlog-Project-Scope", projectScope);
+	return await nativeFetch(request);
 }
 
 beforeEach(async () => {
 	testDir = createUniqueTestDir("server-duplicate-repair");
 	await mkdir(testDir, { recursive: true });
+	await Bun.write(
+		join(testDir, "backlog.config.yml"),
+		[
+			"project_name: Server duplicate repair",
+			"backlog_directory: planning/custom-backlog",
+			"statuses: [To Do, In Progress, Done]",
+			"labels: []",
+			"milestones: []",
+			"date_format: YYYY-MM-DD",
+			"remote_operations: false",
+			"check_active_branches: false",
+			"auto_commit: false",
+		].join("\n"),
+	);
 	setupCore = new Core(testDir);
-	setupCore.filesystem.setBacklogDirectory("planning/custom-backlog");
-	setupCore.filesystem.setConfigLocation("root");
 	await setupCore.filesystem.ensureBacklogStructure();
-	await setupCore.filesystem.saveConfig({
-		projectName: "Server duplicate repair",
-		backlogDirectory: "planning/custom-backlog",
-		statuses: ["To Do", "In Progress", "Done"],
-		labels: [],
-		milestones: [],
-		dateFormat: "YYYY-MM-DD",
-		remoteOperations: false,
-		checkActiveBranches: false,
-		autoCommit: false,
-	});
 	await Bun.write(join(setupCore.filesystem.tasksDir, "task-1 - Alpha.md"), serializeTask(makeTask("TASK-1", "Alpha")));
 	await Bun.write(join(setupCore.filesystem.tasksDir, "task-01 - Beta.md"), serializeTask(makeTask("TASK-01", "Beta")));
 	await Bun.write(
@@ -58,6 +63,9 @@ beforeEach(async () => {
 	server = new BacklogServer(testDir);
 	await server.start(0, false);
 	serverPort = server.getPort() ?? 0;
+	projectScope = (
+		(await (await nativeFetch(`http://127.0.0.1:${serverPort}/api/status`)).json()) as { projectScope: string }
+	).projectScope;
 	await retry(async () => {
 		const response = await request("/api/tasks/duplicates");
 		if (!response.ok) throw new Error(await response.text());
@@ -73,100 +81,24 @@ afterEach(async () => {
 });
 
 describe("duplicate repair server boundary", () => {
-	it("publishes a real preview refresh once before queued watcher reconciliation", async () => {
-		const messages: string[] = [];
-		const socket = new WebSocket(`ws://127.0.0.1:${serverPort}`);
-		const serverCore = (server as unknown as { core: Core }).core;
-		const originalLoadTasks = serverCore.loadTasks;
-		await withTimeout(
-			new Promise<void>((resolve, reject) => {
-				socket.onopen = () => resolve();
-				socket.onerror = () => reject(new Error("WebSocket failed to open"));
-			}),
-			"duplicate preview WebSocket",
-			2000,
+	it("reads a duplicate preview and subsequent search from current persistent data", async () => {
+		const previewResponse = await request("/api/tasks/duplicates");
+		expect(previewResponse.status).toBe(200);
+		await Bun.write(
+			join(setupCore.filesystem.tasksDir, "task-1 - Alpha.md"),
+			serializeTask(makeTask("TASK-1", "Alpha refreshed")),
 		);
-		socket.onmessage = (event) => messages.push(String(event.data));
-
-		try {
-			const store = await serverCore.getContentStore();
-			(store as unknown as { stopRootWatchers: () => void }).stopRootWatchers();
-			let markHeldLoadStarted: () => void = () => {};
-			let releaseHeldLoad: () => void = () => {};
-			const heldLoadStarted = new Promise<void>((resolve) => {
-				markHeldLoadStarted = resolve;
-			});
-			const heldLoadRelease = new Promise<void>((resolve) => {
-				releaseHeldLoad = resolve;
-			});
-			let holdNextLoad = true;
-			serverCore.loadTasks = async () => {
-				const tasks = await originalLoadTasks.call(serverCore);
-				if (holdNextLoad) {
-					holdNextLoad = false;
-					markHeldLoadStarted();
-					await heldLoadRelease;
-				}
-				return tasks;
-			};
-
-			const staleRefresh = store.refreshTasks();
-			await withTimeout(heldLoadStarted, "held stale task refresh", 2000);
-			await Bun.write(
-				join(serverCore.filesystem.tasksDir, "task-1 - Alpha.md"),
-				serializeTask(makeTask("TASK-1", "Alpha refreshed")),
-			);
-
-			const previewRequest = request("/api/tasks/duplicates");
-			await sleep(25);
-			releaseHeldLoad();
-			await staleRefresh;
-			const previewResponse = await previewRequest;
-			expect(previewResponse.status).toBe(200);
-			await retry(async () => {
-				if (!messages.includes("tasks-updated")) throw new Error("Preview refresh was not published");
-			});
-
-			const searchResponse = await request("/api/search?query=refreshed&type=task");
-			const searchResults = (await searchResponse.json()) as SearchResult[];
-			expect(searchResults.some((result) => result.type === "task" && result.task.title === "Alpha refreshed")).toBe(
-				true,
-			);
-
-			await sleep(100);
-			expect(messages.filter((message) => message === "tasks-updated")).toHaveLength(1);
-		} finally {
-			serverCore.loadTasks = originalLoadTasks;
-			socket.close();
-		}
+		const searchResponse = await request("/api/search?query=refreshed&type=task");
+		const searchResults = (await searchResponse.json()) as SearchResult[];
+		expect(searchResults.some((result) => result.type === "task" && result.task.title === "Alpha refreshed")).toBe(
+			true,
+		);
 	});
 
-	it("builds one preview from one Core-owned active and completed snapshot", async () => {
-		const serverCore = (server as unknown as { core: Core }).core;
-		const originalListTasks = serverCore.filesystem.listTasks.bind(serverCore.filesystem);
-		const originalListCompletedTasks = serverCore.filesystem.listCompletedTasks.bind(serverCore.filesystem);
-		let activeLoads = 0;
-		let completedLoads = 0;
-		serverCore.filesystem.listTasks = async (...args) => {
-			activeLoads += 1;
-			return await originalListTasks(...args);
-		};
-		serverCore.filesystem.listCompletedTasks = async (...args) => {
-			completedLoads += 1;
-			return await originalListCompletedTasks(...args);
-		};
-
-		try {
-			const response = await request("/api/tasks/duplicates");
-			expect(response.status).toBe(200);
-			expect(((await response.json()) as DuplicateRepairPlan).groups).toHaveLength(1);
-		} finally {
-			serverCore.filesystem.listTasks = originalListTasks;
-			serverCore.filesystem.listCompletedTasks = originalListCompletedTasks;
-		}
-
-		expect(activeLoads).toBe(1);
-		expect(completedLoads).toBe(1);
+	it("builds one preview from active and completed persistent task records", async () => {
+		const response = await request("/api/tasks/duplicates");
+		expect(response.status).toBe(200);
+		expect(((await response.json()) as DuplicateRepairPlan).groups).toHaveLength(1);
 	});
 
 	it("returns the shared preview and applies it with the preview fingerprint", async () => {

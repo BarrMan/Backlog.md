@@ -1,6 +1,6 @@
 import type { Task } from "../types/index.ts";
 import { canonicalTaskId } from "./task-id.ts";
-import { createTaskRecordIndex } from "./task-record-index.ts";
+import { createTaskRecordIndex, type TaskRecordIndex } from "./task-record-index.ts";
 import { compareTaskIds } from "./task-sorting.ts";
 
 /** Which way a traversal walks the dependency edges away from the selected task. */
@@ -50,6 +50,42 @@ export interface DependencyGraph {
 type GraphEntry = { key: string; node: DependencyGraphNode };
 type GraphTraversalState = { key: string; depth: number };
 
+export interface DependencyGraphContext {
+	readonly index: TaskRecordIndex;
+	readonly dependencies: ReadonlyMap<string, readonly { key: string; reference: string }[]>;
+	readonly dependents: ReadonlyMap<string, readonly { key: string; reference: string }[]>;
+}
+
+export type DependencyGraphOptions = {
+	tasks: Task[];
+	completedTasks?: Task[];
+	statuses?: readonly string[];
+	ambiguousIds?: ReadonlySet<string>;
+	index?: TaskRecordIndex;
+};
+
+/** Prepare canonical relationship indexes once for a task corpus. */
+export function createDependencyGraphContext(options: DependencyGraphOptions): DependencyGraphContext {
+	const index = options.index ?? createTaskRecordIndex(options);
+	const dependencies = new Map<string, Array<{ key: string; reference: string }>>();
+	const dependents = new Map<string, Array<{ key: string; reference: string }>>();
+	for (const record of index.records) {
+		const fromKey = canonicalTaskId(record.task.id);
+		const declared = (record.task.dependencies ?? []).map((reference) => ({
+			key: canonicalTaskId(reference),
+			reference,
+		}));
+		dependencies.set(fromKey, declared);
+		for (const dependency of declared) {
+			const existing = dependents.get(dependency.key);
+			if (existing) existing.push({ key: fromKey, reference: record.task.id });
+			else dependents.set(dependency.key, [{ key: fromKey, reference: record.task.id }]);
+		}
+	}
+	for (const entries of dependents.values()) entries.sort((a, b) => compareTaskIds(a.key, b.key));
+	return { index, dependencies, dependents };
+}
+
 /** The hop distance from the root in one direction, or null when the node is not reachable that way. */
 export function depthInDirection(node: DependencyGraphNode, direction: DependencyDirection): number | null {
 	return direction === "dependencies" ? node.dependencyDepth : node.dependentDepth;
@@ -81,14 +117,10 @@ export function nodesInDirection(graph: DependencyGraph, direction: DependencyDi
  */
 export function buildDependencyGraph(
 	root: Task,
-	options: {
-		tasks: Task[];
-		completedTasks?: Task[];
-		statuses?: readonly string[];
-		ambiguousIds?: ReadonlySet<string>;
-	},
+	options: DependencyGraphOptions | DependencyGraphContext,
 ): DependencyGraph {
-	const index = createTaskRecordIndex(options);
+	const context = "index" in options && "dependencies" in options ? options : createDependencyGraphContext(options);
+	const { index } = context;
 	const rootKey = canonicalTaskId(root.id);
 	const entries = new Map<string, GraphEntry>();
 	const edges = new Map<string, { fromKey: string; toKey: string }>();
@@ -144,26 +176,12 @@ export function buildDependencyGraph(
 	// graph still resolves for a task that is not part of the supplied corpus.
 	const dependenciesOf = (key: string): string[] => {
 		if (key === rootKey) return root.dependencies ?? [];
-		const record = index.lookup(key);
-		return record !== undefined && record !== "ambiguous" ? (record.task.dependencies ?? []) : [];
+		return context.dependencies.get(key)?.map((dependency) => dependency.reference) ?? [];
 	};
-
-	// Who declares a dependency on an identity. Built in one pass so the reverse traversal stays
-	// linear no matter how wide the corpus is.
-	const declarers = new Map<string, Set<string>>();
-	for (const record of index.records) {
-		const fromKey = canonicalTaskId(record.task.id);
-		for (const dependency of record.task.dependencies ?? []) {
-			const toKey = canonicalTaskId(dependency);
-			const existing = declarers.get(toKey);
-			if (existing) existing.add(fromKey);
-			else declarers.set(toKey, new Set([fromKey]));
-		}
-	}
 
 	const traverse = (
 		direction: DependencyDirection,
-		neighbours: (key: string) => Array<{ key: string; reference: string }>,
+		neighbours: (key: string) => ReadonlyArray<{ key: string; reference: string }>,
 	) => {
 		const queue: GraphTraversalState[] = [{ key: rootKey, depth: 0 }];
 		for (let cursor = 0; cursor < queue.length; cursor++) {
@@ -182,9 +200,7 @@ export function buildDependencyGraph(
 	traverse("dependencies", (key) =>
 		dependenciesOf(key).map((reference) => ({ key: canonicalTaskId(reference), reference })),
 	);
-	traverse("dependents", (key) =>
-		[...(declarers.get(key) ?? [])].sort(compareTaskIds).map((declarer) => ({ key: declarer, reference: declarer })),
-	);
+	traverse("dependents", (key) => context.dependents.get(key) ?? []);
 
 	const rootEntry = entries.get(rootKey);
 	const ordered = [...entries.values()]

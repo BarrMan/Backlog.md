@@ -19,8 +19,6 @@ import {
 } from "./schemas.ts";
 
 export function registerDocumentTools(server: McpServer, _config: BacklogConfig): void {
-	const handlers = new DocumentHandlers(server.application);
-
 	const listDocumentsTool: McpToolHandler = createSimpleValidatedTool(
 		{
 			name: "document_list",
@@ -29,7 +27,7 @@ export function registerDocumentTools(server: McpServer, _config: BacklogConfig)
 			annotations: { title: "List Documents", readOnlyHint: true, destructiveHint: false },
 		},
 		documentListSchema,
-		async (input) => handlers.listDocuments(input as DocumentListArgs),
+		async (input) => new DocumentHandlers(server.createOperationCore()).listDocuments(input as DocumentListArgs),
 	);
 
 	const viewDocumentTool: McpToolHandler = createSimpleValidatedTool(
@@ -40,7 +38,7 @@ export function registerDocumentTools(server: McpServer, _config: BacklogConfig)
 			annotations: { title: "View Document", readOnlyHint: true, destructiveHint: false },
 		},
 		documentViewSchema,
-		async (input) => handlers.viewDocument(input as DocumentViewArgs),
+		async (input) => new DocumentHandlers(server.createOperationCore()).viewDocument(input as DocumentViewArgs),
 	);
 
 	const createDocumentTool: McpToolHandler = createSimpleValidatedTool(
@@ -52,7 +50,7 @@ export function registerDocumentTools(server: McpServer, _config: BacklogConfig)
 			annotations: { title: "Create Document", destructiveHint: false },
 		},
 		documentCreateSchema,
-		async (input) => handlers.createDocument(input as DocumentCreateArgs),
+		async (input) => new DocumentHandlers(server.createOperationCore()).createDocument(input as DocumentCreateArgs),
 	);
 
 	const updateDocumentTool: McpToolHandler = createSimpleValidatedTool(
@@ -64,7 +62,7 @@ export function registerDocumentTools(server: McpServer, _config: BacklogConfig)
 			annotations: { title: "Update Document", destructiveHint: false },
 		},
 		documentUpdateSchema,
-		async (input) => handlers.updateDocument(input as DocumentUpdateArgs),
+		async (input) => new DocumentHandlers(server.createOperationCore()).updateDocument(input as DocumentUpdateArgs),
 	);
 
 	const searchDocumentTool: McpToolHandler = createSimpleValidatedTool(
@@ -75,7 +73,7 @@ export function registerDocumentTools(server: McpServer, _config: BacklogConfig)
 			annotations: { title: "Search Documents", readOnlyHint: true, destructiveHint: false },
 		},
 		documentSearchSchema,
-		async (input) => handlers.searchDocuments(input as DocumentSearchArgs),
+		async (input) => new DocumentHandlers(server.createOperationCore()).searchDocuments(input as DocumentSearchArgs),
 	);
 
 	server.addTool(listDocumentsTool);

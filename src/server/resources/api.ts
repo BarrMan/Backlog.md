@@ -1,6 +1,5 @@
-import { Elysia } from "elysia";
-import type { Core } from "../../core/backlog.ts";
-import type { WebSocketHub } from "../websocket-hub.ts";
+import { Elysia, ElysiaCustomStatusResponse } from "elysia";
+import type { ServerRequestScope } from "../project-scope.ts";
 import { decisionsResource } from "./decisions.ts";
 import { documentsResource } from "./documents.ts";
 import { milestonesResource } from "./milestones.ts";
@@ -9,17 +8,38 @@ import { searchResource } from "./search.ts";
 import { tasksResource } from "./tasks.ts";
 
 export type ServerServices = {
-	ready(): Promise<void>;
-	store(): ReturnType<Core["getContentStore"]>;
-	search(): ReturnType<Core["getSearchService"]>;
-	wasReady(): boolean;
-	configChanged(projectName: string): void;
+	createRequestScope(requireReady?: boolean): ServerRequestScope;
+	configChanged(): Promise<void>;
+	reconcile(scope?: ServerRequestScope["scope"], publication?: "tasks" | "milestones"): Promise<void>;
 };
 
-export type ResourceDependencies = { core: Core; services: ServerServices; publishData: WebSocketHub["publishData"] };
+export type ResourceDependencies = { services: ServerServices };
 
-export function createApiPlugin(core: Core, services: ServerServices, hub: Pick<WebSocketHub, "publishData">) {
-	const dependencies = { core, services, publishData: hub.publishData.bind(hub) };
+export function scopedResource(services: ServerServices, name: string) {
+	return new Elysia({ name })
+		.derive(() => services.createRequestScope())
+		.onBeforeHandle(({ request, scope, set }) => {
+			const path = new URL(request.url).pathname;
+			if (path === "/api/status" || path === "/api/version") return;
+			services.createRequestScope(true);
+			return scope.validate(request.headers.get("X-Backlog-Project-Scope"), set);
+		})
+		.onAfterHandle(async ({ request, response, scope, set }) => {
+			const responseStatus =
+				response instanceof Response
+					? response.status
+					: response instanceof ElysiaCustomStatusResponse
+						? Number(response.code)
+						: Number(set.status ?? 200);
+			if (request.method === "GET" || request.method === "HEAD" || responseStatus >= 400) return;
+			const path = new URL(request.url).pathname;
+			if (path === "/api/config" || path === "/api/init") return;
+			await services.reconcile(scope, path.startsWith("/api/milestones") ? "milestones" : "tasks");
+		});
+}
+
+export function createApiPlugin(services: ServerServices) {
+	const dependencies = { services };
 	return new Elysia({ name: "api" })
 		.use(tasksResource(dependencies))
 		.use(milestonesResource(dependencies))

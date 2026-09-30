@@ -1,12 +1,16 @@
 import type { Task } from "../types/index.ts";
 import { AmbiguousTaskIdError, canonicalTaskId } from "../utils/task-path.ts";
-import type { ContentStore } from "./content-store.ts";
 import { calculateBlockOrdinals } from "./reorder.ts";
+import type { TaskIdentityResolution } from "./task-identity-index.ts";
 
 interface OrderedTaskRow {
 	task: Task;
 	moved: boolean;
 }
+
+type OrderedTaskResolver = {
+	resolveTaskForMutation(taskId: string): TaskIdentityResolution;
+};
 
 function validateOrderedTaskIds(orderedTaskIds: string[], tasksToMove: Task[]): void {
 	const orderedKeys = new Set<string>();
@@ -23,7 +27,7 @@ function validateOrderedTaskIds(orderedTaskIds: string[], tasksToMove: Task[]): 
 }
 
 function resolveOrderedTaskRows(
-	store: ContentStore,
+	resolver: OrderedTaskResolver,
 	orderedTaskIds: string[],
 	tasksToMove: Task[],
 	failures: Array<{ taskId: string; reason: string }>,
@@ -35,7 +39,7 @@ function resolveOrderedTaskRows(
 		if (failedKeys.has(key)) return [];
 		const movedTask = movedByKey.get(key);
 		if (movedTask) return [{ task: movedTask, moved: true }];
-		const resolution = store.resolveTaskForMutation(key);
+		const resolution = resolver.resolveTaskForMutation(key);
 		if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(id, resolution.candidates);
 		return resolution.status === "found" ? [{ task: resolution.task, moved: false }] : [];
 	});
@@ -75,16 +79,16 @@ function assignOrderedTaskOrdinals(
 	return { tasksInOrder, requiresRebalance };
 }
 
-/** Plans ordered board placement without mutating the store or task objects. */
+/** Plans ordered board placement without mutating task objects. */
 export function planOrderedTaskPlacement({
-	store,
+	resolver,
 	orderedTaskIds,
 	tasksToMove,
 	failures,
 	applyMove,
 	defaultStep,
 }: {
-	store: ContentStore;
+	resolver: OrderedTaskResolver;
 	orderedTaskIds: string[];
 	tasksToMove: Task[];
 	failures: Array<{ taskId: string; reason: string }>;
@@ -92,7 +96,7 @@ export function planOrderedTaskPlacement({
 	defaultStep: number;
 }): { tasksInOrder: Task[]; originalTasks: Task[]; requiresRebalance: boolean } {
 	validateOrderedTaskIds(orderedTaskIds, tasksToMove);
-	const rows = resolveOrderedTaskRows(store, orderedTaskIds, tasksToMove, failures);
+	const rows = resolveOrderedTaskRows(resolver, orderedTaskIds, tasksToMove, failures);
 	const { tasksInOrder, requiresRebalance } = assignOrderedTaskOrdinals(rows, applyMove, defaultStep);
 	return { tasksInOrder, originalTasks: rows.map(({ task }) => task), requiresRebalance };
 }

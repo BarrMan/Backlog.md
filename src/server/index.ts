@@ -28,19 +28,15 @@ export async function findNextAvailablePort(startPort: number, maxPort = 65535):
 }
 
 export class BacklogServer {
-	private readonly core: Core;
 	private readonly host: ServerHost;
 	private readonly hub = new WebSocketHub();
 	private readonly services: BrowserServices;
-	private projectName = "Untitled Project";
 	private runtimeWorkingDirectory: string | null = null;
 
 	constructor(projectPath: string, dependencies: { createCore?: (path: string) => Core; host?: ServerHost } = {}) {
-		this.core = (dependencies.createCore ?? ((path) => new BacklogCore(path, { enableWatchers: true })))(projectPath);
+		const core = (dependencies.createCore ?? ((path) => new BacklogCore(path)))(projectPath);
 		this.host = dependencies.host ?? new ServerHost();
-		this.services = new BrowserServices(this.core, this.hub, (name) => {
-			this.projectName = name;
-		});
+		this.services = new BrowserServices(core, this.hub);
 	}
 
 	getPort(): number | null {
@@ -52,33 +48,27 @@ export class BacklogServer {
 			console.log("Server already running");
 			return;
 		}
-		const config = await this.core.filesystem.loadConfig();
+		const config = await this.services.scope.requestCore().filesystem.loadConfig();
 		const finalPort = port ?? config?.defaultPort ?? DEFAULT_BROWSER_PORT;
-		this.projectName = config?.projectName || "Untitled Project";
+		const projectName = config?.projectName || "Untitled Project";
 		const bundleDirectory = process.env[BUNDLE_ASSET_DIR_ENV]?.trim();
 		if (bundleDirectory) {
 			this.runtimeWorkingDirectory = process.cwd();
 			process.chdir(bundleDirectory);
 		}
 		try {
-			this.host.start(
-				createBacklogApp({ core: this.core, services: this.services, hub: this.hub }),
-				finalPort,
-				browserHtmlRoutes(),
-			);
+			await this.services.initialize();
+			this.host.start(createBacklogApp({ services: this.services, hub: this.hub }), finalPort, browserHtmlRoutes());
 		} catch (error) {
+			await this.host.stop();
+			await this.services.dispose();
+			await this.hub.close();
 			this.restoreWorkingDirectory();
-			const message = error instanceof Error ? error.message : String(error);
-			if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") {
-				console.error(`\n❌ Error: Port ${finalPort} is already in use. Use --port to specify a different port.\n`);
-				process.exit(1);
-			}
-			console.error("❌ Failed to start server:", message);
-			process.exit(1);
+			throw error;
 		}
 		const url = `http://${BROWSER_HOST}:${this.getPort() ?? finalPort}`;
 		console.log(`🚀 Backlog.md browser interface running at ${url}`);
-		console.log(`📊 Project: ${this.projectName}`);
+		console.log(`📊 Project: ${projectName}`);
 		console.log(`⏹️  Press ${process.platform === "darwin" ? "Cmd+C" : "Ctrl+C"} to stop the server`);
 		if (openBrowser && (config?.autoOpenBrowser ?? true)) {
 			console.log("🌐 Opening browser...");

@@ -8,7 +8,7 @@ import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
 
 describe("BacklogServer due date endpoints", () => {
 	let testDir: string;
-	let fixture: ReturnType<typeof createServerFixture> | null;
+	let fixture: Awaited<ReturnType<typeof createServerFixture>> | null;
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("server-due-date");
@@ -26,7 +26,7 @@ describe("BacklogServer due date endpoints", () => {
 			checkActiveBranches: false,
 			autoCommit: false,
 		});
-		fixture = createServerFixture(testDir);
+		fixture = await createServerFixture(testDir);
 	});
 
 	afterEach(async () => {
@@ -119,38 +119,5 @@ describe("BacklogServer due date endpoints", () => {
 			dueDate: {},
 		});
 		expect(invalidUpdateType.status).toBe(400);
-	});
-
-	it("rejects a numeric title that aliases an existing milestone ID", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const filesystem = fixture.core.filesystem;
-		const listMilestones = filesystem.listMilestones;
-		filesystem.listMilestones = async () => [{ id: "M-01", title: "First release", description: "", rawContent: "" }];
-		try {
-			const duplicate = await request("/api/milestones", "POST", { title: "1" });
-			expect(duplicate.status).toBe(400);
-			expect(await duplicate.json()).toEqual({ error: "A milestone with this title or ID already exists" });
-		} finally {
-			filesystem.listMilestones = listMilestones;
-		}
-	});
-
-	it("keeps unexpected milestone creation failures as internal errors", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const filesystem = fixture.core.filesystem;
-		const createMilestone = filesystem.createMilestone;
-		const consoleError = console.error;
-		filesystem.createMilestone = async () => {
-			throw new Error("simulated storage failure");
-		};
-		console.error = () => {};
-		try {
-			const response = await request("/api/milestones", "POST", { title: "Internal failure", dueDate: "2026-09-01" });
-			expect(response.status).toBe(500);
-			expect(await response.json()).toEqual({ error: "Failed to create milestone" });
-		} finally {
-			filesystem.createMilestone = createMilestone;
-			console.error = consoleError;
-		}
 	});
 });

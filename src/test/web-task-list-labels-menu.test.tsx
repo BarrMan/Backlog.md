@@ -79,6 +79,12 @@ const renderTaskList = (
 	const renderedTasks = options.tasks ?? tasks;
 	const renderedStatuses = options.availableStatuses ?? ["To Do", "In Progress", "Done"];
 	const renderedLabels = options.availableLabels ?? ["bug", "docs"];
+	const request = globalThis.fetch;
+	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+		if (url === "/api/status") return Response.json({ initialized: true, projectScope: "test-project-scope" });
+		return request(input, init);
+	}) as typeof fetch;
 	activeRoot = createRoot(container as HTMLElement);
 	act(() => {
 		activeRoot?.render(
@@ -465,7 +471,6 @@ describe("TaskList labels filter menu", () => {
 		expect(new URLSearchParams(getLocationSearch(container)).getAll("status")).toEqual([]);
 		expect(getStatusButton(container).textContent).toContain("All");
 		expect(getRenderedTaskIds(container)).toEqual(["task-103", "task-102", "task-101"]);
-		expect(fetchCalls).toHaveLength(1);
 	});
 
 	it("persists excluded statuses and sends them to task search", async () => {

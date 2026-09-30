@@ -40,11 +40,14 @@ export function collectDelimitedSearchParams(url: URL, names: string[]): string[
 		.filter(Boolean);
 }
 
-export function documentUpdateErrorResponse(error: unknown): Response {
-	if (error instanceof SyntaxError) return Response.json({ error: "Invalid request payload" }, { status: 400 });
-	if (isAmbiguousIdError(error)) return Response.json({ error: error.message }, { status: 409 });
+export function documentUpdateErrorResponse(error: unknown): {
+	status: 400 | 404 | 409 | 500;
+	body: { error: string };
+} {
+	if (error instanceof SyntaxError) return { status: 400, body: { error: "Invalid request payload" } };
+	if (isAmbiguousIdError(error)) return { status: 409, body: { error: error.message } };
 	if (error instanceof Error && error.message.startsWith("Document not found"))
-		return Response.json({ error: error.message }, { status: 404 });
+		return { status: 404, body: { error: error.message } };
 	if (
 		error instanceof DocumentPayloadValidationError ||
 		(error instanceof Error &&
@@ -52,9 +55,9 @@ export function documentUpdateErrorResponse(error: unknown): Response {
 				error.message.startsWith("Document path ") ||
 				error.message === "Document title cannot be empty."))
 	)
-		return Response.json({ error: (error as Error).message }, { status: 400 });
+		return { status: 400, body: { error: (error as Error).message } };
 	console.error("Error updating document:", error);
-	return Response.json({ error: "Failed to update document" }, { status: 500 });
+	return { status: 500, body: { error: "Failed to update document" } };
 }
 
 export function movedState(error: unknown, key: "archiveState" | "demotionState"): "moved" | "partial" | undefined {

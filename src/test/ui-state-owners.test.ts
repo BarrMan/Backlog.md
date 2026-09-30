@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Task } from "../types/index.ts";
-import { BoardSession } from "../ui/board/session.ts";
-import { moveTargetToAdjacentColumn } from "../ui/board-interaction.ts";
+import { moveTargetToAdjacentColumn } from "../ui/board/interaction.ts";
 import { TaskViewerSession } from "../ui/task-viewer-session.ts";
 import { UnifiedViewSession } from "../ui/unified/session.ts";
 
@@ -81,28 +80,21 @@ describe("UI state owners", () => {
 			() => ({ tasks: [firstTask, secondTask], completedTasks: [], statuses: ["To Do"] }),
 		);
 
-		expect(session.removeTask("BACK-1")).toBeTrue();
+		expect(
+			session.removeTask("BACK-1", {
+				search: "",
+				status: [],
+				excludeStatus: [],
+				taskTypes: [],
+				projects: [],
+				priority: "",
+				labels: [],
+				milestone: "",
+				labelMatch: "any",
+			}),
+		).toBeTrue();
 		expect(session.getTasks().map((item) => item.id)).toEqual(["BACK-2"]);
 		expect(session.filteredTasks.map((item) => item.id)).toEqual(["BACK-2"]);
-	});
-
-	test("settles composer work before board teardown", async () => {
-		const session = new BoardSession();
-		let resolveCreation: (() => void) | undefined;
-		const creation = session.trackTaskCreation(
-			new Promise<void>((resolve) => {
-				resolveCreation = resolve;
-			}),
-		);
-		let settled = false;
-		const closing = session.settleTaskCreation().then(() => {
-			settled = true;
-		});
-		expect(settled).toBeFalse();
-		resolveCreation?.();
-		await creation;
-		await closing;
-		expect(settled).toBeTrue();
 	});
 
 	test("unified session publishes watcher snapshots to the active view", () => {

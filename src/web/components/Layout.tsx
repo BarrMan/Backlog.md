@@ -1,6 +1,6 @@
 import { Outlet } from "react-router-dom";
 import type { DuplicateRepairPlan } from "../../core/duplicate-task-repair";
-import type { Decision, Document, Task } from "../../types";
+import type { Decision, Document, TaskSummary } from "../../types";
 import { DuplicateIdWarning } from "./DuplicateIdWarning";
 import { HealthIndicator, HealthSuccessToast } from "./HealthIndicator";
 import Navigation from "./Navigation";
@@ -10,7 +10,7 @@ interface LayoutProps {
 	projectName: string;
 	showSuccessToast: boolean;
 	onDismissToast: () => void;
-	tasks: Task[];
+	tasks: TaskSummary[];
 	docs: Document[];
 	decisions: Decision[];
 	isLoading: boolean;

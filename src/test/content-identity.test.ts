@@ -69,8 +69,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	core.disposeSearchService();
-	core.disposeContentStore();
 	await safeCleanup(TEST_DIR);
 });
 
@@ -267,8 +265,6 @@ describe("unreadable content directories", () => {
 			expect(unreadable).toEqual([]);
 			expect(hasContentIdentityIssues(await bare.diagnoseContentIdentity())).toBe(false);
 		} finally {
-			bare.disposeSearchService();
-			bare.disposeContentStore();
 			await safeCleanup(bareDir);
 		}
 	});

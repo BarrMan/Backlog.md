@@ -83,12 +83,48 @@ export interface Task {
 	branch?: string;
 	ordinal?: number;
 	filePath?: string;
+	contentRef?: string;
+	/** Internal body digest retained by summary-mode stores for change detection. */
+	contentRevision?: string;
 	// Metadata fields
 	lastModified?: Date;
 	source?: "local" | "remote" | "completed" | "local-branch";
 	/** Optional per-task callback command to run on status change (overrides global config) */
 	onStatusChange?: string;
 	agentConfiguration?: AgentConfiguration;
+}
+
+/** The task data retained by browser collection views; task bodies are detail-only. */
+export interface TaskSummary {
+	id: string;
+	title: string;
+	status: TaskStatus;
+	assignee: string[];
+	reporter?: string;
+	createdDate: string;
+	updatedDate?: string;
+	dueDate?: string;
+	labels: string[];
+	milestone?: string;
+	dependencies: string[];
+	references?: string[];
+	documentation?: string[];
+	modifiedFiles?: string[];
+	parentTaskId?: string;
+	parentTaskTitle?: string;
+	subtasks?: string[];
+	subtaskSummaries?: Array<{ id: string; title: string }>;
+	priority?: string;
+	type?: string;
+	project?: string;
+	branch?: string;
+	ordinal?: number;
+	source?: Task["source"];
+	acceptanceCriteriaCount: number;
+	checkedAcceptanceCriteriaCount: number;
+	definitionOfDoneCount: number;
+	checkedDefinitionOfDoneCount: number;
+	isReady: boolean;
 }
 
 export interface MilestoneBucket {

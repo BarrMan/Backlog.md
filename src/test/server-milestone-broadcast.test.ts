@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { Core } from "../core/backlog.ts";
 import { BacklogServer } from "../server/index.ts";
-import { createUniqueTestDir, retry, safeCleanup, withTimeout } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup, withTimeout } from "./test-utils.ts";
 
 let testDir: string;
 let server: BacklogServer | null = null;
 let serverPort = 0;
 let socket: WebSocket | null = null;
+let projectScope = "";
 
 beforeEach(async () => {
 	testDir = createUniqueTestDir("server-milestone-broadcast");
@@ -31,6 +32,7 @@ beforeEach(async () => {
 	await retry(async () => {
 		const response = await fetch(`http://127.0.0.1:${serverPort}/api/status`);
 		if (!response.ok) throw new Error("Server is not ready");
+		projectScope = ((await response.json()) as { projectScope: string }).projectScope;
 	});
 });
 
@@ -43,7 +45,7 @@ afterEach(async () => {
 });
 
 const openSocket = async (messages: string[]) => {
-	socket = new WebSocket(`ws://127.0.0.1:${serverPort}`);
+	socket = new WebSocket(`ws://127.0.0.1:${serverPort}?projectScope=${encodeURIComponent(projectScope)}`);
 	await withTimeout(
 		new Promise<void>((resolve, reject) => {
 			if (!socket) return reject(new Error("WebSocket was not created"));

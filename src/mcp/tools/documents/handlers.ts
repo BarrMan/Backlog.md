@@ -158,8 +158,7 @@ export class DocumentHandlers {
 	}
 
 	async searchDocuments(args: DocumentSearchArgs): Promise<CallToolResult> {
-		const searchService = await this.core.getSearchService();
-		const results = searchService.search({
+		const results = await this.core.searchPersistently({
 			query: args.query,
 			limit: args.limit,
 			types: ["document"],

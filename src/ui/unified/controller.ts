@@ -11,10 +11,11 @@ import { collectAvailableLabels } from "../../utils/label-filter.ts";
 import { hasAnyPrefix } from "../../utils/prefix-config.ts";
 import { applyTaskFilters, createTaskSearchIndex } from "../../utils/task-search.ts";
 import { type TaskWatcherCallbacks, watchTasks } from "../../utils/task-watcher.ts";
-import { createWorkspaceViewState, runAgentWorkspace } from "../agent-workspace.ts";
-import { renderBoardTui } from "../board.ts";
+import { AgentWorkspaceController, createWorkspaceViewState } from "../agent-workspace.ts";
+import type { BoardSharedFilters } from "../board/configuration.ts";
+import { TUIRenderer } from "../board/tui-renderer.ts";
 import { createLoadingScreen } from "../loading.ts";
-import { buildTaskViewerMilestoneFilterModel, viewTaskEnhanced } from "../task-viewer-with-search.ts";
+import { buildTaskViewerMilestoneFilterModel, TaskViewerController } from "../task-viewer-with-search.ts";
 import { createScreen, formatTuiTitle, keepTuiInputAlive } from "../tui.ts";
 import type { ViewType } from "../view-switcher.ts";
 import { UnifiedViewSession } from "./session.ts";
@@ -245,29 +246,6 @@ export async function getDuplicateTaskStartupWarning(core: Core): Promise<string
 
 type ViewResult = "switch" | "workspace" | "exit";
 
-async function runUnifiedViewLoop(
-	initialView: ViewType,
-	showView: (view: ViewType) => Promise<ViewResult>,
-	onViewChanged: (view: ViewType) => void,
-	onViewCompleted: () => void,
-): Promise<void> {
-	let currentView = initialView;
-	let isRunning = true;
-	while (isRunning) {
-		const result = await showView(currentView);
-		onViewCompleted();
-		if (result === "switch") {
-			currentView = currentView === "workspace" ? "kanban" : currentView === "kanban" ? "task-list" : "kanban";
-			onViewChanged(currentView);
-		} else if (result === "workspace") {
-			currentView = "workspace";
-			onViewChanged(currentView);
-		} else {
-			isRunning = false;
-		}
-	}
-}
-
 export function getEmptyUnifiedViewMessage(initialView: ViewType, parentTaskId?: string): string | null {
 	if (parentTaskId) return `No child tasks found for parent task ${parentTaskId}.`;
 	return initialView === "kanban" || initialView === "workspace" ? null : "No tasks found.";
@@ -284,277 +262,302 @@ export async function createTaskFromBoard(
 	return task;
 }
 
-/**
- * Main unified view controller that handles Tab switching between views
- */
-export async function runUnifiedView(options: UnifiedViewOptions): Promise<void> {
-	const releaseTuiInput = keepTuiInputAlive();
-	let sharedScreen: ReturnType<typeof createScreen> | undefined;
-	let taskWatcher: ReturnType<typeof watchTasks> | undefined;
-	let configWatcher: ReturnType<typeof watchConfig> | undefined;
-	let unsubscribeSession: (() => void) | undefined;
-	const stopWatchers = () => {
-		taskWatcher?.stop();
-		configWatcher?.stop();
-	};
-	process.once("exit", stopWatchers);
-	try {
-		const {
-			tasks: loadedTasks,
-			statuses: loadedStatuses,
-			readinessTasks: loadedReadinessTasks,
-		} = await loadTasksForUnifiedView(options.core, {
-			tasks: options.tasks,
-			tasksLoader: options.tasksLoader,
-			loadingScreenFactory: options.loadingScreenFactory,
-		});
+/** Main unified view controller that handles Tab switching between views. */
+export class UnifiedViewController {
+	private readonly releaseTuiInput = keepTuiInputAlive();
+	private sharedScreen: ReturnType<typeof createScreen> | undefined;
+	private taskWatcher: ReturnType<typeof watchTasks> | undefined;
+	private configWatcher: ReturnType<typeof watchConfig> | undefined;
+	private unsubscribeSession: (() => void) | undefined;
+	private exitHandler: (() => void) | undefined;
+	private session!: UnifiedViewSession;
+	private readonly workspaceState = createWorkspaceViewState();
+	private currentView: ViewType;
+	private isInitialLoad = true;
+	private kanbanStatuses: string[] = [];
+	private configuredLabels: string[] = [];
+	private milestoneEntities: Milestone[] = [];
+	private milestoneFilterModel!: ReturnType<typeof buildTaskViewerMilestoneFilterModel>;
+	private readinessTasks: Task[] | undefined;
+	private startupWarning: string | undefined;
+	private projectName: string | undefined;
+	private boardUpdater: ((nextTasks: Task[], nextStatuses: string[]) => void) | null = null;
+	private taskListUpdater:
+		| ((nextTasks: Task[], nextStatuses: string[], nextLabels: string[], nextSelectedTask?: Task) => void)
+		| null = null;
+	private viewResult: ViewResult = "exit";
 
-		const startupWarning = await getDuplicateTaskStartupWarning(options.core);
+	constructor(private readonly options: UnifiedViewOptions) {
+		this.currentView = options.initialView;
+	}
 
-		const baseTasks = (loadedTasks || []).filter((t) => t.id && t.id.trim() !== "" && hasAnyPrefix(t.id));
+	async run(): Promise<void> {
+		try {
+			const loaded = await loadTasksForUnifiedView(this.options.core, this.options);
+			if (!(await this.initialize(loaded))) return;
+			this.startWatchers();
+			await this.runViewLoop();
+		} catch (error) {
+			console.error(error instanceof Error ? error.message : error);
+			process.exit(1);
+		} finally {
+			this.cleanup();
+			this.releaseTuiInput();
+		}
+	}
+
+	private async initialize(loaded: UnifiedViewLoadResult): Promise<boolean> {
+		const baseTasks = loaded.tasks.filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id));
 		if (baseTasks.length === 0) {
-			const emptyMessage = getEmptyUnifiedViewMessage(options.initialView, options.filter?.parentTaskId);
+			const emptyMessage = getEmptyUnifiedViewMessage(this.options.initialView, this.options.filter?.parentTaskId);
 			if (emptyMessage) {
 				console.log(emptyMessage);
-				return;
+				return false;
 			}
 		}
-		const initialConfig = await options.core.filesystem.loadConfig();
-		let configuredLabels = initialConfig?.labels ?? [];
-		let milestoneEntities = await options.core.filesystem.listMilestones();
-		let milestoneFilterModel = buildTaskViewerMilestoneFilterModel(milestoneEntities);
-		const unifiedSession = new UnifiedViewSession(
+
+		const [config, milestones, startupWarning] = await Promise.all([
+			this.options.core.filesystem.loadConfig(),
+			this.options.core.filesystem.listMilestones(),
+			getDuplicateTaskStartupWarning(this.options.core),
+		]);
+		this.projectName = config?.projectName;
+		this.configuredLabels = config?.labels ?? [];
+		this.kanbanStatuses = loaded.statuses;
+		this.milestoneEntities = milestones;
+		this.milestoneFilterModel = buildTaskViewerMilestoneFilterModel(milestones);
+		this.readinessTasks = loaded.readinessTasks;
+		this.startupWarning = startupWarning;
+		this.session = new UnifiedViewSession(
 			baseTasks,
-			options.selectedTask,
-			createUnifiedViewFilters(options.filter),
+			this.options.selectedTask,
+			createUnifiedViewFilters(this.options.filter),
 		);
-		let currentView: ViewType = options.initialView;
-		const workspaceState = createWorkspaceViewState();
-		let kanbanStatuses = loadedStatuses ?? [];
-		let boardUpdater: ((nextTasks: Task[], nextStatuses: string[]) => void) | null = null;
-		let taskListUpdater:
-			| ((nextTasks: Task[], nextStatuses: string[], nextLabels: string[], nextSelectedTask?: Task) => void)
-			| null = null;
-		const getSharedScreen = () => {
-			if (process.stdout.isTTY) {
-				sharedScreen ??= createScreen({ title: formatTuiTitle("Board", initialConfig?.projectName) });
-			}
-			return sharedScreen;
-		};
+		this.unsubscribeSession = this.session.subscribeTasks(this.publishUpdates.bind(this));
+		return true;
+	}
 
-		const getRenderableTasks = () =>
-			unifiedSession.tasks.filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id));
-		const getBoardAvailableLabels = () => collectAvailableLabels(getRenderableTasks(), configuredLabels);
-		const getBoardAvailableMilestones = () => [...milestoneFilterModel.availableMilestoneTitles];
-
-		const emitBoardUpdate = () => {
-			if (!boardUpdater) return;
-			boardUpdater(getRenderableTasks(), kanbanStatuses);
-		};
-		const emitTaskListUpdate = () => {
-			if (!taskListUpdater) return;
-			taskListUpdater(getRenderableTasks(), kanbanStatuses, configuredLabels, unifiedSession.selectedTask);
-		};
-		unsubscribeSession = unifiedSession.subscribeTasks(() => {
-			emitBoardUpdate();
-			emitTaskListUpdate();
+	private startWatchers(): void {
+		const callbacks = createUnifiedTaskUpdateCallbacks(this.session);
+		this.taskWatcher = watchTasks(this.options.core, callbacks, this.session.tasks);
+		this.configWatcher = watchConfig(this.options.core, {
+			onConfigChanged: this.handleConfigChanged.bind(this),
 		});
-		const taskUpdateCallbacks = createUnifiedTaskUpdateCallbacks(unifiedSession);
-		let isInitialLoad = true; // Track if this is the first view load
-		taskWatcher = watchTasks(options.core, taskUpdateCallbacks, baseTasks);
+		this.exitHandler = this.stopWatchers.bind(this);
+		process.once("exit", this.exitHandler);
+	}
 
-		configWatcher = watchConfig(options.core, {
-			onConfigChanged: (config) => {
-				kanbanStatuses = config?.statuses ?? [];
-				configuredLabels = config?.labels ?? [];
-				emitBoardUpdate();
-				emitTaskListUpdate();
-			},
-		});
+	private async runViewLoop(): Promise<void> {
+		while (true) {
+			const result = await this.showCurrentView();
+			this.isInitialLoad = false;
+			if (result === "exit") return;
+			this.currentView =
+				result === "workspace"
+					? "workspace"
+					: this.currentView === "workspace"
+						? "kanban"
+						: this.currentView === "kanban"
+							? "task-list"
+							: "kanban";
+		}
+	}
 
-		// Function to show task view
-		const showTaskView = async (): Promise<ViewResult> => {
-			// The task viewer owns a separate screen, so release the Board/Workspace screen
-			// before opening it rather than leaving two Blessed screens active at once.
-			sharedScreen?.destroy();
-			sharedScreen = undefined;
-			const availableTasks = getRenderableTasks();
+	private showCurrentView(): Promise<ViewResult> {
+		if (this.currentView === "task-list" || this.currentView === "task-detail") return this.showTaskView();
+		if (this.currentView === "kanban") return this.showKanbanView();
+		return this.showWorkspaceView();
+	}
 
-			if (availableTasks.length === 0) {
-				console.log("No tasks available.");
-				return "exit";
-			}
+	private async showTaskView(): Promise<ViewResult> {
+		this.destroySharedScreen();
+		const tasks = this.getRenderableTasks();
+		if (tasks.length === 0) {
+			console.log("No tasks available.");
+			return "exit";
+		}
+		const selectedTask = this.session.selectedTask?.id
+			? tasks.find((task) => task.id === this.session.selectedTask?.id)
+			: undefined;
+		const task = selectedTask ?? tasks[0];
+		if (!task) return "exit";
 
-			// Find the task to view - if selectedTask has an ID, find it in available tasks
-			let taskToView: Task | undefined;
-			if (unifiedSession.selectedTask?.id) {
-				const foundTask = availableTasks.find((t) => t.id === unifiedSession.selectedTask?.id);
-				taskToView = foundTask || availableTasks[0];
-			} else {
-				taskToView = availableTasks[0];
-			}
+		this.viewResult = "exit";
+		try {
+			await new TaskViewerController(task, {
+				tasks,
+				core: this.options.core,
+				title: this.options.filter?.title,
+				filterDescription: this.options.filter?.filterDescription,
+				searchQuery: this.session.filters.searchQuery,
+				statusFilter: this.session.filters.statusFilter,
+				excludeStatus: this.session.filters.excludeStatus,
+				typeFilter: this.session.filters.typeFilter,
+				projectFilter: this.session.filters.projectFilter,
+				priorityFilter: this.session.filters.priorityFilter,
+				labelFilter: this.session.filters.labelFilter,
+				labelMatch: this.session.filters.labelMatch,
+				milestoneFilter: this.session.filters.milestoneFilter,
+				readyFilter: this.options.filter?.ready,
+				readinessTasks: this.readinessTasks,
+				limit: this.session.filters.limit,
+				startWithDetailFocus: this.currentView === "task-detail",
+				startWithSearchFocus: this.isInitialLoad && this.options.filter?.searchQuery !== undefined,
+				startupWarning: this.startupWarning,
+				subscribeUpdates: this.subscribeTaskListUpdates.bind(this),
+				onTaskChange: this.selectTask.bind(this),
+				onFilterChange: this.updateTaskListFilters.bind(this),
+				onTabPress: this.switchView.bind(this),
+			}).run();
+			return this.viewResult;
+		} finally {
+			this.taskListUpdater = null;
+		}
+	}
 
-			if (!taskToView) {
-				console.log("No task selected.");
-				return "exit";
-			}
+	private async showWorkspaceView(): Promise<ViewResult> {
+		const result = await new AgentWorkspaceController(this.options.core, {
+			screen: this.getSharedScreen(),
+			preserveScreen: true,
+			state: this.workspaceState,
+		}).run();
+		return result === "board" ? "switch" : "exit";
+	}
 
-			// Show enhanced task viewer with view switching support
-			return new Promise<ViewResult>((resolve) => {
-				let result: ViewResult = "exit"; // Default to exit
-
-				const onTabPress = async () => {
-					result = "switch";
-				};
-
-				// Determine initial focus based on where we're coming from
-				// - If we have a search query on initial load, focus search
-				// - If currentView is task-detail, focus detail
-				// - Otherwise (including when coming from kanban), focus task list
-				const hasSearchQuery = options.filter ? "searchQuery" in options.filter : false;
-				const shouldFocusSearch = isInitialLoad && hasSearchQuery;
-
-				viewTaskEnhanced(taskToView, {
-					tasks: availableTasks,
-					core: options.core,
-					title: options.filter?.title,
-					filterDescription: options.filter?.filterDescription,
-					searchQuery: unifiedSession.filters.searchQuery,
-					statusFilter: unifiedSession.filters.statusFilter,
-					excludeStatus: unifiedSession.filters.excludeStatus,
-					typeFilter: unifiedSession.filters.typeFilter,
-					projectFilter: unifiedSession.filters.projectFilter,
-					priorityFilter: unifiedSession.filters.priorityFilter,
-					labelFilter: unifiedSession.filters.labelFilter,
-					labelMatch: unifiedSession.filters.labelMatch,
-					milestoneFilter: unifiedSession.filters.milestoneFilter,
-					readyFilter: options.filter?.ready,
-					readinessTasks: loadedReadinessTasks,
-					limit: unifiedSession.filters.limit,
-					startWithDetailFocus: currentView === "task-detail",
-					startWithSearchFocus: shouldFocusSearch,
-					startupWarning,
-					subscribeUpdates: (updater) => {
-						taskListUpdater = updater;
-						emitTaskListUpdate();
-					},
-					onTaskChange: (newTask) => {
-						unifiedSession.selectTask(newTask);
-						currentView = "task-detail";
-					},
-					onFilterChange: (filters) => {
-						unifiedSession.updateFilters(mergeUnifiedViewFilters(unifiedSession.filters, filters));
-					},
-					onTabPress,
-				}).then(() => {
-					taskListUpdater = null;
-					resolve(result);
-				});
-			});
-		};
-
-		const showWorkspaceView = async (): Promise<ViewResult> => {
-			const result = await runAgentWorkspace(options.core, {
-				screen: getSharedScreen(),
-				preserveScreen: true,
-				state: workspaceState,
-			});
-			return result === "board" ? "switch" : "exit";
-		};
-
-		// Function to show kanban view
-		const showKanbanView = async (): Promise<ViewResult> => {
-			const config = await options.core.filesystem.loadConfig();
-			configuredLabels = config?.labels ?? configuredLabels;
-			const layout = "horizontal" as const;
-			const maxColumnWidth = config?.maxColumnWidth || 20;
-			milestoneEntities = await options.core.filesystem.listMilestones();
-			milestoneFilterModel = buildTaskViewerMilestoneFilterModel(milestoneEntities);
-			const kanbanTasks = getRenderableTasks();
-			const statuses = kanbanStatuses;
-
-			// Show kanban board with view switching support
-			return new Promise<ViewResult>((resolve) => {
-				let result: ViewResult = "exit"; // Default to exit
-
-				const onTabPress = async () => {
-					result = "switch";
-				};
-				const onWorkspacePress = async () => {
-					result = "workspace";
-				};
-
-				renderBoardTui(kanbanTasks, statuses, layout, maxColumnWidth, {
-					core: options.core,
-					onTaskSelect: (task) => {
-						unifiedSession.selectTask(task);
-					},
-					onTabPress,
-					onWorkspacePress,
-					filters: createKanbanSharedFilters(unifiedSession.filters),
-					availableLabels: getBoardAvailableLabels(),
-					availableMilestones: getBoardAvailableMilestones(),
-					onFilterChange: (filters) => {
-						unifiedSession.updateFilters(
-							mergeUnifiedViewFilters(unifiedSession.filters, {
-								searchQuery: filters.searchQuery,
-								statusFilter: unifiedSession.filters.statusFilter,
-								excludeStatus: filters.excludeStatus,
-								typeFilter: filters.typeFilter,
-								projectFilter: filters.projectFilter,
-								priorityFilter: filters.priorityFilter,
-								labelFilter: [...filters.labelFilter],
-								labelMatch: filters.labelMatch ?? unifiedSession.filters.labelMatch ?? "any",
-								milestoneFilter: filters.milestoneFilter,
-								limit: filters.limit,
-							}),
-						);
-					},
-					subscribeUpdates: (updater) => {
-						boardUpdater = updater;
-						emitBoardUpdate();
-					},
-					milestoneMode: options.milestoneMode,
-					milestoneEntities,
-					startupWarning,
+	private async showKanbanView(): Promise<ViewResult> {
+		const config = await this.options.core.filesystem.loadConfig();
+		this.configuredLabels = config?.labels ?? this.configuredLabels;
+		this.milestoneEntities = await this.options.core.filesystem.listMilestones();
+		this.milestoneFilterModel = buildTaskViewerMilestoneFilterModel(this.milestoneEntities);
+		this.viewResult = "exit";
+		try {
+			await new TUIRenderer(
+				this.getRenderableTasks(),
+				this.kanbanStatuses,
+				"horizontal",
+				config?.maxColumnWidth || 20,
+				{
+					core: this.options.core,
+					onTaskSelect: this.selectTask.bind(this),
+					onTabPress: this.switchView.bind(this),
+					onWorkspacePress: this.showWorkspace.bind(this),
+					filters: createKanbanSharedFilters(this.session.filters),
+					availableLabels: this.getBoardAvailableLabels(),
+					availableMilestones: [...this.milestoneFilterModel.availableMilestoneTitles],
+					onFilterChange: this.updateKanbanFilters.bind(this),
+					subscribeUpdates: this.subscribeBoardUpdates.bind(this),
+					milestoneMode: this.options.milestoneMode,
+					milestoneEntities: this.milestoneEntities,
+					startupWarning: this.startupWarning,
 					dateFormat: config?.dateFormat,
 					projectName: config?.projectName,
 					priorities: config?.priorities,
 					types: config?.types,
 					projects: config?.projects,
 					hideEmptyColumns: config?.hideEmptyColumns ?? false,
-					createTask: async (input) => createTaskFromBoard(options.core, input, taskUpdateCallbacks.onTaskAdded),
-					screen: getSharedScreen(),
+					createTask: this.createBoardTask.bind(this),
+					screen: this.getSharedScreen(),
 					preserveScreen: true,
-				}).then(() => {
-					boardUpdater = null;
-					resolve(result);
-				});
-			});
-		};
+				},
+			).run();
+			return this.viewResult;
+		} finally {
+			this.boardUpdater = null;
+		}
+	}
 
-		await runUnifiedViewLoop(
-			currentView,
-			(view) => {
-				if (view === "task-list" || view === "task-detail") return showTaskView();
-				if (view === "kanban") return showKanbanView();
-				return showWorkspaceView();
-			},
-			(view) => {
-				currentView = view;
-			},
-			() => {
-				isInitialLoad = false;
-			},
+	private getSharedScreen(): ReturnType<typeof createScreen> | undefined {
+		if (process.stdout.isTTY) this.sharedScreen ??= createScreen({ title: formatTuiTitle("Board", this.projectName) });
+		return this.sharedScreen;
+	}
+
+	private getRenderableTasks(): Task[] {
+		return this.session.tasks.filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id));
+	}
+
+	private getBoardAvailableLabels(): string[] {
+		return collectAvailableLabels(this.getRenderableTasks(), this.configuredLabels);
+	}
+
+	private publishUpdates(): void {
+		this.emitBoardUpdate();
+		this.emitTaskListUpdate();
+	}
+
+	private emitBoardUpdate(): void {
+		this.boardUpdater?.(this.getRenderableTasks(), this.kanbanStatuses);
+	}
+
+	private emitTaskListUpdate(): void {
+		this.taskListUpdater?.(
+			this.getRenderableTasks(),
+			this.kanbanStatuses,
+			this.configuredLabels,
+			this.session.selectedTask,
 		);
-	} catch (error) {
-		console.error(error instanceof Error ? error.message : error);
-		process.exit(1);
-	} finally {
-		unsubscribeSession?.();
-		process.removeListener("exit", stopWatchers);
-		stopWatchers();
-		sharedScreen?.destroy();
-		releaseTuiInput();
+	}
+
+	private subscribeTaskListUpdates(updater: NonNullable<typeof this.taskListUpdater>): void {
+		this.taskListUpdater = updater;
+		this.publishUpdates();
+	}
+
+	private subscribeBoardUpdates(updater: NonNullable<typeof this.boardUpdater>): void {
+		this.boardUpdater = updater;
+		this.publishUpdates();
+	}
+
+	private selectTask(task: Task): void {
+		this.session.selectTask(task);
+		this.currentView = "task-detail";
+	}
+
+	private updateTaskListFilters(filters: UnifiedViewFilterUpdate): void {
+		this.session.updateFilters(mergeUnifiedViewFilters(this.session.filters, filters));
+	}
+
+	private updateKanbanFilters(filters: BoardSharedFilters): void {
+		this.updateTaskListFilters({
+			...filters,
+			statusFilter: this.session.filters.statusFilter,
+			excludeStatus: filters.excludeStatus ?? [],
+			typeFilter: filters.typeFilter ?? [],
+			projectFilter: filters.projectFilter ?? [],
+		});
+	}
+
+	private async switchView(): Promise<void> {
+		this.viewResult = "switch";
+	}
+
+	private async showWorkspace(): Promise<void> {
+		this.viewResult = "workspace";
+	}
+
+	private async createBoardTask(input: TaskCreateInput): Promise<Task> {
+		return createTaskFromBoard(this.options.core, input, createUnifiedTaskUpdateCallbacks(this.session).onTaskAdded);
+	}
+
+	private handleConfigChanged(config: Awaited<ReturnType<Core["filesystem"]["loadConfig"]>>): void {
+		this.kanbanStatuses = config?.statuses ?? [];
+		this.configuredLabels = config?.labels ?? [];
+		this.publishUpdates();
+	}
+
+	private stopWatchers(): void {
+		this.taskWatcher?.stop();
+		this.configWatcher?.stop();
+	}
+
+	private destroySharedScreen(): void {
+		this.sharedScreen?.destroy();
+		this.sharedScreen = undefined;
+	}
+
+	private cleanup(): void {
+		this.unsubscribeSession?.();
+		if (this.exitHandler) process.removeListener("exit", this.exitHandler);
+		this.stopWatchers();
+		this.destroySharedScreen();
 	}
 }

@@ -75,7 +75,7 @@ describe("CLI parent task id normalization", () => {
 		await $`git push -u origin feature-parent`.cwd(TEST_DIR).quiet();
 		await $`git remote update origin --prune`.cwd(TEST_DIR).quiet();
 		await $`git checkout main`.cwd(TEST_DIR).quiet();
-		await core.gitOps.fetch();
+		await core.git.fetch();
 
 		const createResult = await $`bun run ${CLI_PATH} task create Child --parent task-1`.cwd(TEST_DIR).nothrow().quiet();
 

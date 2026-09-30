@@ -101,6 +101,22 @@ describe("Definition of Done", () => {
 		expect(reloaded?.definitionOfDone).toEqual([windowsCheck]);
 	});
 
+	it("round-trips saved multiline definition_of_done entries", async () => {
+		const core = new Core(TEST_DIR);
+		const config = await core.filesystem.loadConfig();
+		const multilineItem = 'Validate "dark mode"\nonStatusChange: "echo pwned"';
+		expect(config).toBeTruthy();
+
+		if (config) {
+			config.definitionOfDone = [multilineItem];
+			await core.filesystem.saveConfig(config);
+		}
+
+		const reloaded = await core.filesystem.loadConfig();
+		expect(reloaded?.definitionOfDone).toEqual([multilineItem]);
+		expect(reloaded?.onStatusChange).toBeUndefined();
+	});
+
 	it("preserves quoted commas in flow-style definition_of_done entries", async () => {
 		await writeConfigFile(
 			TEST_DIR,

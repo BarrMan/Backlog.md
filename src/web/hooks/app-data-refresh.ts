@@ -1,23 +1,32 @@
 import type { DuplicateRepairPlan } from "../../core/duplicate-task-repair";
-import type { Milestone, SearchResult, Task } from "../../types";
+import type { Milestone, SearchResult, TaskSummary } from "../../types";
 import { apiClient } from "../lib/api";
 
 type RefreshState = {
 	hasLoadedData: boolean;
 	loadError: Error | null;
 	pendingScopeRank: number;
-	getTasks: () => Task[];
+	getTasks: () => TaskSummary[];
 	getMilestones: () => Milestone[];
 	getArchivedMilestones: () => Milestone[];
 	setMilestones: (milestones: Milestone[], archivedMilestones: Milestone[]) => void;
-	applySearchResults: (results: SearchResult[], milestones: Milestone[], archivedMilestones: Milestone[]) => Task[];
+	applySearchResults: (
+		tasks: TaskSummary[],
+		results: SearchResult[],
+		milestones: Milestone[],
+		archivedMilestones: Milestone[],
+	) => TaskSummary[];
 	getDuplicateRepairPlan: () => DuplicateRepairPlan | null;
 	applyDuplicateRepairPlan: (plan: DuplicateRepairPlan | null) => void;
 	loadAllData: () => Promise<void>;
 	isRequestCurrent: () => boolean;
 };
 
-function shouldRefreshDuplicateRepairPlan(plan: DuplicateRepairPlan | null, tasks: Task[], previousTaskIds: string) {
+function shouldRefreshDuplicateRepairPlan(
+	plan: DuplicateRepairPlan | null,
+	tasks: TaskSummary[],
+	previousTaskIds: string,
+) {
 	return (
 		plan === null ||
 		plan.groups.length > 0 ||
@@ -33,7 +42,8 @@ async function fetchRefreshData(includeMilestones: boolean, state: RefreshState)
 	return Promise.all([
 		includeMilestones ? apiClient.fetchMilestones() : state.getMilestones(),
 		includeMilestones ? apiClient.fetchArchivedMilestones() : state.getArchivedMilestones(),
-		apiClient.search(),
+		apiClient.fetchTasks(),
+		apiClient.search({ types: ["document", "decision"] }),
 	]);
 }
 
@@ -61,14 +71,14 @@ export async function refreshAppData(includeMilestones: boolean, state: RefreshS
 }
 
 function applyRefreshData(
-	[milestones, archivedMilestones, results]: Awaited<ReturnType<typeof fetchRefreshData>>,
+	[milestones, archivedMilestones, tasksData, results]: Awaited<ReturnType<typeof fetchRefreshData>>,
 	withMilestones: boolean,
 	previousTaskIds: string,
 	state: RefreshState,
 ) {
 	if (!state.isRequestCurrent()) return;
 	if (withMilestones) state.setMilestones(milestones, archivedMilestones);
-	const tasks = state.applySearchResults(results, milestones, archivedMilestones);
+	const tasks = state.applySearchResults(tasksData, results, milestones, archivedMilestones);
 	if (shouldRefreshDuplicateRepairPlan(state.getDuplicateRepairPlan(), tasks, previousTaskIds)) {
 		void refreshDuplicateRepairPlan(state.isRequestCurrent, state);
 	}

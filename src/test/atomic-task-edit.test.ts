@@ -46,7 +46,6 @@ describe("atomic task editing", () => {
 	});
 
 	afterEach(async () => {
-		setup.disposeContentStore();
 		if (originalGlobalLockEnv === undefined) {
 			delete process.env.USE_GLOBAL_TASK_ID_LOCK;
 		} else {
@@ -57,13 +56,13 @@ describe("atomic task editing", () => {
 
 	async function createContendedTask(): Promise<Task> {
 		await setup.createTaskFromInput({ title: "Shared Task" }, false);
-		const task = await setup.fs.loadTask(CONTENDED_ID);
+		const task = await setup.filesystem.loadTask(CONTENDED_ID);
 		if (!task) throw new Error(`${CONTENDED_ID} missing during test setup`);
 		return task;
 	}
 
 	async function finalLabels(): Promise<string[]> {
-		const task = await setup.fs.loadTask(CONTENDED_ID);
+		const task = await setup.filesystem.loadTask(CONTENDED_ID);
 		return [...(task?.labels ?? [])].sort();
 	}
 
@@ -82,7 +81,6 @@ describe("atomic task editing", () => {
 				writers.map(({ label, core }) => core.updateTaskFromInput(CONTENDED_ID, { addLabels: [label] }, false)),
 			);
 		} finally {
-			for (const { core } of writers) core.disposeContentStore();
 		}
 
 		const succeeded = labels.filter((_, index) => outcomes[index]?.status === "fulfilled");
@@ -107,7 +105,7 @@ describe("atomic task editing", () => {
 		// unprotected demote used to apply its own pre-lock snapshot over a concurrent edit.
 		const createLockEntered = createDeferred<void>();
 		const releaseCreateLock = createDeferred<void>();
-		const heldCreateLock = setup.fs.withCreateLock(async () => {
+		const heldCreateLock = setup.filesystem.withCreateLock(async () => {
 			createLockEntered.resolve();
 			await releaseCreateLock.promise;
 		});
@@ -116,11 +114,11 @@ describe("atomic task editing", () => {
 		const demoter = new Core(testDir);
 		const editor = new Core(testDir);
 		const demoteReachedCreateLock = createDeferred<void>();
-		const originalWithCreateLock = demoter.fs.withCreateLock.bind(demoter.fs);
-		demoter.fs.withCreateLock = (async <T>(fn: () => Promise<T>): Promise<T> => {
+		const originalWithCreateLock = demoter.filesystem.withCreateLock.bind(demoter.filesystem);
+		demoter.filesystem.withCreateLock = (async <T>(fn: () => Promise<T>): Promise<T> => {
 			demoteReachedCreateLock.resolve();
 			return await originalWithCreateLock(fn);
-		}) as typeof demoter.fs.withCreateLock;
+		}) as typeof demoter.filesystem.withCreateLock;
 
 		try {
 			const demotion = demoter.updateTaskFromInput(CONTENDED_ID, { status: "Draft" }, false);
@@ -134,7 +132,7 @@ describe("atomic task editing", () => {
 			await heldCreateLock;
 			await demotion;
 
-			const draft = await setup.fs.loadDraft("DRAFT-1");
+			const draft = await setup.filesystem.loadDraft("DRAFT-1");
 			expect(draft?.status).toBe("Draft");
 			if (editOutcome === null) {
 				// If the edit was told it succeeded, the demoted draft must carry it.
@@ -148,8 +146,6 @@ describe("atomic task editing", () => {
 		} finally {
 			releaseCreateLock.resolve();
 			await heldCreateLock;
-			demoter.disposeContentStore();
-			editor.disposeContentStore();
 		}
 	});
 
@@ -157,7 +153,7 @@ describe("atomic task editing", () => {
 		const task = await createContendedTask();
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();
-		const heldLock = setup.fs.withTaskLock(task, async () => {
+		const heldLock = setup.filesystem.withTaskLock(task, async () => {
 			lockEntered.resolve();
 			await releaseLock.promise;
 		});
@@ -168,12 +164,11 @@ describe("atomic task editing", () => {
 		const other = new Core(testDir);
 		try {
 			await expect(other.editTaskOrDraft(CONTENDED_ID, { status: "Draft" }, false)).rejects.toThrow(CONTENTION_MESSAGE);
-			expect(await setup.fs.loadTask(CONTENDED_ID)).not.toBeNull();
-			expect(await setup.fs.listDrafts()).toEqual([]);
+			expect(await setup.filesystem.loadTask(CONTENDED_ID)).not.toBeNull();
+			expect(await setup.filesystem.listDrafts()).toEqual([]);
 		} finally {
 			releaseLock.resolve();
 			await heldLock;
-			other.disposeContentStore();
 		}
 	});
 
@@ -181,7 +176,7 @@ describe("atomic task editing", () => {
 		const task = await createContendedTask();
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();
-		const heldLock = setup.fs.withTaskLock(task, async () => {
+		const heldLock = setup.filesystem.withTaskLock(task, async () => {
 			lockEntered.resolve();
 			await releaseLock.promise;
 		});
@@ -190,12 +185,11 @@ describe("atomic task editing", () => {
 		const other = new Core(testDir);
 		try {
 			await expect(other.demoteTask(CONTENDED_ID, false)).rejects.toThrow(CONTENTION_MESSAGE);
-			expect(await setup.fs.loadTask(CONTENDED_ID)).not.toBeNull();
-			expect(await setup.fs.listDrafts()).toEqual([]);
+			expect(await setup.filesystem.loadTask(CONTENDED_ID)).not.toBeNull();
+			expect(await setup.filesystem.listDrafts()).toEqual([]);
 		} finally {
 			releaseLock.resolve();
 			await heldLock;
-			other.disposeContentStore();
 		}
 	});
 
@@ -211,12 +205,10 @@ describe("atomic task editing", () => {
 				second.updateTaskFromInput("TASK-2", { addLabels: ["beta"] }, false),
 			]);
 		} finally {
-			first.disposeContentStore();
-			second.disposeContentStore();
 		}
 
-		expect((await setup.fs.loadTask("TASK-1"))?.labels ?? []).toEqual(["alpha"]);
-		expect((await setup.fs.loadTask("TASK-2"))?.labels ?? []).toEqual(["beta"]);
+		expect((await setup.filesystem.loadTask("TASK-1"))?.labels ?? []).toEqual(["alpha"]);
+		expect((await setup.filesystem.loadTask("TASK-2"))?.labels ?? []).toEqual(["beta"]);
 	});
 
 	it("blocks a second process while the first holds the lock", async () => {
@@ -225,7 +217,7 @@ describe("atomic task editing", () => {
 		const releaseLock = createDeferred<void>();
 
 		// The lock lives on the filesystem, so a completely separate backlog process sees it.
-		const heldLock = setup.fs.withTaskLock(task, async () => {
+		const heldLock = setup.filesystem.withTaskLock(task, async () => {
 			lockEntered.resolve();
 			await releaseLock.promise;
 		});
@@ -276,7 +268,7 @@ describe("atomic task editing", () => {
 			expect(`${result.stderr.toString()}${result.stdout.toString()}`).toContain(taskLockErrorMessage(sharedId));
 		}
 
-		const shared = await setup.fs.loadTask(sharedId);
+		const shared = await setup.filesystem.loadTask(sharedId);
 		expect([...(shared?.labels ?? [])].sort()).toEqual([...succeeded].sort());
 	}, 60_000);
 
@@ -286,24 +278,29 @@ describe("atomic task editing", () => {
 		await server.start(0, false);
 		const port = server.getPort() ?? 0;
 		expect(port).toBeGreaterThan(0);
+		const projectScope = (
+			(await (await fetch(`http://127.0.0.1:${port}/api/status`)).json()) as { projectScope: string }
+		).projectScope;
 
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();
-		const heldLock = setup.fs.withTaskLock(task, async () => {
+		const heldLock = setup.filesystem.withTaskLock(task, async () => {
 			lockEntered.resolve();
 			await releaseLock.promise;
 		});
 
 		try {
 			await retry(async () => {
-				const ping = await fetch(`http://127.0.0.1:${port}/api/tasks`);
+				const ping = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+					headers: { "X-Backlog-Project-Scope": projectScope },
+				});
 				if (!ping.ok) throw new Error(`server not ready: ${ping.status}`);
 			});
 			await withTimeout(lockEntered.promise, "the lock to be held", 5_000);
 
 			const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${CONTENDED_ID}`, {
 				method: "PUT",
-				headers: { "Content-Type": "application/json" },
+				headers: { "Content-Type": "application/json", "X-Backlog-Project-Scope": projectScope },
 				body: JSON.stringify({ ...task, labels: ["from-web"] }),
 			});
 
@@ -322,23 +319,29 @@ describe("atomic task editing", () => {
 		await server.start(0, false);
 		const port = server.getPort() ?? 0;
 		expect(port).toBeGreaterThan(0);
+		const projectScope = (
+			(await (await fetch(`http://127.0.0.1:${port}/api/status`)).json()) as { projectScope: string }
+		).projectScope;
 
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();
-		const heldLock = setup.fs.withTaskLock(task, async () => {
+		const heldLock = setup.filesystem.withTaskLock(task, async () => {
 			lockEntered.resolve();
 			await releaseLock.promise;
 		});
 
 		try {
 			await retry(async () => {
-				const ping = await fetch(`http://127.0.0.1:${port}/api/tasks`);
+				const ping = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+					headers: { "X-Backlog-Project-Scope": projectScope },
+				});
 				if (!ping.ok) throw new Error(`server not ready: ${ping.status}`);
 			});
 			await withTimeout(lockEntered.promise, "the lock to be held", 5_000);
 
 			const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${CONTENDED_ID}/demote`, {
 				method: "POST",
+				headers: { "X-Backlog-Project-Scope": projectScope },
 			});
 
 			expect(response.status).toBe(409);
@@ -357,7 +360,7 @@ describe("atomic task editing", () => {
 
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();
-		const heldLock = setup.fs.withTaskLock(task, async () => {
+		const heldLock = setup.filesystem.withTaskLock(task, async () => {
 			lockEntered.resolve();
 			await releaseLock.promise;
 		});
@@ -391,8 +394,8 @@ describe("atomic task editing", () => {
 		};
 
 		const operations = Promise.all([
-			setup.fs.withTaskLock(task, () => enter("first")),
-			setup.fs.withTaskLock(task, () => enter("second")),
+			setup.filesystem.withTaskLock(task, () => enter("first")),
+			setup.filesystem.withTaskLock(task, () => enter("second")),
 		]);
 		try {
 			await withTimeout(bothEntered.promise, "both operations to enter without serialization", 250);

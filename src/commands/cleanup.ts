@@ -93,12 +93,12 @@ async function moveCleanupTask(core: Core, task: Task): Promise<{ fromPath: stri
 }
 
 async function stageCleanupMoves(core: Core, moves: Array<{ fromPath: string; toPath: string }>, autoCommit: boolean) {
-	if (moves.length === 0 || autoCommit || !(await core.gitOps.isRepository())) return false;
+	if (moves.length === 0 || autoCommit || !(await core.git.isRepository())) return false;
 
 	console.log("Staging file moves for Git...");
 	for (const { fromPath, toPath } of moves) {
 		try {
-			await core.gitOps.stageFileMove(fromPath, toPath);
+			await core.git.stageFileMove(fromPath, toPath);
 		} catch (error) {
 			console.warn(`Warning: Could not stage move for Git: ${error}`);
 		}
@@ -138,7 +138,7 @@ async function runCleanupCommand(cwd: string): Promise<void> {
 		console.error("No backlog project found. Initialize one first with: backlog init");
 		process.exit(1);
 	}
-	core.gitOps.setConfig(config);
+	core.git.setConfig(config);
 
 	const statuses = config.statuses ?? [...DEFAULT_STATUSES];
 	const terminalStatus = getTerminalStatus(statuses);

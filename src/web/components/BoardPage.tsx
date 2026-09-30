@@ -1,4 +1,4 @@
-import type { Milestone, Task } from "../../types";
+import type { Milestone, TaskSummary } from "../../types";
 import {
 	useBoardFilters,
 	useBoardHighlight,
@@ -8,11 +8,11 @@ import {
 import Board from "./Board";
 
 export interface BoardPageProps {
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: TaskSummary | import("../../types").Task) => void;
 	onNewTask: () => void;
-	tasks: Task[];
+	tasks: TaskSummary[] | import("../../types").Task[];
 	onRefreshData?: () => Promise<void>;
-	onTasksUpdated?: (tasks: Task[], requestTask: Task) => void;
+	onTasksUpdated?: (tasks: import("../../types").Task[], requestTask: import("../../types").Task) => void;
 	statuses: string[];
 	milestones: string[];
 	availableLabels: string[];

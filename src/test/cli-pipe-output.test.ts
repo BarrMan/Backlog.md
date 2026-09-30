@@ -33,8 +33,6 @@ describe("finite CLI output to a delayed pipe reader", () => {
 				false,
 			);
 		}
-		core.disposeContentStore();
-		core.disposeSearchService();
 	});
 
 	afterAll(async () => {

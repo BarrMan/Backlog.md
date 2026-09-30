@@ -5,8 +5,7 @@ import { type DuplicateGroup, detectDuplicateTaskIds } from "../utils/duplicate-
 import { escapeRegex, generateNextId, generateNextSubtaskId, idForFilename } from "../utils/prefix-config.ts";
 import { canonicalTaskId, isNumericTaskId } from "../utils/task-id.ts";
 import type { Core } from "./backlog.ts";
-import type { TaskCorpusSnapshot } from "./content-store.ts";
-import type { BranchTaskStateEntry } from "./task-loader.ts";
+import type { BranchTaskStateEntry, TaskCorpusSnapshot } from "./task-loader.ts";
 
 export type DuplicateTaskLocation = "active" | "completed";
 
@@ -157,11 +156,11 @@ async function findCrossBranchDuplicateTaskIds(
 	core: Core,
 	snapshot?: TaskCorpusSnapshot,
 ): Promise<CrossBranchDuplicateFinding[]> {
-	const corpus = snapshot ?? (await core.getContentStore()).getTaskCorpusSnapshot();
+	const corpus = snapshot ?? (await core.loadTaskSnapshot());
 	const config = corpus.config ?? (await core.filesystem.loadConfig());
 	if (config?.checkActiveBranches === false) return [];
 	const stateEntries: BranchTaskStateEntry[] = corpus.branchStateEntries?.slice() ?? [];
-	const current = (await core.gitOps.getCurrentBranch()) ?? "current";
+	const current = (await core.git.getCurrentBranch()) ?? "current";
 	appendCurrentBranchEntries(stateEntries, corpus.activeTasks, "task", current, core.filesystem.rootDir);
 	appendCurrentBranchEntries(stateEntries, corpus.completedTasks, "completed", current, core.filesystem.rootDir);
 	return [...groupBranchEntries(stateEntries)]

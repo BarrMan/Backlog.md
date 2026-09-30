@@ -15,19 +15,51 @@ export function useAppLifecycle({ isOnline, projectName, loadAllData }: Options)
 	const hasBeenRunningRef = useRef(false);
 
 	useEffect(() => {
+		let disposed = false;
 		void getWebVersion().then((version) => {
-			if (version) document.body.setAttribute("data-version", `Backlog.md - v${version}`);
+			if (!disposed && version) document.body.setAttribute("data-version", `Backlog.md - v${version}`);
 		});
+		return () => {
+			disposed = true;
+		};
 	}, []);
 
 	useEffect(() => {
+		let disposed = false;
 		void apiClient
 			.checkStatus()
-			.then((status) => setInitializationState(status.initialized))
+			.then((status) => {
+				if (!disposed) setInitializationState(status.initialized);
+			})
 			.catch((error) => {
+				if (disposed) return;
 				console.error("Failed to check initialization status:", error);
 				setInitializationState(false);
 			});
+		return () => {
+			disposed = true;
+		};
+	}, []);
+
+	useEffect(() => {
+		let disposed = false;
+		const refreshInitialization = () => {
+			void apiClient
+				.checkStatus()
+				.then((status) => {
+					if (!disposed) setInitializationState(status.initialized);
+				})
+				.catch((error) => {
+					if (!disposed) console.error("Failed to refresh initialization status:", error);
+				});
+		};
+		window.addEventListener("project-config-updated", refreshInitialization);
+		window.addEventListener("project-socket-open", refreshInitialization);
+		return () => {
+			disposed = true;
+			window.removeEventListener("project-config-updated", refreshInitialization);
+			window.removeEventListener("project-socket-open", refreshInitialization);
+		};
 	}, []);
 
 	useEffect(() => {

@@ -1,7 +1,7 @@
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_STATUSES } from "../../constants/index.ts";
-import type { Milestone, Task } from "../../types";
+import type { Milestone, Task, TaskSummary } from "../../types";
 import { collectAvailableLabels } from "../../utils/label-filter.ts";
 import { getPriorityOptions } from "../../utils/priority-config.ts";
 import { isTerminalStatus } from "../../utils/terminal-status.ts";
@@ -17,9 +17,9 @@ import { useTaskListDisplayController } from "./use-task-list-display-controller
 import { useTaskListFilters } from "./use-task-list-filters";
 
 interface TaskListProps {
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: TaskSummary | Task) => void;
 	onNewTask: () => void;
-	tasks: Task[];
+	tasks: TaskSummary[] | Task[];
 	availableStatuses: string[];
 	availableLabels: string[];
 	availableMilestones: string[];

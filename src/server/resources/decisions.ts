@@ -1,26 +1,31 @@
-import { Elysia, t } from "elysia";
+import { t } from "elysia";
+import type { Core } from "../../core/backlog.ts";
 import { isAmbiguousIdError } from "../../utils/entity-id.ts";
-import type { ResourceDependencies } from "./api.ts";
+import { type ResourceDependencies, scopedResource } from "./api.ts";
+import { decisionListItemSchema, decisionSchema, errorSchema } from "./schemas.ts";
 
 const params = t.Object({ id: t.String() });
-export function decisionsResource({ core, services }: ResourceDependencies): Elysia {
-	const app = new Elysia({ name: "decisions" });
-	const get = async (id: string) => {
+export function decisionsResource({ services }: ResourceDependencies) {
+	const app = scopedResource(services, "decisions");
+	const get = async (core: Core, id: string, set: { status?: number | string }) => {
 		try {
 			const value = await core.filesystem.loadDecision(id);
-			return value ? Response.json(value) : Response.json({ error: "Decision not found" }, { status: 404 });
+			if (value) return value;
+			set.status = 404;
+			return { error: "Decision not found" };
 		} catch (error) {
-			if (isAmbiguousIdError(error)) return Response.json({ error: error.message }, { status: 409 });
+			if (isAmbiguousIdError(error)) throw error;
 			console.error("Error loading decision:", error);
-			return Response.json({ error: "Decision not found" }, { status: 404 });
+			set.status = 404;
+			return { error: "Decision not found" };
 		}
 	};
-	app.get("/api/decisions", async () => {
-		try {
-			return Response.json(
-				(await services.store())
-					.getDecisions()
-					.map(({ id, title, status, date, context, decision, consequences, alternatives }) => ({
+	app.get(
+		"/api/decisions",
+		async ({ core, set }) => {
+			try {
+				return (await core.filesystem.listDecisions()).map(
+					({ id, title, status, date, context, decision, consequences, alternatives }) => ({
 						id,
 						title,
 						status,
@@ -29,42 +34,60 @@ export function decisionsResource({ core, services }: ResourceDependencies): Ely
 						decision,
 						consequences,
 						alternatives,
-					})),
-			);
-		} catch (error) {
-			console.error("Error listing decisions:", error);
-			return Response.json([]);
-		}
-	});
+					}),
+				);
+			} catch (error) {
+				console.error("Error listing decisions:", error);
+				set.status = 200;
+				return [];
+			}
+		},
+		{ response: t.Array(decisionListItemSchema) },
+	);
 	app.post(
 		"/api/decisions",
-		async ({ body }) => {
+		async ({ body, core, set }) => {
 			try {
-				return Response.json(await core.createDecisionWithTitle(body.title), { status: 201 });
+				set.status = 201;
+				return await core.createDecisionWithTitle(body.title);
 			} catch (error) {
 				console.error("Error creating decision:", error);
-				return Response.json({ error: "Failed to create decision" }, { status: 500 });
+				set.status = 500;
+				return { error: "Failed to create decision" };
 			}
 		},
-		{ body: t.Object({ title: t.String() }) },
+		{ body: t.Object({ title: t.String() }), response: { 201: decisionSchema, 500: errorSchema } },
 	);
-	app.get("/api/decision/:id", ({ params }) => get(params.id), { params });
-	app.get("/api/decisions/:id", ({ params }) => get(params.id), { params });
+	app.get("/api/decision/:id", ({ params, core, set }) => get(core, params.id, set), {
+		params,
+		response: { 200: decisionSchema, 404: errorSchema, 409: errorSchema },
+	});
+	app.get("/api/decisions/:id", ({ params, core, set }) => get(core, params.id, set), {
+		params,
+		response: { 200: decisionSchema, 404: errorSchema, 409: errorSchema },
+	});
 	app.put(
 		"/api/decisions/:id",
-		async ({ params, body }) => {
+		async ({ params, body, core, set }) => {
 			try {
 				await core.updateDecisionFromContent(params.id, body);
-				return Response.json({ success: true });
+				return { success: true };
 			} catch (error) {
-				if (isAmbiguousIdError(error)) return Response.json({ error: error.message }, { status: 409 });
-				if (error instanceof Error && error.message.includes("not found"))
-					return Response.json({ error: "Decision not found" }, { status: 404 });
+				if (isAmbiguousIdError(error)) throw error;
+				if (error instanceof Error && error.message.includes("not found")) {
+					set.status = 404;
+					return { error: "Decision not found" };
+				}
 				console.error("Error updating decision:", error);
-				return Response.json({ error: "Failed to update decision" }, { status: 500 });
+				set.status = 500;
+				return { error: "Failed to update decision" };
 			}
 		},
-		{ params, body: t.String() },
+		{
+			params,
+			body: t.String(),
+			response: { 200: t.Object({ success: t.Boolean() }), 404: errorSchema, 409: errorSchema, 500: errorSchema },
+		},
 	);
 	return app;
 }

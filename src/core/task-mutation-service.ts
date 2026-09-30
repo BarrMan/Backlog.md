@@ -16,8 +16,8 @@ import { executeStatusCallback } from "../utils/status-callback.ts";
 import { validateDependencies } from "../utils/task-builders.ts";
 import { AmbiguousTaskIdError, normalizeTaskId, taskIdsEqual } from "../utils/task-path.ts";
 import { formatValidTaskTypeValues, resolveTaskTypeValue } from "../utils/task-type-config.ts";
-import type { ProjectSession, TaskReadOptions } from "./backlog.ts";
 import { completedTaskIdentityRecord, TaskIdentityIndex, type TaskIdentityResolution } from "./task-identity-index.ts";
+import type { TaskReadOptions } from "./task-query-workflow.ts";
 import { applyTaskUpdate } from "./task-update/index.ts";
 
 function buildUpdatedDateComparableTask(task: Task): Record<string, unknown> {
@@ -65,7 +65,8 @@ export class ProjectTaskMutations {
 	constructor(
 		private readonly filesystem: FileSystem,
 		private readonly git: GitOperations,
-		private readonly session: ProjectSession,
+		private readonly loadTask: (id: string, forMutation: boolean) => Promise<Task | null>,
+		private readonly occupiedTaskIds: () => Promise<string[]>,
 	) {}
 
 	async requireCanonicalStatus(status: string): Promise<string> {
@@ -136,9 +137,7 @@ export class ProjectTaskMutations {
 
 	async loadTaskForMutation(taskId: string, options: TaskReadOptions = {}): Promise<Task | null> {
 		if (options.includeCrossBranch === false) return await this.loadWorkingCopyTask(taskId, true);
-		const store = await this.session.getContentStore();
-		await store.refreshTasks();
-		return await this.loadResolvedTaskOrFilesystem(taskId, store.resolveTaskForMutation(taskId));
+		return await this.loadTask(taskId, true);
 	}
 
 	async loadWorkingCopyTask(taskId: string, forMutation: boolean, activeTasks?: Task[]): Promise<Task | null> {
@@ -200,7 +199,7 @@ export class ProjectTaskMutations {
 	private async getExistingIdsForType(type: EntityType): Promise<string[]> {
 		switch (type) {
 			case EntityType.Task:
-				return await this.session.getOccupiedTaskIdsForAllocation();
+				return await this.occupiedTaskIds();
 			case EntityType.Draft: {
 				const [drafts, occupied] = await Promise.all([
 					this.filesystem.listDrafts(),
@@ -245,8 +244,7 @@ export class ProjectTaskMutations {
 	private async loadResolvedTaskOrFilesystem(taskId: string, resolution: TaskIdentityResolution): Promise<Task | null> {
 		if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(taskId, resolution.candidates);
 		if (resolution.status === "found") return { ...resolution.task };
-		await this.filesystem.loadTask(taskId);
-		return null;
+		return await this.filesystem.loadTask(taskId);
 	}
 
 	async saveTask(task: Task, autoCommit?: boolean): Promise<string> {
@@ -258,7 +256,6 @@ export class ProjectTaskMutations {
 		else if (original?.updatedDate) task.updatedDate = original.updatedDate;
 		else delete task.updatedDate;
 		const filepath = await this.filesystem.saveTask(task);
-		this.session.publishActiveTask({ ...task, filePath: filepath });
 		if (await this.shouldAutoCommit(autoCommit)) await this.git.addAndCommitTaskFile(task.id, filepath, "update");
 		if (statusChanged) await this.executeStatusChangeCallback(task, previousStatus, task.status ?? "");
 		return filepath;

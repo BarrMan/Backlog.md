@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { Core } from "../core/backlog.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import { BacklogServer } from "../server/index.ts";
 import { ServerHost } from "../server/server-host.ts";
-import { closeServer, createUniqueTestDir, listenOnEphemeralPort, safeCleanup } from "./test-utils.ts";
+import {
+	closeServer,
+	createUniqueTestDir,
+	scopedFetch as fetch,
+	listenOnEphemeralPort,
+	safeCleanup,
+} from "./test-utils.ts";
 
 let TEST_DIR: string;
 let server: BacklogServer | null = null;
@@ -98,41 +103,14 @@ describe("BacklogServer loopback binding", () => {
 		}
 	});
 
-	it("serves lightweight browser bootstrap before the shared content corpus finishes loading", async () => {
+	it("starts the watcher before listening without initializing a content corpus", async () => {
 		const port = await unusedLoopbackPort();
-		let releaseLoad: () => void = () => {};
-		let markLoadStarted: () => void = () => {};
-		const heldLoad = new Promise<void>((resolve) => {
-			releaseLoad = resolve;
-		});
-		const loadStarted = new Promise<void>((resolve) => {
-			markLoadStarted = resolve;
-		});
-
-		const core = new Core(TEST_DIR, { enableWatchers: true });
-		const originalGetContentStore = core.getContentStore.bind(core);
-		core.getContentStore = async () => {
-			markLoadStarted();
-			await heldLoad;
-			return await originalGetContentStore();
-		};
-		server = new BacklogServer(TEST_DIR, { createCore: () => core });
-
+		server = new BacklogServer(TEST_DIR);
 		await server.start(port, false);
-		const searchResponse = fetch(`http://127.0.0.1:${port}/api/search`);
-		await loadStarted;
-		let statisticsResolved = false;
-		const statisticsResponse = fetch(`http://127.0.0.1:${port}/api/statistics`).then((result) => {
-			statisticsResolved = true;
-			return result;
+		const status = (await (await fetch(`http://127.0.0.1:${port}/api/status`)).json()) as { projectScope: string };
+		const response = await fetch(`http://127.0.0.1:${port}/api/statistics`, {
+			headers: { "X-Backlog-Project-Scope": status.projectScope },
 		});
-		const response = await fetch(`http://127.0.0.1:${port}/api/status`);
 		expect(response.status).toBe(200);
-		await Bun.sleep(20);
-		expect(statisticsResolved).toBe(false);
-
-		releaseLoad();
-		await searchResponse;
-		expect((await statisticsResponse).status).toBe(200);
 	});
 });

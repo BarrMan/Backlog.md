@@ -115,21 +115,16 @@ export function normalizeTaskViewerInitialFilters(
 export async function loadTaskViewerData(
 	core: Core,
 	providedTasks: Task[] | undefined,
-): Promise<
-	{ allTasks: Task[]; contentStore: Awaited<ReturnType<Core["getContentStore"]>> | null } & TaskViewerConfiguration
-> {
+): Promise<{ allTasks: Task[] } & TaskViewerConfiguration> {
 	const configuration = await loadTaskViewerConfiguration(core);
 	if (providedTasks) {
 		return {
 			allTasks: providedTasks.filter((task) => task.id?.trim() && hasAnyPrefix(task.id)),
-			contentStore: null,
 			...configuration,
 		};
 	}
-	const contentStore = await core.getContentStore();
 	return {
 		allTasks: (await core.queryTasks()).filter((task) => task.id?.trim() && hasAnyPrefix(task.id)),
-		contentStore,
 		...configuration,
 	};
 }

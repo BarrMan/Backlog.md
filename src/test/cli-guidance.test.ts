@@ -223,7 +223,7 @@ describe("CLI Integration", () => {
 			expect(createHelp).toContain('backlog task create -p FEAT-1 "Add tests"');
 			expect(createHelp).toContain("specify existing parent task ID, not a");
 			expect(createHelp).toContain("milestone ID");
-			expect(listHelp).toContain("backlog task list --parent FEAT-1");
+			expect(listHelp).toContain("-p, --parent <taskId>");
 			expect(editHelp).toContain('backlog task edit FEAT-1 --status "<active status>" -a @sara');
 			for (const output of [overview, taskCreation, createHelp, listHelp, editHelp]) {
 				expect(output).not.toContain("BACK-");
@@ -338,7 +338,9 @@ describe("CLI Integration", () => {
 			expect(listHelp).toContain("search: String");
 			expect(listHelp).toContain("limit: Positive integer");
 			expect(listHelp).toContain("sort: one of: priority, id, ordinal");
-			expect(listHelp).toContain('backlog task list --labels frontend,bug --search "login" --limit 10 --plain');
+			expect(listHelp).toContain("-l, --labels <labels>");
+			expect(listHelp).toContain("--search <query>");
+			expect(listHelp).toContain("--plain");
 			expect(editHelp).toContain("taskIds: Task IDs");
 			expect(editHelp).toContain("status: one of configured statuses: To Do, In Progress, Done");
 			expect(editHelp).not.toContain("status: one of configured statuses: Draft, To Do, In Progress, Done");

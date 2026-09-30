@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { DuplicateRepairPlan } from "../core/duplicate-task-repair.ts";
-import type { SearchResult, Task } from "../types/index.ts";
+import type { SearchResult, Task, TaskSummary } from "../types/index.ts";
 import { buildDependencyGraph } from "../utils/dependency-graph.ts";
 import { isValidTaskId, resolveTaskById } from "../utils/task-id.ts";
 import App from "../web/App.tsx";
@@ -60,6 +60,16 @@ const tasks: Task[] = [
 ];
 
 const searchResults: SearchResult[] = tasks.map((task) => ({ type: "task", task, score: 1 }));
+
+const taskSummaries = (): TaskSummary[] =>
+	tasks.map(({ acceptanceCriteriaItems, definitionOfDoneItems, ...task }) => ({
+		...task,
+		acceptanceCriteriaCount: acceptanceCriteriaItems?.length ?? 0,
+		checkedAcceptanceCriteriaCount: acceptanceCriteriaItems?.filter((item) => item.checked).length ?? 0,
+		definitionOfDoneCount: definitionOfDoneItems?.length ?? 0,
+		checkedDefinitionOfDoneCount: definitionOfDoneItems?.filter((item) => item.checked).length ?? 0,
+		isReady: true,
+	}));
 
 const defaultConfig = {
 	projectName: "Route QA",
@@ -356,9 +366,8 @@ const getAppDataWebSocket = (): FakeWebSocket => {
 const assertHealthSocketDoesNotShadowDataSocket = (): FakeWebSocket => {
 	const dataSocket = getAppDataWebSocket();
 	const latestSocket = FakeWebSocket.instances.at(-1);
-	expect(FakeWebSocket.instances.length).toBeGreaterThan(1);
-	expect(latestSocket?.onmessage).toBeNull();
-	expect(dataSocket).not.toBe(latestSocket);
+	expect(FakeWebSocket.instances).toHaveLength(1);
+	expect(latestSocket).toBe(dataSocket);
 	return dataSocket;
 };
 
@@ -371,7 +380,7 @@ class FakeResizeObserver {
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
 const responseFixtures = new Map<string, () => Response>([
-	["/api/status", () => json({ initialized: true, projectPath: "/tmp/project" })],
+	["/api/status", () => json({ initialized: true, projectPath: "/tmp/project", projectScope: "test-project-scope" })],
 	["/api/statuses", () => json(["To Do", "In Progress", "Done"])],
 	["/api/config", () => json(defaultConfig)],
 	["/api/milestones", () => json([])],
@@ -383,6 +392,7 @@ const responseFixtures = new Map<string, () => Response>([
 const resolveMockResponse = async (url: URL): Promise<Response> => {
 	const fixture = responseFixtures.get(url.pathname);
 	if (fixture) return fixture();
+	if (url.pathname === "/api/tasks") return json(taskSummaries());
 	if (url.pathname === "/api/search") {
 		return json(
 			url.searchParams.has("query") ? searchResults.map((result) => ({ ...result, score: 0.1 })) : searchResults,
@@ -475,11 +485,10 @@ const renderApp = async (
 	const routeId = routeMatch?.[1]
 		? decodeURIComponent(routeMatch[1])
 		: requestedUrl.searchParams.get("highlight")?.trim() || null;
-	const controlledTimer =
-		requestedUrl.searchParams.has("highlight") || options.advanceHealthSocket ? controlTimer(100) : null;
+	const controlledTimer = requestedUrl.searchParams.has("highlight") ? controlTimer(100) : null;
 	const operation = new FetchOperation(`render ${path}`, [
 		expectFetch("initial status", "/api/status"),
-		expectFetch("initial search", "/api/search"),
+		expectFetch("initial tasks", "/api/tasks"),
 		...(options.manualDuplicatePlan
 			? [expectFetch("initial duplicate plan", "/api/tasks/duplicates", { manual: true })]
 			: []),
@@ -510,7 +519,7 @@ const renderApp = async (
 	if (options.afterInitialStatus) {
 		await options.afterInitialStatus(container as HTMLElement);
 	}
-	await act(async () => operation.settle("initial search"));
+	await act(async () => operation.settle("initial tasks"));
 	if (controlledTimer) {
 		await act(async () => controlledTimer.advance());
 		controlledTimer.restore();
@@ -683,13 +692,13 @@ describe("task detail routes", () => {
 
 		const overlappingRefresh = new FetchOperation("HTTP refresh overlapping shared loading", [
 			expectFetch("overlapping config", "/api/config"),
-			expectFetch("overlapping search", "/api/search"),
+			expectFetch("overlapping tasks", "/api/tasks"),
 		]);
 		await act(async () => {
 			dataSocket.deliver("config-updated");
 			await Promise.resolve();
 		});
-		await act(async () => overlappingRefresh.settle("overlapping config", "overlapping search"));
+		await act(async () => overlappingRefresh.settle("overlapping config", "overlapping tasks"));
 		overlappingRefresh.finish();
 
 		const duplicate = new FetchOperation("late loaded frame after initial reconciliation", []);
@@ -698,7 +707,7 @@ describe("task detail routes", () => {
 			await Promise.resolve();
 		});
 		await Promise.all(duplicate.calls.map((call) => call.settledSignal));
-		expect(duplicate.calls.filter((call) => call.url === "/api/search")).toHaveLength(0);
+		expect(duplicate.calls.filter((call) => call.url.startsWith("/api/tasks?"))).toHaveLength(0);
 		duplicate.finish();
 	});
 
@@ -716,13 +725,13 @@ describe("task detail routes", () => {
 
 		const reconciliation = new FetchOperation("passive shared retry completion", [
 			expectFetch("passive config", "/api/config"),
-			expectFetch("passive search", "/api/search"),
+			expectFetch("passive tasks", "/api/tasks"),
 		]);
 		await act(async () => {
 			dataSocket.deliver(JSON.stringify({ type: "loaded" }));
 			await Promise.resolve();
 		});
-		await act(async () => reconciliation.settle("passive config", "passive search"));
+		await act(async () => reconciliation.settle("passive config", "passive tasks"));
 		reconciliation.finish();
 
 		await waitForIndicatorExit();
@@ -737,24 +746,24 @@ describe("task detail routes", () => {
 		// A tasks-updated broadcast triggers the incremental refresh, which only
 		// refetches the search corpus.
 		const activeRefresh = new FetchOperation("active refresh during shared completion", [
-			expectFetch("active search", "/api/search", { manual: true }),
+			expectFetch("active tasks", "/api/tasks", { manual: true }),
 		]);
 
 		await act(async () => {
 			dataSocket.deliver("tasks-updated");
 			await Promise.resolve();
 		});
-		await activeRefresh.startedSignals.get("active search")?.promise;
+		await activeRefresh.startedSignals.get("active tasks")?.promise;
 		await act(async () => {
 			dataSocket.deliver(JSON.stringify({ type: "loading", message: "Loading local tasks..." }));
 			dataSocket.deliver(JSON.stringify({ type: "loaded" }));
 			await Promise.resolve();
 		});
-		expect(activeRefresh.calls.filter((call) => call.url === "/api/search")).toHaveLength(1);
+		expect(activeRefresh.calls.filter((call) => call.url.startsWith("/api/tasks?"))).toHaveLength(1);
 
 		await act(async () => {
-			activeRefresh.respond("active search", json(searchResults));
-			await activeRefresh.settle("active search");
+			activeRefresh.respond("active tasks", json(taskSummaries()));
+			await activeRefresh.settle("active tasks");
 		});
 		activeRefresh.finish();
 	});
@@ -776,7 +785,7 @@ describe("task detail routes", () => {
 			await Promise.resolve();
 		});
 		await Promise.all(recovery.calls.map((call) => call.settledSignal));
-		expect(recovery.calls.filter((call) => call.url === "/api/search")).toHaveLength(1);
+		expect(recovery.calls.filter((call) => call.url.startsWith("/api/tasks?"))).toHaveLength(1);
 		expect(container.querySelector("[aria-label='Loading tasks']")).toBeNull();
 		expect(container.textContent).toContain(tasks[0]?.title ?? "");
 		recovery.finish();
@@ -858,7 +867,7 @@ describe("task detail routes", () => {
 		// The reconciliation edits an existing task, so the ID set is unchanged
 		// and the duplicate repair plan is not refetched.
 		const reconciliation = new FetchOperation("newer WebSocket reconciliation", [
-			expectFetch("newer search", "/api/search", { manual: true }),
+			expectFetch("newer tasks", "/api/tasks", { manual: true }),
 		]);
 		await act(async () => {
 			dataSocket.deliver("tasks-updated");
@@ -866,13 +875,14 @@ describe("task detail routes", () => {
 		});
 		await act(async () => {
 			reconciliation.respond(
-				"newer search",
-				json([
-					...searchResults.filter((result) => result.type !== "task" || result.task.id !== externallyEditedTask.id),
-					{ type: "task", task: externallyEditedTask, score: 1 } satisfies SearchResult,
-				]),
+				"newer tasks",
+				json(
+					taskSummaries().map((task) =>
+						task.id === externallyEditedTask.id ? { ...task, ...externallyEditedTask } : task,
+					),
+				),
 			);
-			await reconciliation.settle("newer search");
+			await reconciliation.settle("newer tasks");
 		});
 		reconciliation.finish();
 		expect(container.textContent).toContain(externallyEditedTask.title);
@@ -955,6 +965,30 @@ describe("task detail routes", () => {
 			() => window.location.pathname === "/board" && container.querySelector("[role='dialog']") === null,
 			"Back to the canonical board",
 		);
+	});
+
+	it("reuses the keyboard-selection prefetch when Enter opens a task", async () => {
+		const container = await renderApp("/board");
+		const card = Array.from(container.querySelectorAll("[draggable='true']")).find((element) =>
+			element.textContent?.includes("Fix labels / café & docs?"),
+		);
+		expect(card).toBeTruthy();
+		const request = new FetchOperation("keyboard selection prefetch", [
+			expectFetch("task detail", "/api/task/BACK-101", { manual: true }),
+		]);
+		await act(async () => {
+			card?.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+			await request.startedSignals.get("task detail")?.promise;
+			card?.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+			await Promise.resolve();
+		});
+		expect(request.calls).toHaveLength(1);
+		await act(async () => {
+			request.respond("task detail", json(tasks[0]));
+			await request.settle("task detail");
+		});
+		request.finish();
+		expect(container.querySelector("[role='dialog']")).toBeTruthy();
 	});
 
 	it("fetches a graph-linked task exactly once, without a redundant sync refetch", async () => {
@@ -1049,7 +1083,7 @@ describe("task detail routes", () => {
 		);
 		expect(window.location.search).toBe(filteredSearch);
 
-		await travel("forward", [expectFetch("reopened task", "/api/task/BACK-101")]);
+		await travel("forward");
 		assertState(
 			() =>
 				window.location.pathname === "/board/BACK-101/fix-labels-caf-docs" &&
@@ -1096,7 +1130,7 @@ describe("task detail routes", () => {
 
 		const staleRefresh = new FetchOperation("stale config refresh", [
 			expectFetch("stale config", "/api/config", { manual: true }),
-			expectFetch("stale search", "/api/search"),
+			expectFetch("stale tasks", "/api/tasks"),
 		]);
 		await act(async () => {
 			dataSocket.deliver("config-updated");
@@ -1107,18 +1141,15 @@ describe("task detail routes", () => {
 		// The newer refresh rides a tasks-updated broadcast, so it is incremental
 		// and leaves config alone; the stale full refresh must still lose.
 		const newerRefresh = new FetchOperation("newer task refresh", [
-			expectFetch("newer search", "/api/search", { manual: true }),
+			expectFetch("newer tasks", "/api/tasks", { manual: true }),
 		]);
 		await act(async () => {
 			dataSocket.deliver("tasks-updated");
 			await Promise.resolve();
 		});
 		await act(async () => {
-			newerRefresh.respond(
-				"newer search",
-				json([{ type: "task", task: customerTask, score: 1 } satisfies SearchResult]),
-			);
-			await newerRefresh.settle("newer search");
+			newerRefresh.respond("newer tasks", json([{ ...taskSummaries()[0], ...customerTask }]));
+			await newerRefresh.settle("newer tasks");
 		});
 		newerRefresh.finish();
 
@@ -1127,7 +1158,7 @@ describe("task detail routes", () => {
 
 		await act(async () => {
 			staleRefresh.respond("stale config", json({ ...defaultConfig, types: ["Bug"] }));
-			await staleRefresh.settle("stale config", "stale search");
+			await staleRefresh.settle("stale config", "stale tasks");
 		});
 
 		expect(container.textContent).toContain(customerTask.title);
@@ -1254,7 +1285,7 @@ describe("task detail routes", () => {
 		);
 		expect(ownerDocument.activeElement).toBe(title as HTMLButtonElement);
 
-		await travel("forward", [expectFetch("reopened task", "/api/task/BACK-101")]);
+		await travel("forward");
 		assertState(
 			() =>
 				window.location.pathname === "/tasks/BACK-101/fix-labels-caf-docs" &&
@@ -1309,7 +1340,7 @@ describe("task detail routes", () => {
 			expect(alert?.textContent).toContain(scenario.message);
 			expect(container.ownerDocument.activeElement).toBe(alert);
 
-			await travel("back", [expectFetch("restored routed task", "/api/task/BACK-101")]);
+			await travel("back");
 			assertState(
 				() =>
 					window.location.pathname === "/tasks/BACK-101/original" &&
@@ -1437,7 +1468,7 @@ describe("task detail routes", () => {
 		expect(archiveButton).toBeTruthy();
 		await clickWithHistory(archiveButton as HTMLButtonElement, [
 			expectFetch("archive response", "/api/tasks/BACK-101", { settleOn: "response" }),
-			expectFetch("archive refresh", "/api/search"),
+			expectFetch("archive refresh", "/api/tasks"),
 		]);
 		assertState(
 			() => window.location.pathname === "/tasks" && container.querySelector("[role='dialog']") === null,
@@ -1512,7 +1543,7 @@ describe("task detail routes", () => {
 		// fetches a replacement plan; bumping the request counter is what
 		// invalidates the stale initial response below.
 		const newerLoad = new FetchOperation("newer data load", [
-			expectFetch("newer search", "/api/search"),
+			expectFetch("newer tasks", "/api/tasks"),
 			expectFetch("newer duplicate plan", "/api/tasks/duplicates"),
 		]);
 		await act(async () => {
@@ -1520,7 +1551,7 @@ describe("task detail routes", () => {
 			await Promise.resolve();
 		});
 		await act(async () => {
-			await newerLoad.settle("newer search", "newer duplicate plan");
+			await newerLoad.settle("newer tasks", "newer duplicate plan");
 		});
 		newerLoad.finish();
 		assertState(() => container.textContent?.includes(tasks[0]?.title ?? "") ?? false, "newer data load");

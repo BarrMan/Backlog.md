@@ -5,10 +5,11 @@ import { join } from "node:path";
 import type { ScreenInterface } from "neo-neo-bblessed";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { type ColumnData, filterVisibleColumns, renderBoardTui } from "../ui/board.ts";
+import { type ColumnData, filterVisibleColumns } from "../ui/board/column-policy.ts";
+import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { getHelpShortcuts } from "../ui/components/help-popup.ts";
 import { createScreen } from "../ui/tui.ts";
-import { initializeTestProject, retry, withTimeout } from "./test-utils.ts";
+import { initializeTestProject, withTimeout } from "./test-utils.ts";
 
 function createTask(id: string, status: string): Task {
 	return {
@@ -125,13 +126,18 @@ async function withBoard(
 	const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget;
 	let boardPromise: Promise<void> | undefined;
 	let closed = false;
+	let resolveBoardReady: (() => void) | undefined;
+	const boardReady = new Promise<void>((resolve) => {
+		resolveBoardReady = resolve;
+	});
 	try {
-		boardPromise = renderBoardTui(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
+		boardPromise = new TUIRenderer(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
 			screen,
 			core: options.core,
 			hideEmptyColumns: options.hideEmptyColumns,
-		});
-		await Bun.sleep(20);
+			onReady: () => resolveBoardReady?.(),
+		}).run();
+		await withTimeout(boardReady, "board ready", 1000);
 		const quit = async () => {
 			if (closed) return;
 			closed = true;
@@ -164,15 +170,20 @@ describe("TUI board honors hideEmptyColumns", () => {
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget & { children: unknown[] };
 		let handoffs = 0;
+		let resolveBoardReady: (() => void) | undefined;
+		const boardReady = new Promise<void>((resolve) => {
+			resolveBoardReady = resolve;
+		});
 		try {
-			const board = renderBoardTui(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
+			const board = new TUIRenderer(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
 				screen,
 				preserveScreen: true,
+				onReady: () => resolveBoardReady?.(),
 				onWorkspacePress: async () => {
 					handoffs += 1;
 				},
-			});
-			await Bun.sleep(20);
+			}).run();
+			await withTimeout(boardReady, "board ready", 1000);
 			pressKey(screen, "S-b");
 			await withTimeout(board, "board workspace handoff", 5000);
 
@@ -221,22 +232,32 @@ describe("Shift+H toggles hideEmptyColumns", () => {
 		const core = new Core(testDir);
 		try {
 			await initializeTestProject(core, "Hide Empty Columns");
+			const saveConfig = core.filesystem.saveConfig.bind(core.filesystem);
+			let resolveSave: (() => void) | undefined;
+			core.filesystem.saveConfig = async (config) => {
+				await saveConfig(config);
+				resolveSave?.();
+			};
+			const waitForSave = () => {
+				const saved = new Promise<void>((resolve) => {
+					resolveSave = resolve;
+				});
+				return withTimeout(saved, "hide empty columns save", 1000);
+			};
 
 			await withBoard({ core }, async ({ screen, columnStatuses }) => {
 				expect(columnStatuses()).toEqual(["To Do", "In Progress", "Done"]);
 
+				const hiddenSaved = waitForSave();
 				pressKey(screen, "S-h");
-				await retry(async () => {
-					const config = await core.fs.loadConfig();
-					expect(config?.hideEmptyColumns).toBe(true);
-				}, 20);
+				await hiddenSaved;
+				expect((await core.filesystem.loadConfig())?.hideEmptyColumns).toBe(true);
 				expect(columnStatuses()).toEqual(["To Do", "Done"]);
 
+				const shownSaved = waitForSave();
 				pressKey(screen, "S-h");
-				await retry(async () => {
-					const config = await core.fs.loadConfig();
-					expect(config?.hideEmptyColumns).toBe(false);
-				}, 20);
+				await shownSaved;
+				expect((await core.filesystem.loadConfig())?.hideEmptyColumns).toBe(false);
 				expect(columnStatuses()).toEqual(["To Do", "In Progress", "Done"]);
 			});
 		} finally {
@@ -250,20 +271,38 @@ describe("Shift+H toggles hideEmptyColumns", () => {
 		try {
 			await initializeTestProject(core, "Hide Empty Columns Exit");
 
+			let resolveSaveStarted: (() => void) | undefined;
+			const saveStarted = new Promise<void>((resolve) => {
+				resolveSaveStarted = resolve;
+			});
+			let releaseSave: (() => void) | undefined;
+			const saveReleased = new Promise<void>((resolve) => {
+				releaseSave = resolve;
+			});
 			// Quitting resolves the board, and the CLI can exit the process right after,
-			// so a slow write must still land before the board reports it is done.
-			const saveConfig = core.fs.saveConfig.bind(core.fs);
-			core.fs.saveConfig = async (config) => {
-				await Bun.sleep(300);
+			// so the board must await the actual save rather than an elapsed delay.
+			const saveConfig = core.filesystem.saveConfig.bind(core.filesystem);
+			core.filesystem.saveConfig = async (config) => {
+				resolveSaveStarted?.();
+				await saveReleased;
 				await saveConfig(config);
 			};
 
 			await withBoard({ core }, async ({ screen, quit }) => {
 				pressKey(screen, "S-h");
-				await quit();
+				await withTimeout(saveStarted, "hide empty columns save start", 1000);
+				const close = quit();
+				let boardClosed = false;
+				void close.then(() => {
+					boardClosed = true;
+				});
+				await Promise.resolve();
+				expect(boardClosed).toBe(false);
+				releaseSave?.();
+				await close;
 			});
 
-			const persisted = await new Core(testDir).fs.loadConfig();
+			const persisted = await new Core(testDir).filesystem.loadConfig();
 			expect(persisted?.hideEmptyColumns).toBe(true);
 		} finally {
 			await rm(testDir, { force: true, recursive: true });
@@ -281,11 +320,11 @@ describe("piped board output honors hideEmptyColumns", () => {
 			lines.push(args.map(String).join(" "));
 		};
 		try {
-			await renderBoardTui(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
+			await new TUIRenderer(BOARD_TASKS, BOARD_STATUSES, "horizontal", 20, {
 				hideEmptyColumns: options.hideEmptyColumns,
 				milestoneMode: options.milestoneMode,
 				milestoneEntities: [],
-			});
+			}).run();
 		} finally {
 			console.log = originalLog;
 			if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);

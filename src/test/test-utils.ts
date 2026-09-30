@@ -14,6 +14,25 @@ import { initializeProject as initializeProjectShared } from "../core/init.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
 
+/** Makes an ordinary live-server API request with the scope advertised by its status endpoint. */
+export async function scopedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+	const request = new Request(input, init);
+	const url = new URL(request.url);
+	if (
+		!url.pathname.startsWith("/api/") ||
+		url.pathname === "/api/status" ||
+		request.headers.has("X-Backlog-Project-Scope")
+	)
+		return globalThis.fetch(request);
+
+	const status = await globalThis.fetch(new URL("/api/status", url));
+	if (!status.ok) return status;
+	const { projectScope } = (await status.json()) as { projectScope: string };
+	const headers = new Headers(request.headers);
+	headers.set("X-Backlog-Project-Scope", projectScope);
+	return globalThis.fetch(new Request(request, { headers }));
+}
+
 /**
  * Creates a unique test directory name to avoid conflicts in parallel execution
  * All test directories are created under tmp/ to keep the root directory clean
@@ -317,7 +336,7 @@ async function initializeTestProjectWithOptions(
 	});
 
 	if (autoCommit) {
-		const repoRoot = await core.gitOps.stageBacklogDirectory(core.filesystem.backlogDirName);
-		await core.gitOps.commitChanges(`backlog: Initialize backlog project: ${projectName}`, repoRoot);
+		const repoRoot = await core.git.stageBacklogDirectory(core.filesystem.backlogDirName);
+		await core.git.commitChanges(`backlog: Initialize backlog project: ${projectName}`, repoRoot);
 	}
 }

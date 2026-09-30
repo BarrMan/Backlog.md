@@ -622,7 +622,7 @@ function showInitializationResults(
 
 async function warnWhenRemoteIsMissing(core: Core, config: BacklogConfig): Promise<void> {
 	try {
-		if (config.remoteOperations && !(await core.gitOps.hasAnyRemote()))
+		if (config.remoteOperations && !(await core.git.hasAnyRemote()))
 			console.warn(
 				"Warning: remoteOperations is enabled but no git remotes are configured. Remote features will be skipped until a remote is added (e.g., 'git remote add origin <url>') or disable remoteOperations via 'backlog config set remoteOperations false'.",
 			);

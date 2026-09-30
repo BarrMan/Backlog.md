@@ -307,9 +307,6 @@ async function populateCorpus(root: string, options: Options): Promise<Corpus> {
 		await runProcess(["git", "switch", "main"], projectRoot);
 	}
 
-	setupCore.disposeSearchService();
-	setupCore.disposeContentStore();
-
 	const activeTaskIds = Array.from({ length: options.localTasks }, (_, index) => `TASK-${index + 1}`);
 	const completedTaskIds = Array.from(
 		{ length: options.completedTasks },
@@ -367,14 +364,14 @@ function instrumentCore(core: Core): Instrumentation {
 	wrap(core.filesystem, "loadConfig", "configLoads");
 	wrap(core.filesystem, "listTasks", "localTaskScans");
 	wrap(core.filesystem, "listCompletedTasks", "completedTaskScans");
-	wrap(core.gitOps, "fetch", "remoteFetches");
-	wrap(core.gitOps, "listRecentBranchTips", "branchTipSnapshots");
-	wrap(core.gitOps, "listRecentRemoteBranches", "remoteBranchEnumerations");
-	wrap(core.gitOps, "listRecentBranches", "localBranchEnumerations");
-	wrap(core.gitOps, "listFilesInTree", "treeIndexes");
-	wrap(core.gitOps, "getBranchLastModifiedMap", "historyScans");
-	wrap(core.gitOps, "resolveCommit", "refResolutions");
-	wrap(core.gitOps, "showFile", "taskHydrations");
+	wrap(core.git, "fetch", "remoteFetches");
+	wrap(core.git, "listRecentBranchTips", "branchTipSnapshots");
+	wrap(core.git, "listRecentRemoteBranches", "remoteBranchEnumerations");
+	wrap(core.git, "listRecentBranches", "localBranchEnumerations");
+	wrap(core.git, "listFilesInTree", "treeIndexes");
+	wrap(core.git, "getBranchLastModifiedMap", "historyScans");
+	wrap(core.git, "resolveCommit", "refResolutions");
+	wrap(core.git, "showFile", "taskHydrations");
 
 	return {
 		reset() {
@@ -461,7 +458,7 @@ function validateOperationResult(surface: SurfaceName, result: OperationResult, 
 }
 
 function coreSurface(projectRoot: string): BenchmarkSurface {
-	const core = new Core(projectRoot, { enableWatchers: true });
+	const core = new Core(projectRoot);
 	const instrumentation = instrumentCore(core);
 	return {
 		async operation() {
@@ -469,8 +466,6 @@ function coreSurface(projectRoot: string): BenchmarkSurface {
 		},
 		instrumentation,
 		async dispose() {
-			core.disposeSearchService();
-			core.disposeContentStore();
 			instrumentation.restore();
 		},
 	};
@@ -491,8 +486,6 @@ function mcpSurface(projectRoot: string): BenchmarkSurface {
 		},
 		instrumentation,
 		async dispose() {
-			server.application.disposeSearchService();
-			server.application.disposeContentStore();
 			instrumentation.restore();
 		},
 	};

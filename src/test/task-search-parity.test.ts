@@ -2,10 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { ContentStore } from "../core/content-store.ts";
-import { SearchService } from "../core/search-service.ts";
 import { withReadiness } from "../core/task-detail.ts";
-import { FileSystem } from "../file-system/operations.ts";
+import type { FileSystem } from "../file-system/operations.ts";
 import { McpServer } from "../mcp/server.ts";
 import { registerTaskTools } from "../mcp/tools/tasks/index.ts";
 import type { Task, TaskSearchResult } from "../types/index.ts";
@@ -21,7 +19,7 @@ import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } fro
 
 /**
  * The local one-shot index (`task list --search`, the TUI views, the MCP adapter) and the
- * cross-branch SearchService (`backlog search`, the web API) must agree on what a query matches
+ * persistent search (`backlog search`, the web API) must agree on what a query matches
  * and on what a filter means. These tests pin that agreement.
  */
 
@@ -67,53 +65,46 @@ describe("task search corpus", () => {
 
 describe("cross-surface search parity", () => {
 	let TEST_DIR: string;
+	let core: Core;
 	let filesystem: FileSystem;
-	let store: ContentStore;
-	let search: SearchService;
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("task-search-parity");
-		filesystem = new FileSystem(TEST_DIR);
+		core = new Core(TEST_DIR);
+		filesystem = core.filesystem;
 		await filesystem.ensureBacklogStructure();
 		for (const task of tasks) {
 			await filesystem.saveTask(task);
 		}
-		store = new ContentStore(filesystem);
-		search = new SearchService(store);
-		await search.ensureInitialized();
 	});
 
 	afterEach(async () => {
-		search?.dispose();
-		store?.dispose();
 		await safeCleanup(TEST_DIR);
 	});
 
-	const searchServiceTaskIds = (query: string): string[] =>
-		search
-			.search({ query, types: ["task"] })
+	const persistentTaskIds = async (query: string): Promise<string[]> =>
+		(await core.searchPersistently({ query, types: ["task"] }))
 			.filter((result): result is TaskSearchResult => result.type === "task")
 			.map((result) => result.task.id)
 			.sort();
 
-	it("finds a task by a label it carries through both surfaces", () => {
+	it("finds a task by a label it carries through both surfaces", async () => {
 		const localMatches = taskIds(createTaskSearchIndex(tasks).search({ query: "infrastructure" }));
 
 		expect(localMatches).toEqual(["task-1"]);
-		expect(searchServiceTaskIds("infrastructure")).toEqual(["TASK-1"]);
+		expect(await persistentTaskIds("infrastructure")).toEqual(["TASK-1"]);
 	});
 
-	it("finds a task by its assignee through both surfaces", () => {
+	it("finds a task by its assignee through both surfaces", async () => {
 		const localMatches = taskIds(createTaskSearchIndex(tasks).search({ query: "morgan" }));
 
 		expect(localMatches).toEqual(["task-1"]);
-		expect(searchServiceTaskIds("morgan")).toEqual(["TASK-1"]);
+		expect(await persistentTaskIds("morgan")).toEqual(["TASK-1"]);
 	});
 
-	it("agrees on a label filter applied without a query", () => {
+	it("agrees on a label filter applied without a query", async () => {
 		const localMatches = taskIds(applyTaskFilters(tasks, { labels: ["backend"] }));
-		const serviceMatches = search
-			.search({ types: ["task"], filters: { labels: ["backend"] } })
+		const serviceMatches = (await core.searchPersistently({ types: ["task"], filters: { labels: ["backend"] } }))
 			.filter((result): result is TaskSearchResult => result.type === "task")
 			.map((result) => result.task.id)
 			.sort();
@@ -122,10 +113,9 @@ describe("cross-surface search parity", () => {
 		expect(serviceMatches).toEqual(["TASK-1", "TASK-2"]);
 	});
 
-	it("agrees on an assignee filter applied without a query", () => {
+	it("agrees on an assignee filter applied without a query", async () => {
 		const localMatches = taskIds(applyTaskFilters(tasks, { assignee: "@MORGAN" }));
-		const serviceMatches = search
-			.search({ types: ["task"], filters: { assignee: "@MORGAN" } })
+		const serviceMatches = (await core.searchPersistently({ types: ["task"], filters: { assignee: "@MORGAN" } }))
 			.filter((result): result is TaskSearchResult => result.type === "task")
 			.map((result) => result.task.id)
 			.sort();
@@ -271,8 +261,6 @@ describe("filter wiring across surfaces", () => {
 
 	afterEach(async () => {
 		await mcpServer.stop();
-		core.disposeSearchService();
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 
@@ -311,20 +299,17 @@ describe("filter wiring across surfaces", () => {
 		expect(single.stdout.toString()).toContain("Wiring one label");
 	});
 
-	it("filters by project identically through Core, the search service, MCP, and both CLI entry points", async () => {
+	it("filters by project identically through Core, MCP, and both CLI entry points", async () => {
 		const expected = ["Wiring both labels"];
 
 		// Core.queryTasks backs `task list` and `GET /api/tasks`.
 		const coreTasks = await core.queryTasks({ filters: { project: "web" }, includeCrossBranch: false });
 		expect(coreTasks.map((task) => task.title)).toEqual(expected);
 
-		// SearchService backs `backlog search` and `GET /api/search`.
-		const searchService = await core.getSearchService();
-		const serviceTitles = searchService
-			.search({ types: ["task"], filters: { project: "web" } })
+		const searchTitles = (await core.searchPersistently({ types: ["task"], filters: { project: "web" } }))
 			.filter((result): result is TaskSearchResult => result.type === "task")
 			.map((result) => result.task.title);
-		expect(serviceTitles).toEqual(expected);
+		expect(searchTitles).toEqual(expected);
 
 		const mcpOutput = await mcpTaskList({ project: ["web"] });
 		expect(mcpOutput).toContain("Wiring both labels");

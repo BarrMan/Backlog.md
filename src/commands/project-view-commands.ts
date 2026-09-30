@@ -5,6 +5,7 @@ import { collectArchivedMilestoneKeys, milestoneKey } from "../core/milestones.t
 import { type Core, exportKanbanBoardToFile, updateReadmeWithBoard } from "../index.ts";
 import { createLoadingScreen } from "../ui/loading.ts";
 import { resolveMilestoneInputForStorage } from "../utils/milestone-storage.ts";
+import { AmbiguousTaskIdError } from "../utils/task-path.ts";
 
 type ProjectViewCommandRuntime = {
 	createCore(): Promise<Core>;
@@ -14,6 +15,16 @@ type ProjectViewCommandRuntime = {
 	reportFailure(summary: string, error: unknown): void;
 };
 type BrowserServerLifecycle = { stop(): Promise<void> };
+
+function assertBoardExportIdentities(snapshot: Awaited<ReturnType<Core["loadTaskSnapshot"]>>): void {
+	for (const taskId of snapshot.identityIndex.getContestedIds()) {
+		const resolution = snapshot.identityIndex.resolveForRead(taskId);
+		if (resolution.status === "ambiguous") {
+			console.error("Board export blocked by duplicate task ID.");
+			throw new AmbiguousTaskIdError(taskId, resolution.candidates);
+		}
+	}
+}
 
 async function resolveBrowserPort(
 	requestedPort: string | undefined,
@@ -79,8 +90,8 @@ export function registerBoardCommands(program: Command, runtime: ProjectViewComm
 	const view = async (options: { milestones?: boolean }) => {
 		const core = await runtime.createCore();
 		const config = await core.filesystem.loadConfig();
-		const { runUnifiedView } = await import("../ui/unified-view.ts");
-		await runUnifiedView({
+		const { UnifiedViewController } = await import("../ui/unified-view.ts");
+		await new UnifiedViewController({
 			core,
 			initialView: "kanban",
 			milestoneMode: options.milestones,
@@ -103,7 +114,7 @@ export function registerBoardCommands(program: Command, runtime: ProjectViewComm
 					statuses: config?.statuses || [],
 				};
 			},
-		});
+		}).run();
 	};
 	addBoardOptions(boardCmd).description("display tasks in a Kanban board").action(view);
 	addBoardOptions(boardCmd.command("view").description("display tasks in a Kanban board")).action(view);
@@ -115,10 +126,12 @@ export function registerBoardCommands(program: Command, runtime: ProjectViewComm
 		.option("--export-version <version>", "version to include in the export")
 		.action(async (filename, options) => {
 			const core = await runtime.createCore();
-			const config = await core.filesystem.loadConfig();
 			const loadingScreen = await createLoadingScreen("Loading tasks for export");
 			try {
-				const tasks = await core.loadTasks((message) => loadingScreen?.update(message));
+				const snapshot = await core.loadTaskSnapshot();
+				assertBoardExportIdentities(snapshot);
+				const tasks = snapshot.tasks;
+				const config = snapshot.config;
 				loadingScreen?.update(`Total tasks: ${tasks.length}`);
 				loadingScreen?.close();
 				const cwd = await runtime.requireProjectRoot();

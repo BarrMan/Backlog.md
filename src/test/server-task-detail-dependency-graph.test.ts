@@ -7,13 +7,22 @@ import type { TaskDetail } from "../core/task-detail.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
-import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, safeCleanup, withTimeout } from "./test-utils.ts";
 
 describe("BacklogServer task detail dependency graph", () => {
 	let testDir: string;
 	let server: BacklogServer | null;
 	let core: Core;
 	let baseUrl: string;
+	let projectScope: string;
+	const nativeFetch = globalThis.fetch;
+	const startServer = async () => {
+		server = new BacklogServer(testDir);
+		await server.start(0, false);
+		baseUrl = `http://127.0.0.1:${server.getPort()}`;
+		projectScope = ((await (await nativeFetch(`${baseUrl}/api/status`)).json()) as { projectScope: string })
+			.projectScope;
+	};
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("server-task-detail-graph");
@@ -32,14 +41,21 @@ describe("BacklogServer task detail dependency graph", () => {
 			autoCommit: false,
 		});
 		core = new Core(testDir);
-		server = new BacklogServer(testDir);
-		await server.start(0, false);
-		baseUrl = `http://127.0.0.1:${server.getPort()}`;
+		await startServer();
+		globalThis.fetch = Object.assign(
+			(input: Parameters<typeof nativeFetch>[0], init?: Parameters<typeof nativeFetch>[1]) => {
+				const request = new Request(input, init);
+				request.headers.set("X-Backlog-Project-Scope", projectScope);
+				return nativeFetch(request);
+			},
+			nativeFetch,
+		);
 	});
 
 	afterEach(async () => {
 		await server?.stop();
 		server = null;
+		globalThis.fetch = nativeFetch;
 		await safeCleanup(testDir);
 	});
 
@@ -48,6 +64,8 @@ describe("BacklogServer task detail dependency graph", () => {
 			{ id, title, status: "To Do", assignee: [], createdDate: "2026-07-14 09:30", labels: [], dependencies },
 			false,
 		);
+		await server?.stop();
+		await startServer();
 	};
 
 	const detailFor = async (taskId: string): Promise<TaskDetail> => {
@@ -94,6 +112,8 @@ describe("BacklogServer task detail dependency graph", () => {
 		await addTask("task-2", "Selected", ["task-1", "task-404"]);
 		const original = join(testDir, "backlog", "tasks", "task-1 - Contested.md");
 		await writeFile(join(testDir, "backlog", "tasks", "task-01 - Contested-copy.md"), await readFile(original));
+		await server?.stop();
+		await startServer();
 
 		const detail = await detailFor("task-2");
 		expect(detail.dependencyGraph.nodes.map((node) => [node.id, node.state])).toEqual([
@@ -107,6 +127,8 @@ describe("BacklogServer task detail dependency graph", () => {
 		await addTask("task-1", "Contested");
 		const original = join(testDir, "backlog", "tasks", "task-1 - Contested.md");
 		await writeFile(join(testDir, "backlog", "tasks", "task-01 - Contested-copy.md"), await readFile(original));
+		await server?.stop();
+		await startServer();
 
 		expect((await withTimeout(fetch(`${baseUrl}/api/tasks/task-1`), "ambiguous", 5_000)).status).toBe(409);
 		expect((await withTimeout(fetch(`${baseUrl}/api/tasks/nope!`), "invalid", 5_000)).status).toBe(400);

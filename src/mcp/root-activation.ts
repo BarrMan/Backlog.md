@@ -18,7 +18,9 @@ export class McpRootActivation {
 	private startupConfig: BacklogConfig | null = null;
 
 	constructor(
-		private readonly application: Core,
+		private readonly getApplication: () => Core,
+		private readonly createApplication: (projectRoot: string) => Core,
+		private readonly replaceApplication: (application: Core) => void,
 		private readonly initialProjectRoot: string,
 		private readonly setCapabilities: (config: BacklogConfig | null, projectRoot: string) => Promise<void>,
 		private readonly log: (message: string, options?: { debug?: boolean }) => void,
@@ -68,18 +70,23 @@ export class McpRootActivation {
 	}
 
 	private async activate(projectRoot: string): Promise<boolean> {
-		if (this.application.filesystem.rootDir === projectRoot) return true;
-		const previousProjectRoot = this.application.filesystem.rootDir;
-		this.application.reinitializeProjectRoot(projectRoot);
+		const application = this.createApplication(projectRoot);
 		try {
-			await this.application.ensureConfigLoaded();
-			const config = await this.application.filesystem.loadConfig();
+			await application.ensureConfigLoaded();
+			const config = await application.filesystem.loadConfig();
 			if (!config) throw new Error("no valid config");
+			const current = this.getApplication().filesystem;
+			if (
+				current.rootDir === application.filesystem.rootDir &&
+				current.backlogDir === application.filesystem.backlogDir &&
+				current.configFilePath === application.filesystem.configFilePath
+			)
+				return true;
+			this.replaceApplication(application);
 			await this.setCapabilities(config, projectRoot);
 			this.log(`MCP server activated project: ${projectRoot}`, { debug: this.debug });
 			return true;
 		} catch (error) {
-			this.application.reinitializeProjectRoot(previousProjectRoot);
 			this.log(`Skipping root ${projectRoot}: ${error instanceof Error ? error.message : String(error)}`, {
 				debug: this.debug,
 			});
@@ -88,8 +95,8 @@ export class McpRootActivation {
 	}
 
 	private async restoreStartupMode(): Promise<void> {
-		if (this.application.filesystem.rootDir === this.initialProjectRoot) return;
-		this.application.reinitializeProjectRoot(this.initialProjectRoot);
+		if (this.getApplication().filesystem.rootDir === this.initialProjectRoot) return;
+		this.replaceApplication(this.createApplication(this.initialProjectRoot));
 		await this.setCapabilities(this.startupConfig, this.initialProjectRoot);
 		this.log("MCP server restored its launch-directory mode.", { debug: this.debug });
 	}

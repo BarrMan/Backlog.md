@@ -14,7 +14,11 @@ export interface TaskIdentityRecord {
 	workingCopy?: boolean;
 }
 
-function workingCopyTaskIdentityRecord(task: Task, type: "task" | "completed", path: string): TaskIdentityRecord {
+export function workingCopyTaskIdentityRecord(
+	task: Task,
+	type: "task" | "completed",
+	path: string,
+): TaskIdentityRecord {
 	return {
 		id: task.id,
 		type,

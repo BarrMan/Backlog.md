@@ -1,13 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { appendFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { GitIndexEntry } from "../git/operations.ts";
 import type { Task, TaskCreateInput } from "../types/index.ts";
-import { getCreatedTaskBoardOutcome, renderBoardTui, upsertBoardTask } from "../ui/board.ts";
+import { upsertBoardTask } from "../ui/board/column-policy.ts";
+import { getCreatedTaskBoardOutcome } from "../ui/board/creation-outcome.ts";
+import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { openSingleSelectFilterPopup } from "../ui/components/filter-popup.ts";
 import type { CaretLines } from "../ui/components/task-composer.ts";
 import {
@@ -47,6 +49,60 @@ async function initializeGitRepository(testDir: string): Promise<void> {
 	await $`git init -b main`.cwd(testDir).quiet();
 	await $`git add backlog`.cwd(testDir).quiet();
 	await $`git commit -m init`.cwd(testDir).quiet();
+}
+
+let testProjectTemplate: string;
+let testSigningKeyDirectory: string;
+let testSigningKeyPath: string;
+let testProjectNumber = 0;
+const testDirs: string[] = [];
+let originalStdoutWrite: typeof process.stdout.write;
+let originalTmux: string | undefined;
+
+beforeAll(async () => {
+	originalStdoutWrite = process.stdout.write;
+	// Composer tests inspect Blessed widget state, not terminal transport bytes.
+	process.stdout.write = ((
+		_chunk: string | Uint8Array,
+		encoding?: BufferEncoding | ((error?: Error | null) => void),
+		callback?: (error?: Error | null) => void,
+	) => {
+		const complete = typeof encoding === "function" ? encoding : callback;
+		if (complete) setImmediate(complete);
+		return true;
+	}) as typeof process.stdout.write;
+	originalTmux = process.env.TMUX;
+	delete process.env.TMUX;
+	testProjectTemplate = await mkdtemp(join(tmpdir(), "backlog-tui-composer-template-"));
+	const templateCore = new Core(testProjectTemplate);
+	await initializeTestProject(templateCore, "TUI Composer Test");
+	await initializeGitRepository(testProjectTemplate);
+	testSigningKeyDirectory = await mkdtemp(join(tmpdir(), "backlog-tui-composer-signing-"));
+	testSigningKeyPath = join(testSigningKeyDirectory, "test-signing-key");
+	const keygen = Bun.spawn(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", testSigningKeyPath], {
+		cwd: testProjectTemplate,
+		stdout: "ignore",
+		stderr: "pipe",
+	});
+	const [exitCode, stderr] = await Promise.all([keygen.exited, new Response(keygen.stderr).text()]);
+	if (exitCode !== 0) throw new Error(`ssh-keygen failed with exit code ${exitCode}: ${stderr}`);
+});
+
+afterAll(async () => {
+	await Promise.all(testDirs.map((testDir) => rm(testDir, { recursive: true, force: true })));
+	await rm(testProjectTemplate, { recursive: true, force: true });
+	await rm(testSigningKeyDirectory, { recursive: true, force: true });
+	process.stdout.write = originalStdoutWrite;
+	if (originalTmux === undefined) delete process.env.TMUX;
+	else process.env.TMUX = originalTmux;
+});
+
+async function createTestProject(): Promise<{ testDir: string; core: Core }> {
+	const testDir = join(tmpdir(), `backlog-tui-composer-${process.pid}-${testProjectNumber++}`);
+	await cp(testProjectTemplate, testDir, { recursive: true });
+	const canonicalTestDir = await realpath(testDir);
+	testDirs.push(canonicalTestDir);
+	return { testDir: canonicalTestDir, core: new Core(canonicalTestDir) };
 }
 
 async function installHook(testDir: string, hook: string, body: string, hooksDir = join(testDir, ".git", "hooks")) {
@@ -109,7 +165,7 @@ function collectWidgets(root: { children?: unknown[] }): TestWidget[] {
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
 	for (let attempt = 0; attempt < 100; attempt += 1) {
 		if (predicate()) return;
-		await Bun.sleep(10);
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	throw new Error(`Timed out waiting for ${message}`);
 }
@@ -446,13 +502,7 @@ describe("TUI task composer canonical persistence", () => {
 	let core: Core;
 
 	beforeEach(async () => {
-		testDir = await mkdtemp(join(tmpdir(), "backlog-tui-composer-"));
-		core = new Core(testDir);
-		await initializeTestProject(core, "TUI Composer Test");
-	});
-
-	afterEach(async () => {
-		await rm(testDir, { recursive: true, force: true });
+		({ testDir, core } = await createTestProject());
 	});
 
 	it("routes normal and explicitly selected Draft values through canonical creation", async () => {
@@ -466,10 +516,10 @@ describe("TUI task composer canonical persistence", () => {
 		const createdDraft = await draft.create(async (input) => (await core.createTaskFromInput(input, false)).task);
 
 		expect(createdTask?.id).toBe("TASK-1");
-		expect(await core.fs.loadTask("TASK-1")).not.toBeNull();
+		expect(await core.filesystem.loadTask("TASK-1")).not.toBeNull();
 		expect(createdDraft?.id).toBe("DRAFT-1");
-		expect(await core.fs.loadDraft("DRAFT-1")).not.toBeNull();
-		expect(await core.fs.loadTask("DRAFT-1")).toBeNull();
+		expect(await core.filesystem.loadDraft("DRAFT-1")).not.toBeNull();
+		expect(await core.filesystem.loadTask("DRAFT-1")).toBeNull();
 	});
 
 	it("persists mid-field astral insertions from both text fields without corrupting their caret", async () => {
@@ -524,7 +574,7 @@ describe("TUI task composer canonical persistence", () => {
 			expect(persisted).toContain("left Y𠮷 right");
 			expect(persisted).not.toContain("�");
 			expect(persisted).not.toContain("\\uD842");
-			expect(await core.fs.loadTask("TASK-1")).toMatchObject({
+			expect(await core.filesystem.loadTask("TASK-1")).toMatchObject({
 				title: "AX𠮷B",
 				description: "left Y𠮷 right",
 			});
@@ -534,11 +584,10 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("rolls back a task when auto-commit fails and retries with the same ID", async () => {
-		await initializeGitRepository(testDir);
-		const addAndCommitTaskFile = core.gitOps.addAndCommitTaskFile.bind(core.gitOps);
-		core.gitOps.addAndCommitTaskFile = async (_taskId, filePath, _action, onStaged) => {
-			await core.gitOps.addFile(filePath);
-			const stagedEntries = await core.gitOps.getIndexEntries(filePath);
+		const addAndCommitTaskFile = core.git.addAndCommitTaskFile.bind(core.git);
+		core.git.addAndCommitTaskFile = async (_taskId, filePath, _action, onStaged) => {
+			await core.git.addFile(filePath);
+			const stagedEntries = await core.git.getIndexEntries(filePath);
 			onStaged?.(stagedEntries);
 			throw new Error("simulated auto-commit failed");
 		};
@@ -551,23 +600,26 @@ describe("TUI task composer canonical persistence", () => {
 		try {
 			expect(await controller.create(persist)).toBeNull();
 			expect(controller.error).toContain("failed");
-			expect(await core.fs.loadTask("TASK-1")).toBeNull();
-			expect((await core.gitOps.getStatus()).trim()).toBe("");
+			expect(await core.filesystem.loadTask("TASK-1")).toBeNull();
+			expect((await core.git.getStatus()).trim()).toBe("");
 			expect(controller.values.description).toBe("Preserve this value");
 		} finally {
-			core.gitOps.addAndCommitTaskFile = addAndCommitTaskFile;
+			core.git.addAndCommitTaskFile = addAndCommitTaskFile;
 		}
 
 		const retried = await controller.create(persist);
 		expect(retried?.id).toBe("TASK-1");
-		expect(await core.fs.loadTask("TASK-2")).toBeNull();
-		expect((await core.gitOps.getStatus()).trim()).toBe("");
+		expect(await core.filesystem.loadTask("TASK-2")).toBeNull();
+		expect((await core.git.getStatus()).trim()).toBe("");
 	});
 
 	it("never deletes or unstages a later edit while a failing hook is running", async () => {
-		await initializeGitRepository(testDir);
 		const markerPath = join(testDir, "hook-started");
-		await installFailingHook(testDir, `echo attempt >> "${markerPath}"\nsleep 0.4\nexit 1`);
+		const releasePath = join(testDir, "hook-release");
+		await installFailingHook(
+			testDir,
+			`echo attempt >> "${markerPath}"\nwhile [ ! -e "${releasePath}" ]; do sleep 0.01; done\nexit 1`,
+		);
 
 		const creation = core.createTaskFromInput({ title: "Slow failing create" }, true);
 		void creation.catch(() => undefined);
@@ -580,10 +632,11 @@ describe("TUI task composer canonical persistence", () => {
 				200,
 				25,
 			);
-			const created = await core.fs.loadTask("TASK-1");
+			const created = await core.filesystem.loadTask("TASK-1");
 			expect(created?.filePath).toBeDefined();
 			const laterContent = "Later user edit must survive.\n";
 			await writeFile(created?.filePath as string, laterContent);
+			await writeFile(releasePath, "release\n");
 
 			await expect(creation).rejects.toThrow();
 			expect(await readFile(created?.filePath as string, "utf8")).toBe(laterContent);
@@ -595,7 +648,6 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("preserves hook-modified task bytes and explains the recovery state", async () => {
-		await initializeGitRepository(testDir);
 		await installFailingHook(
 			testDir,
 			'for file in backlog/tasks/*.md; do printf "\\nHook edit must survive.\\n" >> "$file"; done\nexit 1',
@@ -604,7 +656,7 @@ describe("TUI task composer canonical persistence", () => {
 		const creation = core.createTaskFromInput({ title: "Hook modified" }, true);
 		await expect(creation).rejects.toThrow("TASK-1 remains in use");
 
-		const created = await core.fs.loadTask("TASK-1");
+		const created = await core.filesystem.loadTask("TASK-1");
 		expect(created?.filePath).toBeDefined();
 		expect(await readFile(created?.filePath as string, "utf8")).toContain("Hook edit must survive.");
 		expect((await $`git diff --cached --name-only`.cwd(testDir).text()).trim()).toBe("");
@@ -617,13 +669,12 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("preserves both file and staged state when same-path index ownership is lost", async () => {
-		await initializeGitRepository(testDir);
-		const originalAddAndCommit = core.gitOps.addAndCommitTaskFile.bind(core.gitOps);
+		const originalAddAndCommit = core.git.addAndCommitTaskFile.bind(core.git);
 		let createdContent = "";
-		core.gitOps.addAndCommitTaskFile = async (_taskId, filePath, _action, onStaged) => {
+		core.git.addAndCommitTaskFile = async (_taskId, filePath, _action, onStaged) => {
 			createdContent = await readFile(filePath, "utf8");
 			await $`git add ${filePath}`.cwd(testDir).quiet();
-			onStaged?.(await core.gitOps.getIndexEntries(filePath));
+			onStaged?.(await core.git.getIndexEntries(filePath));
 			await writeFile(filePath, `${createdContent}\nConcurrent staged edit must survive.\n`);
 			await $`git add ${filePath}`.cwd(testDir).quiet();
 			await writeFile(filePath, createdContent);
@@ -637,7 +688,7 @@ describe("TUI task composer canonical persistence", () => {
 			} catch (caught) {
 				error = caught instanceof Error ? caught : new Error(String(caught));
 			}
-			const created = await core.fs.loadTask("TASK-1");
+			const created = await core.filesystem.loadTask("TASK-1");
 			if (!created?.filePath) throw new Error("Expected TASK-1 to remain on disk");
 
 			expect(error?.message).toContain(created.filePath);
@@ -653,14 +704,13 @@ describe("TUI task composer canonical persistence", () => {
 			const next = await core.createTaskFromInput({ title: "Next task" }, false);
 			expect(next.task.id).toBe("TASK-2");
 		} finally {
-			core.gitOps.addAndCommitTaskFile = originalAddAndCommit;
+			core.git.addAndCommitTaskFile = originalAddAndCommit;
 		}
 	});
 
 	it("commits the owned staged blob when the worktree changes before commit", async () => {
-		await initializeGitRepository(testDir);
-		const originalAddAndCommit = core.gitOps.addAndCommitTaskFile.bind(core.gitOps);
-		core.gitOps.addAndCommitTaskFile = async (taskId, filePath, action, onStaged) => {
+		const originalAddAndCommit = core.git.addAndCommitTaskFile.bind(core.git);
+		core.git.addAndCommitTaskFile = async (taskId, filePath, action, onStaged) => {
 			await originalAddAndCommit(taskId, filePath, action, (entries) => {
 				onStaged?.(entries);
 				appendFileSync(filePath, "\nLater worktree edit must not be committed.\n");
@@ -677,25 +727,13 @@ describe("TUI task composer canonical persistence", () => {
 				relativeCreatedPath,
 			);
 		} finally {
-			core.gitOps.addAndCommitTaskFile = originalAddAndCommit;
+			core.git.addAndCommitTaskFile = originalAddAndCommit;
 		}
 	});
 
 	it("preserves commit.gpgSign for selected-path auto-commits", async () => {
-		await initializeGitRepository(testDir);
-		const signingKeyPath = join(testDir, "test-signing-key");
-		const keygen = Bun.spawn(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", signingKeyPath], {
-			cwd: testDir,
-			stdout: "ignore",
-			stderr: "pipe",
-		});
-		const stderrPromise = new Response(keygen.stderr).text();
-		const [exitCode, stderr] = await Promise.all([keygen.exited, stderrPromise]);
-		if (exitCode !== 0) {
-			throw new Error(`ssh-keygen failed with exit code ${exitCode}: ${stderr}`);
-		}
 		await $`git config gpg.format ssh`.cwd(testDir).quiet();
-		await $`git config user.signingKey ${signingKeyPath}`.cwd(testDir).quiet();
+		await $`git config user.signingKey ${testSigningKeyPath}`.cwd(testDir).quiet();
 		await $`git config commit.gpgSign true`.cwd(testDir).quiet();
 
 		const result = await core.createTaskFromInput({ title: "Signed task" }, true);
@@ -707,7 +745,6 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("runs commit hooks once on Git versions before git hook run existed", async () => {
-		await initializeGitRepository(testDir);
 		const hooksDir = join(testDir, ".custom-hooks");
 		const markerPath = join(testDir, "legacy-hook-ran");
 		await $`git config core.hooksPath .custom-hooks`.cwd(testDir).quiet();
@@ -718,7 +755,7 @@ describe("TUI task composer canonical persistence", () => {
 			hooksDir,
 		);
 
-		const git = core.gitOps as unknown as {
+		const git = core.git as unknown as {
 			execGit: (
 				args: string[],
 				options?: {
@@ -730,7 +767,7 @@ describe("TUI task composer canonical persistence", () => {
 				},
 			) => Promise<{ stdout: string; stderr: string }>;
 		};
-		const originalExecGit = git.execGit.bind(core.gitOps);
+		const originalExecGit = git.execGit.bind(core.git);
 		let hookRunCalls = 0;
 		git.execGit = async (args, options) => {
 			if (args[0] === "version") return { stdout: "git version 2.35.8\n", stderr: "" };
@@ -753,14 +790,13 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("rebuilds the selected commit on a concurrently advanced HEAD", async () => {
-		await initializeGitRepository(testDir);
-		const git = core.gitOps as unknown as {
+		const git = core.git as unknown as {
 			execGit: (
 				args: string[],
 				options?: { readOnly?: boolean; cwd?: string; input?: string; env?: Record<string, string> },
 			) => Promise<{ stdout: string; stderr: string }>;
 		};
-		const originalExecGit = git.execGit.bind(core.gitOps);
+		const originalExecGit = git.execGit.bind(core.git);
 		let advanced = false;
 		git.execGit = async (args, options) => {
 			if (args[0] === "update-ref" && !advanced) {
@@ -781,14 +817,13 @@ describe("TUI task composer canonical persistence", () => {
 			expect(await $`git show HEAD:concurrent.txt`.cwd(testDir).text()).toBe("Concurrent HEAD content.\n");
 			expect((await $`git show HEAD:${relativeCreatedPath}`.cwd(testDir).text()).length).toBeGreaterThan(0);
 			expect(Number((await $`git rev-list --count HEAD`.cwd(testDir).text()).trim())).toBe(beforeCount + 2);
-			expect((await core.gitOps.getStatus()).trim()).toBe("");
+			expect((await core.git.getStatus()).trim()).toBe("");
 		} finally {
 			git.execGit = originalExecGit;
 		}
 	});
 
 	it("refuses selected-path auto-commit without disturbing an in-progress merge", async () => {
-		await initializeGitRepository(testDir);
 		const mergeFile = join(testDir, "merge-state.txt");
 		await writeFile(mergeFile, "base\n");
 		await $`git add merge-state.txt`.cwd(testDir).quiet();
@@ -813,11 +848,10 @@ describe("TUI task composer canonical persistence", () => {
 		expect((await $`git rev-parse HEAD`.cwd(testDir).text()).trim()).toBe(headBefore);
 		expect((await $`git rev-parse MERGE_HEAD`.cwd(testDir).text()).trim()).toBe(mergeHeadBefore);
 		expect(await $`git ls-files -u -- merge-state.txt`.cwd(testDir).text()).toBe(mergeIndexBefore);
-		expect(await core.fs.loadTask("TASK-1")).toBeNull();
+		expect(await core.filesystem.loadTask("TASK-1")).toBeNull();
 	});
 
 	it("keeps hook-staged unrelated paths out while committing hook-staged task changes", async () => {
-		await initializeGitRepository(testDir);
 		await installFailingHook(
 			testDir,
 			'for file in backlog/tasks/*.md; do printf "\\nHook-owned task edit.\\n" >> "$file"; git add "$file"; done\nprintf "Unrelated hook bytes.\\n" > hook-unrelated.txt\ngit add hook-unrelated.txt\nexit 0',
@@ -836,7 +870,6 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("freezes selected task bytes before message hooks", async () => {
-		await initializeGitRepository(testDir);
 		await installHook(
 			testDir,
 			"pre-commit",
@@ -869,7 +902,6 @@ describe("TUI task composer canonical persistence", () => {
 	});
 
 	it("runs post-commit hooks against the real index", async () => {
-		await initializeGitRepository(testDir);
 		const unrelatedPath = join(testDir, "unrelated.txt");
 		const postCommitPath = join(testDir, "post-commit-index.txt");
 		await writeFile(unrelatedPath, "baseline\n");
@@ -894,8 +926,7 @@ describe("TUI task composer canonical persistence", () => {
 
 	for (const status of ["To Do", "Draft"] as const) {
 		it(`compensates a ${status === "Draft" ? "draft" : "task"} safely when index reconciliation prevents the commit`, async () => {
-			await initializeGitRepository(testDir);
-			const selectedCommit = (core.gitOps as unknown as { selectedCommit: SelectedCommitFixture }).selectedCommit;
+			const selectedCommit = (core.git as unknown as { selectedCommit: SelectedCommitFixture }).selectedCommit;
 			const originalRestore = selectedCommit.restoreIndexEntriesIfMatches.bind(selectedCommit);
 			const commitAttempts = status === "Draft" ? 1 : 3;
 			let calls = 0;
@@ -911,8 +942,10 @@ describe("TUI task composer canonical persistence", () => {
 					"index reconciliation failure",
 				);
 				expect((await $`git rev-parse HEAD`.cwd(testDir).text()).trim()).toBe(beforeHead);
-				expect(status === "Draft" ? await core.fs.loadDraft("DRAFT-1") : await core.fs.loadTask("TASK-1")).toBeNull();
-				expect((await core.gitOps.getStatus()).trim()).toBe("");
+				expect(
+					status === "Draft" ? await core.filesystem.loadDraft("DRAFT-1") : await core.filesystem.loadTask("TASK-1"),
+				).toBeNull();
+				expect((await core.git.getStatus()).trim()).toBe("");
 			} finally {
 				selectedCommit.restoreIndexEntriesIfMatches = originalRestore;
 			}
@@ -921,10 +954,9 @@ describe("TUI task composer canonical persistence", () => {
 
 	for (const status of ["To Do", "Draft"] as const) {
 		it(`does not publish a ${status === "Draft" ? "draft" : "task"} when pre-write index inspection fails`, async () => {
-			await initializeGitRepository(testDir);
-			const originalGetIndexEntries = core.gitOps.getIndexEntries.bind(core.gitOps);
+			const originalGetIndexEntries = core.git.getIndexEntries.bind(core.git);
 			let calls = 0;
-			core.gitOps.getIndexEntries = async () => {
+			core.git.getIndexEntries = async () => {
 				calls += 1;
 				throw new Error("simulated index inspection failure");
 			};
@@ -934,40 +966,46 @@ describe("TUI task composer canonical persistence", () => {
 					"index inspection failure",
 				);
 				expect(calls).toBe(1);
-				expect(status === "Draft" ? await core.fs.loadDraft("DRAFT-1") : await core.fs.loadTask("TASK-1")).toBeNull();
-				expect((await core.gitOps.getStatus()).trim()).toBe("");
+				expect(
+					status === "Draft" ? await core.filesystem.loadDraft("DRAFT-1") : await core.filesystem.loadTask("TASK-1"),
+				).toBeNull();
+				expect((await core.git.getStatus()).trim()).toBe("");
 			} finally {
-				core.gitOps.getIndexEntries = originalGetIndexEntries;
+				core.git.getIndexEntries = originalGetIndexEntries;
 			}
 		});
 	}
 
 	for (const status of ["To Do", "Draft"] as const) {
 		it(`does not retain a staged phantom when a ${status === "Draft" ? "draft" : "task"} is staged immediately after publication`, async () => {
-			await initializeGitRepository(testDir);
 			await installFailingHook(
 				testDir,
 				'for file in backlog/tasks/*.md backlog/drafts/*.md; do test -e "$file" && rm "$file"; done\nexit 1',
 			);
-			const save = status === "Draft" ? core.fs.saveDraft.bind(core.fs) : core.fs.saveTask.bind(core.fs);
+			const save =
+				status === "Draft"
+					? core.filesystem.saveDraft.bind(core.filesystem)
+					: core.filesystem.saveTask.bind(core.filesystem);
 			const method = status === "Draft" ? "saveDraft" : "saveTask";
-			core.fs[method] = async (task) => {
+			core.filesystem[method] = async (task) => {
 				const filePath = await save(task);
-				await core.gitOps.addFile(filePath);
+				await core.git.addFile(filePath);
 				return filePath;
 			};
 
 			try {
 				await expect(core.createTaskFromInput({ title: "Snapshot race", status }, true)).rejects.toThrow();
-				expect(status === "Draft" ? await core.fs.loadDraft("DRAFT-1") : await core.fs.loadTask("TASK-1")).toBeNull();
+				expect(
+					status === "Draft" ? await core.filesystem.loadDraft("DRAFT-1") : await core.filesystem.loadTask("TASK-1"),
+				).toBeNull();
 				expect((await $`git diff --cached --name-only`.cwd(testDir).text()).trim()).toBe("");
-				expect((await core.gitOps.getStatus()).trim()).toBe("");
+				expect((await core.git.getStatus()).trim()).toBe("");
 
 				await rm(join(testDir, ".git", "hooks", "pre-commit"));
 				const retry = await core.createTaskFromInput({ title: "Snapshot retry", status }, false);
 				expect(retry.task.id).toBe(status === "Draft" ? "DRAFT-1" : "TASK-1");
 			} finally {
-				core.fs[method] = save;
+				core.filesystem[method] = save;
 			}
 		});
 	}
@@ -978,19 +1016,13 @@ describe("TUI task composer persistence recovery", () => {
 	let core: Core;
 
 	beforeEach(async () => {
-		testDir = await mkdtemp(join(tmpdir(), "backlog-tui-composer-"));
-		core = new Core(testDir);
-		await initializeTestProject(core, "TUI Composer Test");
-	});
-
-	afterEach(async () => {
-		await rm(testDir, { recursive: true, force: true });
+		({ testDir, core } = await createTestProject());
 	});
 
 	it("does not inspect Git index ownership when auto-commit is disabled", async () => {
 		let calls = 0;
-		const originalGetIndexEntries = core.gitOps.getIndexEntries.bind(core.gitOps);
-		core.gitOps.getIndexEntries = async () => {
+		const originalGetIndexEntries = core.git.getIndexEntries.bind(core.git);
+		core.git.getIndexEntries = async () => {
 			calls += 1;
 			throw new Error("index inspection must not run");
 		};
@@ -999,14 +1031,13 @@ describe("TUI task composer persistence recovery", () => {
 			const result = await core.createTaskFromInput({ title: "Filesystem-only create" }, false);
 			expect(result.task.id).toBe("TASK-1");
 			expect(calls).toBe(0);
-			expect(await core.fs.loadTask("TASK-1")).not.toBeNull();
+			expect(await core.filesystem.loadTask("TASK-1")).not.toBeNull();
 		} finally {
-			core.gitOps.getIndexEntries = originalGetIndexEntries;
+			core.git.getIndexEntries = originalGetIndexEntries;
 		}
 	});
 
 	it("restores pre-existing bytes when a failed create temporarily reuses their path", async () => {
-		await initializeGitRepository(testDir);
 		const preExistingPath = join(testDir, "backlog", "tasks", "task-1 - Preexisting.md");
 		const preExistingContent = "This is not a parseable task and must be restored.\n";
 
@@ -1026,7 +1057,6 @@ describe("TUI task composer persistence recovery", () => {
 
 	for (const status of ["To Do", "Draft"] as const) {
 		it(`restores prior same-path index and worktree bytes after failed ${status === "Draft" ? "draft" : "task"} creation`, async () => {
-			await initializeGitRepository(testDir);
 			const title = status === "Draft" ? "Preexisting Draft" : "Preexisting Task";
 			const relativePath = `backlog/${status === "Draft" ? "drafts/draft" : "tasks/task"}-1 - ${title.replaceAll(" ", "-")}.md`;
 			const targetPath = join(testDir, relativePath);
@@ -1056,7 +1086,6 @@ describe("TUI task composer persistence recovery", () => {
 		});
 
 		it(`restores prior same-path bytes when a failing hook deletes the generated ${status === "Draft" ? "draft" : "task"}`, async () => {
-			await initializeGitRepository(testDir);
 			const title = status === "Draft" ? "Deleted Draft" : "Deleted Task";
 			const relativePath = `backlog/${status === "Draft" ? "drafts/draft" : "tasks/task"}-1 - ${title.replaceAll(" ", "-")}.md`;
 			const targetPath = join(testDir, relativePath);
@@ -1086,7 +1115,6 @@ describe("TUI task composer persistence recovery", () => {
 		});
 
 		it(`auto-commits only the created ${status === "Draft" ? "draft" : "task"} and preserves unrelated staged work`, async () => {
-			await initializeGitRepository(testDir);
 			const unrelatedPath = join(testDir, "unrelated.txt");
 			await writeFile(unrelatedPath, "baseline\n");
 			await $`git add unrelated.txt`.cwd(testDir).quiet();
@@ -1104,7 +1132,6 @@ describe("TUI task composer persistence recovery", () => {
 		});
 
 		it(`preserves unrelated staged work when ${status === "Draft" ? "draft" : "task"} auto-commit fails`, async () => {
-			await initializeGitRepository(testDir);
 			const unrelatedPath = join(testDir, "unrelated.txt");
 			await writeFile(unrelatedPath, "baseline\n");
 			await $`git add unrelated.txt`.cwd(testDir).quiet();
@@ -1124,7 +1151,6 @@ describe("TUI task composer persistence recovery", () => {
 	}
 
 	it("retries a transient path-limited task commit without disturbing the index", async () => {
-		await initializeGitRepository(testDir);
 		const counterPath = join(testDir, ".git", "transient-hook-seen");
 		await installFailingHook(
 			testDir,
@@ -1136,7 +1162,7 @@ describe("TUI task composer persistence recovery", () => {
 
 		expect(result.task.id).toBe("TASK-1");
 		expect(Number((await $`git rev-list --count HEAD`.cwd(testDir).text()).trim())).toBe(beforeCount + 1);
-		expect((await core.gitOps.getStatus()).trim()).toBe("");
+		expect((await core.git.getStatus()).trim()).toBe("");
 	});
 
 	it("keeps watcher delivery idempotent with the board optimistic upsert", async () => {
@@ -2053,10 +2079,10 @@ describe("TUI task composer interaction", () => {
 			resolveCreate = resolve;
 		});
 		try {
-			const boardPromise = renderBoardTui([], ["To Do", "Done"], "horizontal", 20, {
+			const boardPromise = new TUIRenderer([], ["To Do", "Done"], "horizontal", 20, {
 				screen,
 				createTask: async () => createResult,
-			});
+			}).run();
 			(screen as unknown as { emit(event: string): void }).emit("key n");
 			await waitUntil(
 				() =>
@@ -2105,7 +2131,7 @@ describe("TUI task composer interaction", () => {
 		let subscriber: ((tasks: Task[], statuses: string[]) => void) | undefined;
 		let composerCalls = 0;
 		try {
-			const boardPromise = renderBoardTui([initial], ["To Do", "Done"], "horizontal", 20, {
+			const boardPromise = new TUIRenderer([initial], ["To Do", "Done"], "horizontal", 20, {
 				screen,
 				subscribeUpdates: (update) => {
 					subscriber = update;
@@ -2118,7 +2144,7 @@ describe("TUI task composer interaction", () => {
 					}
 					return null;
 				},
-			});
+			}).run();
 			(screen as unknown as { emit(event: string): void }).emit("key n");
 			await waitUntil(() => composerCalls === 1, "the first composer rejection");
 			await waitUntil(() => {
@@ -2164,7 +2190,7 @@ describe("TUI task composer interaction", () => {
 			let subscriber: ((tasks: Task[], statuses: string[]) => void) | undefined;
 			let composerCalls = 0;
 			try {
-				const boardPromise = renderBoardTui([initial], ["To Do", "Done"], "horizontal", 20, {
+				const boardPromise = new TUIRenderer([initial], ["To Do", "Done"], "horizontal", 20, {
 					screen,
 					subscribeUpdates: (update) => {
 						subscriber = update;
@@ -2179,13 +2205,13 @@ describe("TUI task composer interaction", () => {
 						if (delivery === "before the composer closes") subscriber?.([initial, created], ["To Do", "Done"]);
 						return result;
 					},
-				});
+				}).run();
 				expect(subscriber).toBeDefined();
 				renders = 0;
 				(screen as unknown as { emit(event: string): void }).emit("key n");
 
 				for (let attempt = 0; attempt < 50 && renders < 1; attempt += 1) {
-					await new Promise((resolve) => setTimeout(resolve, 10));
+					await new Promise<void>((resolve) => setImmediate(resolve));
 				}
 				expect(composerCalls).toBe(1);
 				expect(renders).toBe(1);

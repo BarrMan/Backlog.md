@@ -41,7 +41,7 @@ describe("core auto-commit scoping", () => {
 		expect(committed).not.toContain("UNRELATED.txt");
 		expect(committed).not.toContain("peer-plan.md");
 
-		const status = await core.gitOps.getStatus();
+		const status = await core.git.getStatus();
 		expect(status).toContain("D  UNRELATED.txt");
 		expect(status).toContain("?? backlog/plans/");
 	}
@@ -89,7 +89,7 @@ describe("core auto-commit scoping", () => {
 
 		await core.updateTasksBulk([{ ...current, ordinal: 2000 }], "Legacy bulk update", true);
 
-		expect(await core.gitOps.getLastCommitMessage()).toContain("Legacy bulk update");
+		expect(await core.git.getLastCommitMessage()).toContain("Legacy bulk update");
 		expect(await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).text()).toContain(
 			"backlog/tasks/task-999 - Legacy.md",
 		);

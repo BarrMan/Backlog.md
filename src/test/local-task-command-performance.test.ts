@@ -27,10 +27,10 @@ const parentTask: Task = {
 function installCrossBranchTripwires(coreUnderTest: Core) {
 	const error = new Error("Local task command crossed the branch-loading boundary");
 	const loadTasks = spyOn(coreUnderTest, "loadTasks").mockRejectedValue(error);
-	const fetch = spyOn(coreUnderTest.gitOps, "fetch").mockRejectedValue(error);
-	const listRecentBranchTips = spyOn(coreUnderTest.gitOps, "listRecentBranchTips").mockRejectedValue(error);
-	const listRecentBranches = spyOn(coreUnderTest.gitOps, "listRecentBranches").mockRejectedValue(error);
-	const getRepositoryRoot = spyOn(coreUnderTest.gitOps, "getRepositoryRoot").mockRejectedValue(error);
+	const fetch = spyOn(coreUnderTest.git, "fetch").mockRejectedValue(error);
+	const listRecentBranchTips = spyOn(coreUnderTest.git, "listRecentBranchTips").mockRejectedValue(error);
+	const listRecentBranches = spyOn(coreUnderTest.git, "listRecentBranches").mockRejectedValue(error);
+	const getRepositoryRoot = spyOn(coreUnderTest.git, "getRepositoryRoot").mockRejectedValue(error);
 
 	return {
 		expectUntouched() {
@@ -83,8 +83,6 @@ describe("local task command performance boundaries", () => {
 	});
 
 	afterEach(async () => {
-		core.disposeSearchService();
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 

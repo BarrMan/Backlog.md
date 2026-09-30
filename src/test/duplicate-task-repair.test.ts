@@ -54,35 +54,23 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	core.disposeSearchService();
-	core.disposeContentStore();
 	await safeCleanup(testDir);
 });
 
 describe("duplicate task diagnosis", () => {
-	it("publishes a genuine duplicate change once while unchanged previews stay silent", async () => {
+	it("reports a genuine duplicate change while unchanged previews stay stable", async () => {
 		await writeTask(core.filesystem.tasksDir, "task-1 - Alpha.md", makeTask("TASK-1", "Alpha"));
-		const store = await core.getContentStore();
-		const events: string[] = [];
-		const unsubscribe = store.subscribe((event) => events.push(event.type));
-		events.length = 0;
 
 		const unchangedPlan = await core.previewDuplicateTaskIdRepair();
 		expect(unchangedPlan.groups).toEqual([]);
-		expect(events).toEqual([]);
 
 		await writeTask(core.filesystem.tasksDir, "task-01 - Beta.md", makeTask("TASK-01", "Beta"));
 		const changedPlan = await core.previewDuplicateTaskIdRepair();
 		expect(changedPlan.groups).toHaveLength(1);
 		expect(changedPlan.groups[0]?.tasks).toHaveLength(2);
-		expect(events).toEqual(["tasks"]);
-		events.length = 0;
 
 		const stablePlan = await core.previewDuplicateTaskIdRepair();
 		expect(stablePlan.fingerprint).toBe(changedPlan.fingerprint);
-		expect(events).toEqual([]);
-
-		unsubscribe();
 	});
 
 	it("detects three-way, active/completed, and zero-padded collisions while ignoring archive reuse", async () => {

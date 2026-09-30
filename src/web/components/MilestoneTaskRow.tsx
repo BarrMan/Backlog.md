@@ -1,12 +1,13 @@
 import type React from "react";
-import type { Task } from "../../types";
+import type { Task, TaskSummary } from "../../types";
+import { apiClient } from "../lib/api";
 
 interface MilestoneTaskRowProps {
-	task: Task;
+	task: Task | TaskSummary;
 	isDone: boolean;
 	statusBadgeClass: string;
 	priorityBadgeClass: string;
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: Task | TaskSummary) => void;
 	onDragStart: (event: React.DragEvent, task: Task) => void;
 	onDragEnd: (event: React.DragEvent) => void;
 }
@@ -42,6 +43,8 @@ const MilestoneTaskRow: React.FC<MilestoneTaskRowProps> = ({
 		onDragStart={(event) => onDragStart(event, task)}
 		onDragEnd={onDragEnd}
 		onClick={() => onEditTask(task)}
+		onFocus={() => void apiClient.loadTaskDetail(task.id).catch(() => {})}
+		onMouseEnter={() => void apiClient.loadTaskDetail(task.id).catch(() => {})}
 		className="group grid grid-cols-[auto_auto_1fr_auto_auto] gap-3 items-center px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors cursor-pointer"
 	>
 		<div className="w-6 flex justify-center opacity-40 group-hover:opacity-100 transition-opacity">

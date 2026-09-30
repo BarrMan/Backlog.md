@@ -153,6 +153,7 @@ export class FilterHeader {
 	private onFocusChange?: (focus: FilterControlId | null) => void;
 	private onExitRequest?: (direction: "up" | "down" | "escape") => void;
 	private suppressHorizontalCycle = false;
+	private searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(options: FilterHeaderOptions) {
 		this.options = options;
@@ -372,6 +373,10 @@ export class FilterHeader {
 	}
 
 	private destroyElements(): void {
+		if (this.searchTimeout) {
+			clearTimeout(this.searchTimeout);
+			this.searchTimeout = null;
+		}
 		for (const element of this.elements) {
 			element.destroy();
 		}
@@ -536,12 +541,12 @@ export class FilterHeader {
 			return false;
 		});
 
-		let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 		this.searchInput.on("keypress", () => {
-			if (searchTimeout) {
-				clearTimeout(searchTimeout);
+			if (this.searchTimeout) {
+				clearTimeout(this.searchTimeout);
 			}
-			searchTimeout = setTimeout(() => {
+			this.searchTimeout = setTimeout(() => {
+				this.searchTimeout = null;
 				const value = this.searchInput?.getValue?.();
 				if (value !== undefined && value !== this.state.search) {
 					this.state.search = String(value);

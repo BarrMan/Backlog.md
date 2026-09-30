@@ -12,8 +12,6 @@ import {
 } from "./schemas.ts";
 
 export function registerMilestoneTools(server: McpServer): void {
-	const handlers = new MilestoneHandlers(server.application);
-
 	const listTool: McpToolHandler = createSimpleValidatedTool(
 		{
 			name: "milestone_list",
@@ -22,7 +20,7 @@ export function registerMilestoneTools(server: McpServer): void {
 			annotations: { title: "List Milestones", readOnlyHint: true, destructiveHint: false },
 		},
 		milestoneListSchema,
-		async () => handlers.listMilestones(),
+		async () => new MilestoneHandlers(server.createOperationCore()).listMilestones(),
 	);
 
 	const addTool: McpToolHandler = createSimpleValidatedTool(
@@ -33,7 +31,7 @@ export function registerMilestoneTools(server: McpServer): void {
 			annotations: { title: "Add Milestone", destructiveHint: false },
 		},
 		milestoneAddSchema,
-		async (input) => handlers.addMilestone(input as MilestoneAddArgs),
+		async (input) => new MilestoneHandlers(server.createOperationCore()).addMilestone(input as MilestoneAddArgs),
 	);
 
 	const renameTool: McpToolHandler = createSimpleValidatedTool(
@@ -44,7 +42,7 @@ export function registerMilestoneTools(server: McpServer): void {
 			annotations: { title: "Rename Milestone", destructiveHint: false },
 		},
 		milestoneRenameSchema,
-		async (input) => handlers.renameMilestone(input as MilestoneRenameArgs),
+		async (input) => new MilestoneHandlers(server.createOperationCore()).renameMilestone(input as MilestoneRenameArgs),
 	);
 
 	const removeTool: McpToolHandler = createSimpleValidatedTool(
@@ -55,7 +53,7 @@ export function registerMilestoneTools(server: McpServer): void {
 			annotations: { title: "Remove Milestone", destructiveHint: true },
 		},
 		milestoneRemoveSchema,
-		async (input) => handlers.removeMilestone(input as MilestoneRemoveArgs),
+		async (input) => new MilestoneHandlers(server.createOperationCore()).removeMilestone(input as MilestoneRemoveArgs),
 	);
 
 	const archiveTool: McpToolHandler = createSimpleValidatedTool(
@@ -66,7 +64,8 @@ export function registerMilestoneTools(server: McpServer): void {
 			annotations: { title: "Archive Milestone", destructiveHint: true },
 		},
 		milestoneArchiveSchema,
-		async (input) => handlers.archiveMilestone(input as MilestoneArchiveArgs),
+		async (input) =>
+			new MilestoneHandlers(server.createOperationCore()).archiveMilestone(input as MilestoneArchiveArgs),
 	);
 
 	server.addTool(listTool);

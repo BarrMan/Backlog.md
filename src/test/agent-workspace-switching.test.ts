@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
-import { createWorkspaceViewState, runAgentWorkspace } from "../ui/agent-workspace.ts";
+import { AgentWorkspaceController, createWorkspaceViewState } from "../ui/agent-workspace.ts";
 import { createScreen } from "../ui/tui.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
@@ -58,7 +58,7 @@ describe("agent workspace Board switching", () => {
 			const task = await core.createTaskFromInput({ title: "First task", status: "To Do" }, false);
 
 			firstScreen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void; children: Widget[] };
-			const first = runAgentWorkspace(core, { screen: firstScreen as never, service, state });
+			const first = new AgentWorkspaceController(core, { screen: firstScreen as never, service, state }).run();
 			await waitUntil(
 				() => firstScreen?.children.find((widget) => widget.options?.label === " Tasks ")?.selected === 1,
 				"initial task selection",
@@ -78,7 +78,7 @@ describe("agent workspace Board switching", () => {
 			expect(await first).toBe("board");
 
 			secondScreen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void; children: Widget[] };
-			const second = runAgentWorkspace(core, { screen: secondScreen as never, service, state });
+			const second = new AgentWorkspaceController(core, { screen: secondScreen as never, service, state }).run();
 			await waitUntil(
 				() =>
 					secondScreen?.children.find((widget) => widget.options?.label === " Tasks ")?.selected === 1 &&
@@ -122,7 +122,12 @@ describe("agent workspace Board switching", () => {
 				unrelatedKeys += 1;
 			});
 			const originalKeypressListeners = screen.listeners?.("keypress") ?? [];
-			const first = runAgentWorkspace(core, { screen: screen as never, service, state, preserveScreen: true });
+			const first = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				service,
+				state,
+				preserveScreen: true,
+			}).run();
 			await waitUntil(
 				() => screen.children.find((widget) => widget.options?.label === " Tasks ")?.selected === 1,
 				"first mount",
@@ -138,7 +143,12 @@ describe("agent workspace Board switching", () => {
 			await Bun.sleep(2100);
 			expect(listCalls).toBe(callsAfterClose);
 
-			const second = runAgentWorkspace(core, { screen: screen as never, service, state, preserveScreen: true });
+			const second = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				service,
+				state,
+				preserveScreen: true,
+			}).run();
 			await waitUntil(
 				() => screen.children.find((widget) => widget.options?.label === " Tasks ")?.selected === 1,
 				"second mount",

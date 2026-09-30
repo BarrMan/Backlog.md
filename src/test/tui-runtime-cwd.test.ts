@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import type { Task, TaskCreateInput } from "../types/index.ts";
-import { renderBoardTui } from "../ui/board.ts";
+import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { createScreen } from "../ui/tui.ts";
 import { BACKLOG_CWD_ENV } from "../utils/runtime-cwd.ts";
 import { initializeTestProject, withTimeout } from "./test-utils.ts";
@@ -21,7 +21,7 @@ async function createTaskFromBoardKeypress(options?: { core?: Core }): Promise<T
 	const screen = createScreen({ smartCSR: false }) as EmittingScreen;
 	let created: Task | null = null;
 	try {
-		const boardPromise = renderBoardTui([], ["To Do", "Done"], "horizontal", 20, {
+		const boardPromise = new TUIRenderer([], ["To Do", "Done"], "horizontal", 20, {
 			screen,
 			core: options?.core,
 			taskComposer: async ({ persist }) => {
@@ -29,7 +29,7 @@ async function createTaskFromBoardKeypress(options?: { core?: Core }): Promise<T
 				created = await persist(input);
 				return created;
 			},
-		});
+		}).run();
 		screen.emit("key n");
 		for (let attempt = 0; attempt < 200 && created === null; attempt += 1) {
 			await Bun.sleep(10);

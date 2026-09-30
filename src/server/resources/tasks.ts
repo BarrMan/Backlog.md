@@ -1,233 +1,330 @@
 import { isAbsolute } from "node:path";
-import { Elysia, t } from "elysia";
-import { TaskArchiveStatusError } from "../../core/backlog.ts";
-import { loadTaskDetail } from "../../core/task-detail.ts";
+import { t } from "elysia";
+import { type Core, TaskArchiveStatusError } from "../../core/backlog.ts";
+import type { ProjectTaskGraph } from "../../core/project-task-graph.ts";
 import { isCreateLockError, isTaskLockError } from "../../file-system/operations.ts";
+import type { Task } from "../../types/index.ts";
 import { isAmbiguousIdError } from "../../utils/entity-id.ts";
 import { resolveMilestoneInputFromFilesystem } from "../../utils/milestone-storage.ts";
 import { DRAFT_PREFIX, extractAnyPrefix } from "../../utils/prefix-config.ts";
 import { getValidStatuses } from "../../utils/status.ts";
 import { isValidTaskId } from "../../utils/task-id.ts";
 import { isAmbiguousTaskIdError, LOCAL_TASK_LOOKUP_HINT } from "../../utils/task-path.ts";
-import { listTaskCollection } from "../task-collection.ts";
+import { listTaskCollection, taskCollectionQuery } from "../task-collection.ts";
 import { demotionFailureCause, movedState } from "../transport.ts";
 import { normalizeAcceptanceCriteriaItems, parseDueDate, parseTaskUpdate } from "../validation.ts";
-import type { ResourceDependencies } from "./api.ts";
+import { type ResourceDependencies, scopedResource } from "./api.ts";
+import { agentConfigurationSchema, taskDetailSchema, taskSchema, taskSummarySchema } from "./schemas.ts";
 
 const params = t.Object({ id: t.String() });
-const body = t.Object(
-	{
-		title: t.Optional(t.Any()),
-		dueDate: t.Optional(t.Any()),
-		milestone: t.Optional(t.Any()),
-		project: t.Optional(t.Any()),
-		status: t.Optional(t.Any()),
-		priority: t.Optional(t.Any()),
-		taskId: t.Optional(t.Any()),
-		taskIds: t.Optional(t.Any()),
-		targetStatus: t.Optional(t.Any()),
-		targetMilestone: t.Optional(t.Any()),
-		orderedTaskIds: t.Optional(t.Any()),
-		age: t.Optional(t.Any()),
-		fingerprint: t.Optional(t.Any()),
-		acceptanceCriteriaItems: t.Optional(t.Any()),
-		definitionOfDoneAdd: t.Optional(t.Any()),
-		disableDefinitionOfDoneDefaults: t.Optional(t.Any()),
-	},
-	{ additionalProperties: true },
-);
+const error = t.Object({
+	error: t.String(),
+	code: t.Optional(t.String()),
+	demotionState: t.Optional(t.Union([t.Literal("moved"), t.Literal("partial")])),
+	demotionFailureCause: t.Optional(t.Union([t.Literal("cleanup"), t.Literal("commit")])),
+});
+const success = t.Object({ success: t.Boolean() }, { additionalProperties: true });
+const acceptanceCriterionInput = t.Object({ text: t.String(), checked: t.Optional(t.Boolean()) });
+const taskCreateBody = t.Object({
+	title: t.Optional(t.String()),
+	dueDate: t.Optional(t.String()),
+	description: t.Optional(t.String()),
+	status: t.Optional(t.String()),
+	priority: t.Optional(t.String()),
+	type: t.Optional(t.String()),
+	project: t.Optional(t.String()),
+	ordinal: t.Optional(t.Number()),
+	milestone: t.Optional(t.String()),
+	labels: t.Optional(t.Array(t.String())),
+	assignee: t.Optional(t.Array(t.String())),
+	dependencies: t.Optional(t.Array(t.String())),
+	references: t.Optional(t.Array(t.String())),
+	documentation: t.Optional(t.Array(t.String())),
+	modifiedFiles: t.Optional(t.Array(t.String())),
+	parentTaskId: t.Optional(t.String()),
+	implementationPlan: t.Optional(t.String()),
+	implementationNotes: t.Optional(t.String()),
+	finalSummary: t.Optional(t.String()),
+	acceptanceCriteriaItems: t.Optional(t.Array(acceptanceCriterionInput)),
+	definitionOfDoneAdd: t.Optional(t.Array(t.String())),
+	disableDefinitionOfDoneDefaults: t.Optional(t.Boolean()),
+	rawContent: t.Optional(t.String()),
+});
+const taskUpdateBody = t.Object({
+	title: t.Optional(t.String()),
+	dueDate: t.Optional(t.Union([t.String(), t.Null()])),
+	description: t.Optional(t.String()),
+	status: t.Optional(t.String()),
+	priority: t.Optional(t.String()),
+	type: t.Optional(t.String()),
+	project: t.Optional(t.Union([t.String(), t.Null()])),
+	milestone: t.Optional(t.Union([t.String(), t.Null()])),
+	labels: t.Optional(t.Array(t.String())),
+	addLabels: t.Optional(t.Array(t.String())),
+	removeLabels: t.Optional(t.Array(t.String())),
+	assignee: t.Optional(t.Array(t.String())),
+	ordinal: t.Optional(t.Number()),
+	dependencies: t.Optional(t.Array(t.String())),
+	addDependencies: t.Optional(t.Array(t.String())),
+	removeDependencies: t.Optional(t.Array(t.String())),
+	references: t.Optional(t.Array(t.String())),
+	addReferences: t.Optional(t.Array(t.String())),
+	removeReferences: t.Optional(t.Array(t.String())),
+	documentation: t.Optional(t.Array(t.String())),
+	addDocumentation: t.Optional(t.Array(t.String())),
+	removeDocumentation: t.Optional(t.Array(t.String())),
+	modifiedFiles: t.Optional(t.Array(t.String())),
+	implementationPlan: t.Optional(t.String()),
+	appendImplementationPlan: t.Optional(t.Array(t.String())),
+	clearImplementationPlan: t.Optional(t.Boolean()),
+	implementationNotes: t.Optional(t.String()),
+	appendImplementationNotes: t.Optional(t.Array(t.String())),
+	clearImplementationNotes: t.Optional(t.Boolean()),
+	commentsAppend: t.Optional(t.Array(t.String())),
+	commentAuthor: t.Optional(t.String()),
+	finalSummary: t.Optional(t.String()),
+	appendFinalSummary: t.Optional(t.Array(t.String())),
+	clearFinalSummary: t.Optional(t.Boolean()),
+	acceptanceCriteriaItems: t.Optional(t.Array(acceptanceCriterionInput)),
+	acceptanceCriteria: t.Optional(t.Array(acceptanceCriterionInput)),
+	addAcceptanceCriteria: t.Optional(t.Array(t.Union([t.String(), acceptanceCriterionInput]))),
+	removeAcceptanceCriteria: t.Optional(t.Array(t.Number())),
+	checkAcceptanceCriteria: t.Optional(t.Array(t.Number())),
+	uncheckAcceptanceCriteria: t.Optional(t.Array(t.Number())),
+	definitionOfDoneAdd: t.Optional(t.Array(t.String())),
+	definitionOfDoneRemove: t.Optional(t.Array(t.Number())),
+	definitionOfDoneCheck: t.Optional(t.Array(t.Number())),
+	definitionOfDoneUncheck: t.Optional(t.Array(t.Number())),
+	rawContent: t.Optional(t.String()),
+	agentConfiguration: t.Optional(t.Union([agentConfigurationSchema, t.Null()])),
+});
+const reorderBody = t.Object({
+	taskId: t.Optional(t.String()),
+	targetStatus: t.Optional(t.String()),
+	orderedTaskIds: t.Optional(t.Array(t.String())),
+	targetMilestone: t.Optional(t.Union([t.String(), t.Null()])),
+});
+const moveBody = t.Object({
+	taskIds: t.Optional(t.Array(t.String())),
+	targetStatus: t.Optional(t.String()),
+	targetMilestone: t.Optional(t.Union([t.String(), t.Null()])),
+});
+const cleanupBody = t.Object({ age: t.Optional(t.Union([t.String(), t.Number()])) });
+const duplicateRepairBody = t.Object({ fingerprint: t.Optional(t.String()) });
+const cleanupQuery = t.Object({ age: t.Optional(t.String()) });
+const cleanupPreview = t.Object({
+	count: t.Number(),
+	tasks: t.Array(
+		t.Object({ id: t.String(), title: t.String(), updatedDate: t.Optional(t.String()), createdDate: t.String() }),
+	),
+});
+const moved = t.Object({ success: t.Boolean(), cleanedTaskIds: t.Array(t.String()) });
+const reorderResult = t.Object({ success: t.Boolean(), task: taskSchema, changedTasks: t.Array(taskSchema) });
+const moveResult = t.Object({
+	success: t.Boolean(),
+	tasks: t.Array(taskSchema),
+	changedTasks: t.Array(taskSchema),
+	failures: t.Array(t.Object({ taskId: t.String(), reason: t.String() })),
+});
 const draft = (id: string) => extractAnyPrefix(id) === DRAFT_PREFIX;
 const webError = (message: string) =>
 	message.replace(
 		LOCAL_TASK_LOOKUP_HINT,
 		"Task lookups read only the local working copy; a task that exists only on another branch cannot be referenced yet.",
 	);
-export function tasksResource({ core, services, publishData }: ResourceDependencies): Elysia {
-	const app = new Elysia({ name: "tasks" });
-	const milestone = (id: string) => resolveMilestoneInputFromFilesystem(id, core.filesystem);
-	const moved = (cleanedTaskIds: string[]) => {
-		publishData();
-		return Response.json({ success: true, cleanedTaskIds });
-	};
-	const detail = async (id: string) => {
-		if (!isValidTaskId(id)) return Response.json({ error: `Invalid task ID: ${id}` }, { status: 400 });
+export function tasksResource({ services }: ResourceDependencies) {
+	const app = scopedResource(services, "tasks");
+	const milestone = (core: Core, id: string) => resolveMilestoneInputFromFilesystem(id, core.filesystem);
+	const movedResponse = (cleanedTaskIds: string[]) => ({ success: true, cleanedTaskIds });
+	const detail = async (
+		core: Core,
+		id: string,
+	): Promise<{ task: Task } | { status: 400 | 404 | 409; error: string }> => {
+		if (!isValidTaskId(id)) return { status: 400 as const, error: `Invalid task ID: ${id}` };
 		try {
 			const value = draft(id) ? await core.filesystem.loadDraft(id) : await core.getTask(id);
-			return value ?? Response.json({ error: `Task ${id} not found` }, { status: 404 });
+			return value ? { task: value } : { status: 404 as const, error: `Task ${id} not found` };
 		} catch (error) {
 			if (isAmbiguousTaskIdError(error))
-				return Response.json(
-					{
-						error: error.candidates.some((path) => !isAbsolute(path))
-							? `Task ID ${id} is ambiguous. Repair duplicate task IDs before opening it.`
-							: error.message,
-					},
-					{ status: 409 },
-				);
-			if (isAmbiguousIdError(error)) return Response.json({ error: error.message }, { status: 409 });
+				return {
+					status: 409 as const,
+					error: error.candidates.some((path) => !isAbsolute(path))
+						? `Task ID ${id} is ambiguous. Repair duplicate task IDs before opening it.`
+						: error.message,
+				};
+			if (isAmbiguousIdError(error)) return { status: 409 as const, error: error.message };
 			throw error;
 		}
 	};
-	app.get("/api/tasks", ({ request }) => listTaskCollection(request, core, services), {
-		query: t.Object({}, { additionalProperties: true }),
-	});
+	app.get(
+		"/api/tasks",
+		({ query, core, graph }) => {
+			if (!graph) throw new Error("Browser services must initialize before accepting requests");
+			return listTaskCollection(query, core, graph);
+		},
+		{
+			query: taskCollectionQuery,
+			response: { 200: t.Array(taskSummarySchema) },
+		},
+	);
 	app.post(
 		"/api/tasks",
-		async ({ body: input }) => {
-			if (typeof input.title !== "string" || !input.title.trim())
-				return Response.json({ error: "Title is required" }, { status: 400 });
+		async ({ body: input, core, status }) => {
+			if (typeof input.title !== "string" || !input.title.trim()) return status(400, { error: "Title is required" });
 			const due = parseDueDate(input.dueDate, false);
-			if ("error" in due) return Response.json({ error: due.error }, { status: 400 });
+			if ("error" in due) return status(400, { error: due.error });
 			try {
 				const created = await core.createTaskFromInput({
 					...input,
 					title: input.title,
 					dueDate: due.value ?? undefined,
-					milestone: typeof input.milestone === "string" ? await milestone(input.milestone) : undefined,
+					milestone: typeof input.milestone === "string" ? await milestone(core, input.milestone) : undefined,
 					acceptanceCriteria: normalizeAcceptanceCriteriaItems(input.acceptanceCriteriaItems),
 					definitionOfDoneAdd: Array.isArray(input.definitionOfDoneAdd)
 						? input.definitionOfDoneAdd.map((item) => String(item ?? "").trim()).filter(Boolean)
 						: [],
 					disableDefinitionOfDoneDefaults: Boolean(input.disableDefinitionOfDoneDefaults),
-				});
-				return Response.json(created.task, { status: 201 });
+				} as Parameters<Core["createTaskFromInput"]>[0]);
+				return status(201, created.task);
 			} catch (error) {
-				return Response.json(
-					{ error: webError(error instanceof Error ? error.message : "Failed to create task") },
-					{ status: isCreateLockError(error) ? 409 : 400 },
-				);
+				return status(isCreateLockError(error) ? 409 : 400, {
+					error: webError(error instanceof Error ? error.message : "Failed to create task"),
+				});
 			}
 		},
-		{ body },
+		{ body: taskCreateBody, response: { 201: taskSchema, 400: error, 409: error } },
 	);
-	const get = async (id: string) => {
-		const value = await detail(id);
-		if (value instanceof Response) return value;
-		await services.ready();
-		return Response.json(await loadTaskDetail(core, value, { includeCrossBranch: true }));
+	const get = async (
+		core: Core,
+		graph: ProjectTaskGraph | undefined,
+		id: string,
+		set: { status?: number | string },
+	) => {
+		if (!graph) throw new Error("Browser services must initialize before accepting requests");
+		const value = await detail(core, id);
+		if ("error" in value) {
+			set.status = value.status;
+			return { error: value.error };
+		}
+		return graph.getTaskDetail(value.task);
 	};
-	app.get("/api/task/:id", ({ params }) => get(params.id), { params });
-	app.get("/api/tasks/:id", ({ params }) => get(params.id), { params });
+	const detailResponse = { 200: taskDetailSchema, 400: error, 404: error, 409: error };
+	app.get("/api/task/:id", ({ params, core, graph, set }) => get(core, graph, params.id, set), {
+		params,
+		response: detailResponse,
+	});
+	app.get("/api/tasks/:id", ({ params, core, graph, set }) => get(core, graph, params.id, set), {
+		params,
+		response: detailResponse,
+	});
 	app.put(
 		"/api/tasks/:id",
-		async ({ params, body: input }) => {
+		async ({ params, body: input, core, scope, status }) => {
 			const parsed = parseTaskUpdate(input);
-			if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
-			if (typeof parsed.value.milestone === "string") parsed.value.milestone = await milestone(parsed.value.milestone);
+			if ("error" in parsed) return status(400, { error: parsed.error });
+			if (typeof parsed.value.milestone === "string")
+				parsed.value.milestone = await milestone(core, parsed.value.milestone);
 			try {
-				return Response.json(
-					draft(params.id)
-						? (await core.editTaskOrDraft(params.id, parsed.value)).task
-						: await core.updateTaskFromInput(params.id, parsed.value),
-				);
+				return draft(params.id)
+					? (await core.editTaskOrDraft(params.id, parsed.value)).task
+					: await core.updateTaskFromInput(params.id, parsed.value);
 			} catch (error) {
 				const state = movedState(error, "demotionState");
 				if (state) {
-					publishData();
-					return Response.json(
-						{
-							error: webError(error instanceof Error ? error.message : "Failed to update task"),
-							demotionState: state,
-							...(demotionFailureCause(error) && { demotionFailureCause: demotionFailureCause(error) }),
-						},
-						{ status: 500 },
-					);
+					await services.reconcile(scope);
+					return status(500, {
+						error: webError(error instanceof Error ? error.message : "Failed to update task"),
+						demotionState: state,
+						...(demotionFailureCause(error) && { demotionFailureCause: demotionFailureCause(error) }),
+					});
 				}
-				return Response.json(
-					{ error: webError(error instanceof Error ? error.message : "Failed to update task") },
-					{ status: isAmbiguousIdError(error) || isAmbiguousTaskIdError(error) || isTaskLockError(error) ? 409 : 400 },
+				return status(
+					isAmbiguousIdError(error) || isAmbiguousTaskIdError(error) || isTaskLockError(error) ? 409 : 400,
+					{
+						error: webError(error instanceof Error ? error.message : "Failed to update task"),
+					},
 				);
 			}
 		},
-		{ params, body },
+		{ params, body: taskUpdateBody, response: { 200: taskSchema, 400: error, 409: error, 500: error } },
 	);
 	app.delete(
 		"/api/tasks/:id",
-		async ({ params }) => {
+		async ({ params, core, status }) => {
 			try {
 				const result = await core.archiveTask(params.id);
-				return result.success
-					? moved(result.cleanedTaskIds)
-					: Response.json({ error: "Task not found" }, { status: 404 });
+				return result.success ? movedResponse(result.cleanedTaskIds) : status(404, { error: "Task not found" });
 			} catch (error) {
-				if (error instanceof TaskArchiveStatusError) return Response.json({ error: error.message }, { status: 400 });
-				if (isAmbiguousTaskIdError(error)) return Response.json({ error: error.message }, { status: 409 });
+				if (error instanceof TaskArchiveStatusError) return status(400, { error: error.message });
+				if (isAmbiguousTaskIdError(error)) return status(409, { error: error.message });
 				throw error;
 			}
 		},
-		{ params },
+		{ params, response: { 200: moved, 400: error, 404: error, 409: error } },
 	);
 	app.post(
 		"/api/tasks/:id/complete",
-		async ({ params }) => {
+		async ({ params, core, status }) => {
 			try {
-				if (!(await core.completeTask(params.id))) return Response.json({ error: "Task not found" }, { status: 404 });
-				publishData();
-				return Response.json({ success: true });
+				if (!(await core.completeTask(params.id))) return status(404, { error: "Task not found" });
+				return { success: true };
 			} catch (error) {
-				return Response.json(
-					{ error: error instanceof Error ? error.message : "Failed to complete task" },
-					{ status: isAmbiguousTaskIdError(error) ? 409 : 500 },
-				);
+				return status(isAmbiguousTaskIdError(error) ? 409 : 500, {
+					error: error instanceof Error ? error.message : "Failed to complete task",
+				});
 			}
 		},
-		{ params },
+		{ params, response: { 200: success, 404: error, 409: error, 500: error } },
 	);
 	app.post(
 		"/api/tasks/:id/demote",
-		async ({ params }) => {
+		async ({ params, core, scope, status }) => {
 			try {
 				const result = await core.demoteTask(params.id);
-				return result.success
-					? moved(result.cleanedTaskIds)
-					: Response.json({ error: "Task not found" }, { status: 404 });
+				return result.success ? movedResponse(result.cleanedTaskIds) : status(404, { error: "Task not found" });
 			} catch (error) {
 				const state = movedState(error, "demotionState");
-				if (state) publishData();
-				return Response.json(
-					{
-						error: error instanceof Error ? error.message : "Failed to demote task",
-						...(state && { demotionState: state }),
-						...(demotionFailureCause(error) && { demotionFailureCause: demotionFailureCause(error) }),
-					},
-					{ status: isAmbiguousTaskIdError(error) || isCreateLockError(error) || isTaskLockError(error) ? 409 : 500 },
-				);
+				if (state) await services.reconcile(scope);
+				return status(isAmbiguousTaskIdError(error) || isCreateLockError(error) || isTaskLockError(error) ? 409 : 500, {
+					error: error instanceof Error ? error.message : "Failed to demote task",
+					...(state && { demotionState: state }),
+					...(demotionFailureCause(error) && { demotionFailureCause: demotionFailureCause(error) }),
+				});
 			}
 		},
-		{ params },
+		{ params, response: { 200: moved, 404: error, 409: error, 500: error } },
 	);
-	app.get("/api/statuses", () => getValidStatuses(core).then(Response.json));
-	app.get("/api/drafts", async () => {
-		try {
-			return Response.json(await core.filesystem.listDrafts());
-		} catch {
-			return Response.json([]);
-		}
-	});
+	app.get("/api/statuses", ({ core }) => getValidStatuses(core), { response: t.Array(t.String()) });
+	app.get(
+		"/api/drafts",
+		async ({ core }) => {
+			try {
+				return await core.filesystem.listDrafts();
+			} catch {
+				return [];
+			}
+		},
+		{ response: t.Array(taskSchema) },
+	);
 	app.post(
 		"/api/drafts/:id/promote",
-		async ({ params }) => {
+		async ({ params, core, status }) => {
 			try {
-				return (await core.promoteDraft(params.id))
-					? Response.json({ success: true })
-					: Response.json({ error: "Draft not found" }, { status: 404 });
+				return (await core.promoteDraft(params.id)) ? { success: true } : status(404, { error: "Draft not found" });
 			} catch (error) {
-				return Response.json(
-					{
-						error:
-							isCreateLockError(error) || isAmbiguousIdError(error) || isTaskLockError(error)
-								? (error as Error).message
-								: "Failed to promote draft",
-					},
-					{ status: isCreateLockError(error) || isAmbiguousIdError(error) || isTaskLockError(error) ? 409 : 500 },
-				);
+				return status(isCreateLockError(error) || isAmbiguousIdError(error) || isTaskLockError(error) ? 409 : 500, {
+					error:
+						isCreateLockError(error) || isAmbiguousIdError(error) || isTaskLockError(error)
+							? (error as Error).message
+							: "Failed to promote draft",
+				});
 			}
 		},
-		{ params },
+		{ params, response: { 200: success, 404: error, 409: error, 500: error } },
 	);
 	app.post(
 		"/api/tasks/reorder",
-		async ({ body: input }) => {
+		async ({ body: input, core, status }) => {
 			try {
 				const taskId = typeof input.taskId === "string" ? input.taskId : "";
 				const targetStatus = typeof input.targetStatus === "string" ? input.targetStatus : "";
@@ -239,10 +336,7 @@ export function tasksResource({ core, services, publishData }: ResourceDependenc
 							? null
 							: undefined;
 				if (!taskId || !targetStatus || !orderedTaskIds.length)
-					return Response.json(
-						{ error: "Missing required fields: taskId, targetStatus, and orderedTaskIds" },
-						{ status: 400 },
-					);
+					return status(400, { error: "Missing required fields: taskId, targetStatus, and orderedTaskIds" });
 				const result = await core.reorderTask({
 					taskId,
 					targetStatus,
@@ -250,28 +344,26 @@ export function tasksResource({ core, services, publishData }: ResourceDependenc
 					targetMilestone,
 					commitMessage: `Reorder tasks in ${targetStatus}`,
 				});
-				return Response.json({ success: true, task: result.updatedTask, changedTasks: result.changedTasks });
+				return { success: true, task: result.updatedTask, changedTasks: result.changedTasks };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : "Failed to reorder task";
-				return Response.json(
+				return status(
+					isAmbiguousTaskIdError(error)
+						? 409
+						: message.includes("exists in branch") ||
+								message.includes("not found") ||
+								message.includes("Missing required")
+							? 400
+							: 500,
 					{ error: message },
-					{
-						status: isAmbiguousTaskIdError(error)
-							? 409
-							: message.includes("exists in branch") ||
-									message.includes("not found") ||
-									message.includes("Missing required")
-								? 400
-								: 500,
-					},
 				);
 			}
 		},
-		{ body },
+		{ body: reorderBody, response: { 200: reorderResult, 400: error, 409: error, 500: error } },
 	);
 	app.post(
 		"/api/tasks/move",
-		async ({ body: input }) => {
+		async ({ body: input, core, status }) => {
 			try {
 				const taskIds = Array.isArray(input.taskIds)
 					? input.taskIds.filter((id): id is string => typeof id === "string")
@@ -284,25 +376,25 @@ export function tasksResource({ core, services, publishData }: ResourceDependenc
 							? null
 							: undefined;
 				if (!taskIds.length || !targetStatus)
-					return Response.json({ error: "Missing required fields: taskIds and targetStatus" }, { status: 400 });
+					return status(400, { error: "Missing required fields: taskIds and targetStatus" });
 				const result = await core.moveTasksToStatus({
 					taskIds,
 					targetStatus,
 					targetMilestone,
 					commitMessage: `Move ${taskIds.length} tasks to ${targetStatus}`,
 				});
-				return Response.json({
+				return {
 					success: result.failures.length === 0,
 					tasks: result.movedTasks,
 					changedTasks: result.changedTasks,
 					failures: result.failures,
-				});
+				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : "Failed to move tasks";
-				return Response.json({ error: message }, { status: message.includes("required") ? 400 : 500 });
+				return status(message.includes("required") ? 400 : 500, { error: message });
 			}
 		},
-		{ body },
+		{ body: moveBody, response: { 200: moveResult, 400: error, 500: error } },
 	);
 	function parseCleanupAge(value: unknown): { age: number } | { error: string } {
 		const age = Number.parseInt(String(value ?? ""), 10);
@@ -313,27 +405,27 @@ export function tasksResource({ core, services, publishData }: ResourceDependenc
 
 	app.get(
 		"/api/tasks/cleanup",
-		async ({ query }) => {
+		async ({ query, core, status }) => {
 			const result = parseCleanupAge(query.age);
-			if ("error" in result) return Response.json(result, { status: 400 });
+			if ("error" in result) return status(400, result);
 			try {
 				const tasks = await core.getTerminalStatusTasksByAge(result.age);
-				return Response.json({
+				return {
 					count: tasks.length,
 					tasks: tasks.map(({ id, title, updatedDate, createdDate }) => ({ id, title, updatedDate, createdDate })),
-				});
+				};
 			} catch (error) {
 				console.error("Error getting cleanup preview:", error);
-				return Response.json({ error: "Failed to get cleanup preview" }, { status: 500 });
+				return status(500, { error: "Failed to get cleanup preview" });
 			}
 		},
-		{ query: t.Object({ age: t.Optional(t.String()) }) },
+		{ query: cleanupQuery, response: { 200: cleanupPreview, 400: error, 500: error } },
 	);
 	app.post(
 		"/api/tasks/cleanup/execute",
-		async ({ body: input }) => {
+		async ({ body: input, core, status }) => {
 			const result = parseCleanupAge(input.age);
-			if ("error" in result) return Response.json(result, { status: 400 });
+			if ("error" in result) return status(400, result);
 			try {
 				const tasks = await core.getTerminalStatusTasksByAge(result.age);
 				let movedCount = 0;
@@ -345,8 +437,7 @@ export function tasksResource({ core, services, publishData }: ResourceDependenc
 					} catch {
 						failedTasks.push(task.id);
 					}
-				publishData();
-				return Response.json({
+				return {
 					success: true,
 					movedCount,
 					totalCount: tasks.length,
@@ -354,35 +445,66 @@ export function tasksResource({ core, services, publishData }: ResourceDependenc
 					message: tasks.length
 						? `Moved ${movedCount} of ${tasks.length} tasks to completed folder`
 						: "No tasks to clean up",
-				});
+				};
 			} catch (error) {
 				console.error("Error executing cleanup:", error);
-				return Response.json({ error: "Failed to execute cleanup" }, { status: 500 });
+				return status(500, { error: "Failed to execute cleanup" });
 			}
 		},
-		{ body },
+		{
+			body: cleanupBody,
+			response: {
+				200: t.Object({
+					success: t.Boolean(),
+					movedCount: t.Number(),
+					totalCount: t.Number(),
+					failedTasks: t.Optional(t.Array(t.String())),
+					message: t.String(),
+				}),
+				400: error,
+				500: error,
+			},
+		},
 	);
-	app.get("/api/tasks/duplicates", async () => {
-		try {
-			await services.ready();
-			return Response.json(await core.previewDuplicateTaskIdRepair());
-		} catch (error) {
-			return Response.json({ error: String(error) }, { status: 500 });
-		}
-	});
+	app.get(
+		"/api/tasks/duplicates",
+		async ({ core, status }) => {
+			try {
+				return await core.previewDuplicateTaskIdRepair();
+			} catch (error) {
+				return status(500, { error: String(error) });
+			}
+		},
+		{
+			response: {
+				200: t.Object(
+					{ fingerprint: t.String(), groups: t.Array(t.Object({}, { additionalProperties: true })) },
+					{ additionalProperties: true },
+				),
+				500: error,
+			},
+		},
+	);
 	app.post(
 		"/api/tasks/duplicates",
-		async ({ body: input }) => {
+		async ({ body: input, core, status }) => {
 			try {
 				const fingerprint = typeof input.fingerprint === "string" ? input.fingerprint.trim() : "";
-				if (!fingerprint) return Response.json({ error: "A repair preview fingerprint is required." }, { status: 400 });
-				return Response.json(await core.repairDuplicateTaskIds(fingerprint));
+				if (!fingerprint) return status(400, { error: "A repair preview fingerprint is required." });
+				return await core.repairDuplicateTaskIds(fingerprint);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				return Response.json({ error: message }, { status: message.includes("changed after the preview") ? 409 : 400 });
+				return status(message.includes("changed after the preview") ? 409 : 400, { error: message });
 			}
 		},
-		{ body },
+		{
+			body: duplicateRepairBody,
+			response: {
+				200: t.Object({}, { additionalProperties: true }),
+				400: error,
+				409: error,
+			},
+		},
 	);
 	return app;
 }

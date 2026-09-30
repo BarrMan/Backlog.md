@@ -14,7 +14,6 @@ import {
 	getPlatformTimeout,
 	initializeTestProject,
 	safeCleanup,
-	sleep,
 	withTimeout,
 } from "./test-utils.ts";
 
@@ -31,6 +30,36 @@ function sampleTask(id: string, title: string, status = "To Do"): Task {
 		dependencies: [],
 		rawContent: "## Description\n\nWatcher fixture",
 	};
+}
+
+function observeTaskReads(core: Core, count: number): { reached: Promise<void>; restore: () => void } {
+	const loadTask = core.filesystem.loadTask.bind(core.filesystem);
+	let reads = 0;
+	let resolveReached: () => void = () => {};
+	const reached = new Promise<void>((resolve) => {
+		resolveReached = resolve;
+	});
+	core.filesystem.loadTask = async (...args) => {
+		reads += 1;
+		if (reads >= count) resolveReached();
+		return await loadTask(...args);
+	};
+	return { reached, restore: () => (core.filesystem.loadTask = loadTask) };
+}
+
+function observeTaskDirectoryReads(core: Core, count: number): { reached: Promise<void>; restore: () => void } {
+	const listTasks = core.filesystem.listTasks.bind(core.filesystem);
+	let reads = 0;
+	let resolveReached: () => void = () => {};
+	const reached = new Promise<void>((resolve) => {
+		resolveReached = resolve;
+	});
+	core.filesystem.listTasks = async (...args) => {
+		reads += 1;
+		if (reads >= count) resolveReached();
+		return await listTasks(...args);
+	};
+	return { reached, restore: () => (core.filesystem.listTasks = listTasks) };
 }
 
 describe("task watcher reconciliation", () => {
@@ -80,14 +109,19 @@ describe("task watcher reconciliation", () => {
 		stopWatcher = handle.stop;
 
 		await Bun.write(filePath, "---\nid: task-1\n");
+		const firstRead = observeTaskReads(core, 1);
 		watcherCallback("rename", fileName);
-		setTimeout(() => void Bun.write(filePath, serializeTask(sampleTask("task-1", "Recovered create"))), 90);
+		await withTimeout(firstRead.reached, "partial task create read", getPlatformTimeout(1200));
+		firstRead.restore();
+		await Bun.write(filePath, serializeTask(sampleTask("task-1", "Recovered create")));
 
 		await withTimeout(published, "partial task create publication", getPlatformTimeout(1200));
 		expect(added.map((task) => task.title)).toEqual(["Recovered create"]);
 
+		const duplicateRead = observeTaskReads(core, 2);
 		watcherCallback("change", fileName);
-		await sleep(150);
+		await withTimeout(duplicateRead.reached, "duplicate task create read", getPlatformTimeout(1200));
+		duplicateRead.restore();
 		expect(added).toHaveLength(1);
 	});
 
@@ -106,8 +140,11 @@ describe("task watcher reconciliation", () => {
 		stopWatcher = handle.stop;
 
 		await Bun.write(filePath, "---\nid: task-7\n");
+		const firstRead = observeTaskDirectoryReads(core, 1);
 		watcherCallback("rename", ".task-7.atomic-write");
-		setTimeout(() => void Bun.write(filePath, serializeTask(sampleTask("task-7", "Atomic create"))), 90);
+		await withTimeout(firstRead.reached, "partial atomic task read", getPlatformTimeout(1200));
+		firstRead.restore();
+		await Bun.write(filePath, serializeTask(sampleTask("task-7", "Atomic create")));
 
 		const task = await withTimeout(added, "temporary-file task create publication", getPlatformTimeout(1200));
 		expect(task.title).toBe("Atomic create");
@@ -137,8 +174,11 @@ describe("task watcher reconciliation", () => {
 		stopWatcher = handle.stop;
 
 		await Bun.write(filePath, "---\nid: task-2\ntitle: Original title\n");
+		const firstRead = observeTaskReads(core, 1);
 		watcherCallback("change", fileName);
-		setTimeout(() => void Bun.write(filePath, serializeTask(sampleTask("task-2", "Edited title", "In Progress"))), 90);
+		await withTimeout(firstRead.reached, "partial task edit read", getPlatformTimeout(1200));
+		firstRead.restore();
+		await Bun.write(filePath, serializeTask(sampleTask("task-2", "Edited title", "In Progress")));
 
 		const task = await withTimeout(changed, "partial task edit publication", getPlatformTimeout(1200));
 		expect(task.title).toBe("Edited title");
@@ -175,9 +215,11 @@ describe("task watcher reconciliation", () => {
 		watcherCallback("rename", basename(paths[1] as string));
 
 		await withTimeout(bothRemoved, "archive and delete publication", getPlatformTimeout(1500));
+		const duplicateReads = observeTaskReads(core, 16);
 		watcherCallback("rename", basename(paths[0] as string));
 		watcherCallback("rename", basename(paths[1] as string));
-		await sleep(400);
+		await withTimeout(duplicateReads.reached, "duplicate removal read budget", getPlatformTimeout(1200));
+		duplicateReads.restore();
 		expect(removed.sort()).toEqual(["TASK-3", "TASK-4"]);
 	});
 
@@ -199,14 +241,15 @@ describe("task watcher reconciliation", () => {
 		});
 		stopWatcher = handle.stop;
 
+		const exhausted = observeTaskReads(core, 8);
 		watcherCallback("rename", fileName);
-		await sleep(500);
+		await withTimeout(exhausted.reached, "incomplete task read budget", getPlatformTimeout(1200));
+		exhausted.restore();
 		expect(publications).toEqual([]);
 
 		watcherCallback("change", fileName);
 		handle.stop();
 		await Bun.write(filePath, serializeTask(sampleTask("task-5", "Too late")));
-		await sleep(150);
 		expect(publications).toEqual([]);
 	});
 
@@ -231,8 +274,10 @@ describe("task watcher reconciliation", () => {
 		stopWatcher = handle.stop;
 
 		await Bun.write(filePath, "---\nid: task-9\ntitle: [unterminated\n---\n");
+		const exhausted = observeTaskReads(core, 8);
 		watcherCallback("change", fileName);
-		await sleep(500);
+		await withTimeout(exhausted.reached, "malformed task read budget", getPlatformTimeout(1200));
+		exhausted.restore();
 
 		expect(removed).toEqual([]);
 	});
@@ -243,7 +288,16 @@ describe("task watcher reconciliation", () => {
 		await Bun.write(join(core.filesystem.tasksDir, fileName), serializeTask(task));
 		const initial = await core.filesystem.loadTask(task.id);
 		if (!initial) throw new Error("Expected initial task");
-		const loadTaskSpy = spyOn(core.filesystem, "loadTask").mockResolvedValue(null);
+		let resolveExhausted: () => void = () => {};
+		const exhausted = new Promise<void>((resolve) => {
+			resolveExhausted = resolve;
+		});
+		let reads = 0;
+		const loadTaskSpy = spyOn(core.filesystem, "loadTask").mockImplementation(async () => {
+			reads += 1;
+			if (reads >= 8) resolveExhausted();
+			return null;
+		});
 		const removed: string[] = [];
 		const handle = watchTasks(
 			core,
@@ -257,7 +311,7 @@ describe("task watcher reconciliation", () => {
 		stopWatcher = handle.stop;
 
 		watcherCallback("change", fileName);
-		await sleep(500);
+		await withTimeout(exhausted, "unreadable task read budget", getPlatformTimeout(1200));
 		loadTaskSpy.mockRestore();
 
 		expect(removed).toEqual([]);
@@ -288,8 +342,10 @@ describe("task watcher reconciliation", () => {
 		stopWatcher = handle.stop;
 
 		await Bun.write(filePath, "---\nid: task-11\ntitle: [unterminated\n---\n");
+		const malformedReads = observeTaskDirectoryReads(core, 8);
 		watcherCallback("rename", ".atomic-write");
-		await sleep(500);
+		await withTimeout(malformedReads.reached, "malformed directory read budget", getPlatformTimeout(1200));
+		malformedReads.restore();
 		expect(removed).toEqual([]);
 
 		await unlink(filePath);
@@ -312,8 +368,10 @@ describe("task watcher reconciliation", () => {
 		);
 		stopWatcher = handle.stop;
 
+		const branchReads = observeTaskDirectoryReads(core, 8);
 		watcherCallback("rename", ".unrelated-atomic-write");
-		await sleep(400);
+		await withTimeout(branchReads.reached, "branch-only directory read budget", getPlatformTimeout(1200));
+		branchReads.restore();
 		expect(removed).toEqual([]);
 	});
 

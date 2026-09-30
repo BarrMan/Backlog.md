@@ -1,5 +1,5 @@
 import React from "react";
-import type { Task } from "../../types";
+import type { Task, TaskSummary } from "../../types";
 import { compareTaskIds, sortByPriority } from "../../utils/task-sorting";
 import type { ReorderTaskPayload } from "../lib/api";
 import { parseStoredUtcDate } from "../utils/date-display";
@@ -11,9 +11,9 @@ import { getEmptyColumnMessage, getTaskColumnClassName } from "./task-column-vie
 
 interface TaskColumnProps {
 	title: string;
-	tasks: Task[];
+	tasks: Array<Task | TaskSummary>;
 	onTaskUpdate: (taskId: string, updates: Partial<Task>) => void;
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: Task | TaskSummary) => void;
 	onTaskReorder?: (payload: ReorderTaskPayload) => void;
 	dragSourceStatus?: string | null;
 	dragSourceLane?: string | null;

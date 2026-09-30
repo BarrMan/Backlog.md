@@ -168,21 +168,14 @@ async function runSearch(
 	const cwd = await dependencies.requireProjectRoot();
 	const core = new Core(cwd);
 	const hasDuplicateIds = await dependencies.printDuplicateIntegrityWarning(core);
-	const searchService = await core.getSearchService();
-	const contentStore = await core.getContentStore();
-	try {
-		if (hasDuplicateIds && listOutput.outputMode === "json") return;
-		const parsed = await parseSearchOptions(core, options, dependencies);
-		if (!parsed) return;
-		const searchResults = searchService.search({ query: query ?? "", ...parsed });
-		if (listOutput.outputMode !== "interactive") {
-			return renderSearchResults(searchResults, listOutput.outputMode, listOutput.listWindow, core, cwd);
-		}
-		await renderInteractiveSearch(searchResults, parsed, query, core);
-	} finally {
-		searchService.dispose();
-		contentStore.dispose();
+	if (hasDuplicateIds && listOutput.outputMode === "json") return;
+	const parsed = await parseSearchOptions(core, options, dependencies);
+	if (!parsed) return;
+	const searchResults = await core.searchPersistently({ query: query ?? "", ...parsed });
+	if (listOutput.outputMode !== "interactive") {
+		return renderSearchResults(searchResults, listOutput.outputMode, listOutput.listWindow, core, cwd);
 	}
+	await renderInteractiveSearch(searchResults, parsed, query, core);
 }
 
 async function parseSearchOptions(
@@ -299,8 +292,8 @@ async function renderInteractiveSearch(
 	if (allTasks.length === 0) return printSearchResults(searchResultsInPrintedOrder(results, "plain"));
 	const interactiveTasks = parsed.modifiedFileFilters?.length ? searchResultTasks : allTasks;
 	if (interactiveTasks.length === 0) return printSearchResults(searchResultsInPrintedOrder(results, "plain"));
-	const { runUnifiedView } = await import("../ui/unified-view.ts");
-	await runUnifiedView({
+	const { UnifiedViewController } = await import("../ui/unified-view.ts");
+	await new UnifiedViewController({
 		core,
 		initialView: "task-list",
 		selectedTask: searchResultTasks[0] || interactiveTasks[0],
@@ -319,7 +312,7 @@ async function renderInteractiveSearch(
 			priority: parsed.filters.priority,
 			searchQuery: query ?? "",
 		},
-	});
+	}).run();
 }
 
 async function projectSearchTaskRows(core: Core, results: SearchResult[]): Promise<SearchResultInput[]> {

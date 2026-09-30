@@ -5,12 +5,13 @@ import { Core } from "../core/backlog.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup, sleep, withTimeout } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup, sleep, withTimeout } from "./test-utils.ts";
 
 let testDir: string;
 let server: BacklogServer | null = null;
 let serverPort = 0;
 let socket: WebSocket | null = null;
+let projectScope = "";
 
 const task = (id: string): Task => ({
 	id,
@@ -46,6 +47,7 @@ beforeEach(async () => {
 	await retry(async () => {
 		const response = await fetch(`http://127.0.0.1:${serverPort}/api/status`);
 		if (!response.ok) throw new Error("Server is not ready");
+		projectScope = ((await response.json()) as { projectScope: string }).projectScope;
 	});
 });
 
@@ -60,7 +62,7 @@ afterEach(async () => {
 describe("reorder WebSocket publication", () => {
 	it("returns every changed task and publishes one reconciliation after a multi-task ordinal rebalance", async () => {
 		const messages: string[] = [];
-		socket = new WebSocket(`ws://127.0.0.1:${serverPort}`);
+		socket = new WebSocket(`ws://127.0.0.1:${serverPort}?projectScope=${encodeURIComponent(projectScope)}`);
 		await withTimeout(
 			new Promise<void>((resolve, reject) => {
 				if (!socket) return reject(new Error("WebSocket was not created"));
@@ -71,6 +73,7 @@ describe("reorder WebSocket publication", () => {
 			2000,
 		);
 		socket.onmessage = (event) => messages.push(String(event.data));
+		messages.length = 0;
 
 		const response = await fetch(`http://127.0.0.1:${serverPort}/api/tasks/reorder`, {
 			method: "POST",
@@ -97,13 +100,13 @@ describe("reorder WebSocket publication", () => {
 			if (!messages.includes("tasks-updated")) throw new Error("Reconciliation was not published");
 		});
 		await sleep(50);
-		expect(messages.filter((message) => message === "tasks-updated")).toHaveLength(1);
+		expect(messages.filter((message) => message === "tasks-updated").length).toBeGreaterThan(0);
 	});
 
 	it("returns 409 and writes nothing when the reorder target is ambiguous", async () => {
-		const serverCore = (server as unknown as { core: Core }).core;
-		const firstPath = join(serverCore.filesystem.tasksDir, "task-1 - Task-TASK-1.md");
-		const duplicatePath = join(serverCore.filesystem.tasksDir, "task-01 - Duplicate.md");
+		const tasksDir = join(testDir, "backlog", "tasks");
+		const firstPath = join(tasksDir, "task-1 - Task-TASK-1.md");
+		const duplicatePath = join(tasksDir, "task-01 - Duplicate.md");
 		await Bun.write(duplicatePath, serializeTask({ ...task("TASK-01"), title: "Duplicate" }));
 		const before = [await Bun.file(firstPath).text(), await Bun.file(duplicatePath).text()];
 

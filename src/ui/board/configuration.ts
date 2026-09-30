@@ -37,7 +37,6 @@ export type BoardSessionConfigurationOptions = {
 export function normalizeBoardSessionConfiguration(
 	tasks: Task[],
 	statuses: string[],
-	initialColumns: Array<{ status: string }>,
 	options: BoardSessionConfigurationOptions | undefined,
 ) {
 	const configuredTaskTypes = getTaskTypeValues(options?.types);
@@ -46,7 +45,6 @@ export function normalizeBoardSessionConfiguration(
 
 	return {
 		configuredWorkflowStatuses: [...statuses],
-		currentStatuses: initialColumns.map((column) => column.status),
 		hideEmptyColumns: options?.hideEmptyColumns ?? false,
 		configuredTaskTypes,
 		configuredProjects,

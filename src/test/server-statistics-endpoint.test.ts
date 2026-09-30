@@ -8,7 +8,7 @@ import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let filesystem: FileSystem;
-let fixture: ReturnType<typeof createServerFixture> | null = null;
+let fixture: Awaited<ReturnType<typeof createServerFixture>> | null = null;
 let auxiliaryWorktreeDir: string | null = null;
 
 const createTask = (partial: Partial<Task>): Task => ({
@@ -54,7 +54,7 @@ async function requestStatistics(): Promise<StatisticsResponse> {
 }
 
 async function startStatisticsServer(): Promise<void> {
-	fixture = createServerFixture(testDir);
+	fixture = await createServerFixture(testDir);
 }
 
 async function restartWithStatisticsBranch(branchTask: Task): Promise<void> {
@@ -125,90 +125,40 @@ describe("BacklogServer statistics endpoint", () => {
 		await safeCleanup(testDir);
 	});
 
-	it("reuses branch state while reconciling cached working-copy tasks across statistics requests", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		const core = fixture.core;
-		const originalListTasks = core.filesystem.listTasks.bind(core.filesystem);
-		const originalListCompletedTasks = core.filesystem.listCompletedTasks.bind(core.filesystem);
-		const originalStatisticsLoader = core.loadAllTasksForStatistics;
-		let activeCorpusLoads = 0;
-		let completedCorpusLoads = 0;
-		let legacyStatisticsLoads = 0;
-
-		core.filesystem.listTasks = async (...args) => {
-			activeCorpusLoads += 1;
-			return await originalListTasks(...args);
-		};
-		core.filesystem.listCompletedTasks = async (...args) => {
-			completedCorpusLoads += 1;
-			return await originalListCompletedTasks(...args);
-		};
-		core.loadAllTasksForStatistics = async (progressCallback) => {
-			legacyStatisticsLoads += 1;
-			return await originalStatisticsLoader.call(core, progressCallback);
-		};
-
-		try {
-			const first = await requestStatistics();
-			expect(first).toMatchObject({
-				totalTasks: 2,
-				completedTasks: 1,
-				completionPercentage: 50,
-				draftCount: 1,
-				statusCounts: { "To Do": 1, "In Progress": 0, Done: 1 },
-				priorityCounts: { urgent: 1, low: 1 },
-			});
-
-			const second = await requestStatistics();
-			expect(second).toMatchObject({ totalTasks: 2, completedTasks: 1, draftCount: 1 });
-		} finally {
-			core.filesystem.listTasks = originalListTasks;
-			core.filesystem.listCompletedTasks = originalListCompletedTasks;
-			core.loadAllTasksForStatistics = originalStatisticsLoader;
-		}
-
-		// The second warm request performs one exact-content working-copy reconciliation.
-		// Branch state remains in the initialized ContentStore and the legacy global loader is unused.
-		expect(activeCorpusLoads).toBe(2);
-		expect(completedCorpusLoads).toBe(2);
-		expect(legacyStatisticsLoads).toBe(0);
+	it("reads current active, completed and draft Markdown on every request", async () => {
+		expect(await requestStatistics()).toMatchObject({
+			totalTasks: 2,
+			completedTasks: 1,
+			completionPercentage: 50,
+			draftCount: 1,
+			statusCounts: { "To Do": 1, "In Progress": 0, Done: 1 },
+			priorityCounts: { urgent: 1, low: 1 },
+		});
+		const published = fixture?.awaitNextPublication("tasks-updated");
+		await filesystem.saveTask(createTask({ id: "TASK-3", title: "Immediate addition" }));
+		await published;
+		expect(await requestStatistics()).toMatchObject({ totalTasks: 3, completedTasks: 1, draftCount: 1 });
 	});
 
-	it("uses fresh priorities without rebuilding the task corpus", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
+	it("uses current persistent priorities without waiting for a watcher", async () => {
 		await requestStatistics();
-		const core = fixture.core;
-		const store = await fixture.services.store();
-		const config = await core.filesystem.loadConfig();
+		const config = await filesystem.loadConfig();
 		if (!config) throw new Error("Expected statistics test config");
-		const originalEnsureConfigWatcher = store.ensureConfigWatcher.bind(store);
-		const originalRefreshTasksForTaskRead = core.refreshTasksForTaskRead.bind(core);
-		(store as unknown as { stopConfigWatcher: () => void }).stopConfigWatcher();
-		store.ensureConfigWatcher = async () => {};
-		core.refreshTasksForTaskRead = async () => false;
-
-		try {
-			await core.filesystem.saveConfig({
-				...config,
-				priorities: ["Critical", "Urgent", "Low"],
-			});
-
-			const refreshed = await requestStatistics();
-			expect(refreshed.statusCounts).toEqual({ "To Do": 1, "In Progress": 0, Done: 1 });
-			expect(refreshed.priorityCounts).toMatchObject({ critical: 0, urgent: 1, low: 1 });
-			expect(store.getTaskCorpusSnapshot().config?.priorities).toEqual(["Urgent", "Low"]);
-		} finally {
-			store.ensureConfigWatcher = originalEnsureConfigWatcher;
-			core.refreshTasksForTaskRead = originalRefreshTasksForTaskRead;
-		}
+		const published = fixture?.awaitNextPublication("config-updated");
+		await filesystem.saveConfig({ ...config, priorities: ["Critical", "Urgent", "Low"] });
+		await published;
+		const refreshed = await requestStatistics();
+		expect(refreshed.statusCounts).toEqual({ "To Do": 1, "In Progress": 0, Done: 1 });
+		expect(refreshed.priorityCounts).toMatchObject({ critical: 0, urgent: 1, low: 1 });
 	});
 
-	it("reconciles a selected backlog root before reading its statistics", async () => {
+	it("rejects a scope token after the configured backlog directory changes", async () => {
 		if (!fixture) throw new Error("Server fixture not initialized");
-		await requestStatistics();
+		const status = await fixture.app.handle(new Request("http://localhost/api/status"));
+		expect(status.status).toBe(200);
+		const { projectScope } = (await status.json()) as { projectScope: string };
 
-		const rootB = new FileSystem(testDir);
-		rootB.setBacklogDirectory("root-b");
+		const rootB = new FileSystem(testDir, { backlogDirectory: "root-b", configLocation: "root" });
 		await rootB.ensureBacklogStructure();
 		await rootB.saveTask(createTask({ id: "TASK-10", title: "Root B queued", status: "Queued" }));
 		await rootB.saveTask(createTask({ id: "TASK-11", title: "Root B queued too", status: "Queued" }));
@@ -217,23 +167,17 @@ describe("BacklogServer statistics endpoint", () => {
 		await rootB.saveDraft(createTask({ id: "DRAFT-10", title: "Root B draft", status: "Draft" }));
 		await rootB.saveDraft(createTask({ id: "DRAFT-11", title: "Root B draft too", status: "Draft" }));
 
-		const core = fixture.core;
+		const published = fixture.awaitNextPublication("config-updated");
 		await Bun.write(join(testDir, "backlog.config.yml"), rootConfig("Root B", "root-b"));
-		core.filesystem.invalidateConfigCache();
-		expect(core.filesystem.backlogDirName).toBe("root-b");
-
-		const first = await requestStatistics();
-		expect(first).toMatchObject({
-			totalTasks: 3,
-			completedTasks: 1,
-			completionPercentage: 33,
-			draftCount: 2,
-			statusCounts: { Queued: 2, Done: 1 },
+		await published;
+		const response = await fixture.app.handle(
+			new Request("http://localhost/api/statistics", { headers: { "X-Backlog-Project-Scope": projectScope } }),
+		);
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({
+			error: "Project scope does not match this server",
+			code: "PROJECT_SCOPE_MISMATCH",
 		});
-		expect(first.statusCounts).toEqual({ Queued: 2, Done: 1 });
-
-		const second = await requestStatistics();
-		expect(second.statusCounts).toEqual({ Queued: 2, Done: 1 });
 	});
 
 	it("refreshes statistics after an active branch ref moves", async () => {
@@ -243,56 +187,23 @@ describe("BacklogServer statistics endpoint", () => {
 		const initial = await requestStatistics();
 		expect(initial).toMatchObject({ totalTasks: 3, statusCounts: { "In Progress": 1 } });
 
+		const published = fixture?.awaitNextPublication("tasks-updated");
 		await addStatisticsBranchTask(
 			createTask({ id: "TASK-11", title: "Moved branch statistics task", status: "In Progress", priority: "Low" }),
 		);
+		await published;
 
 		const refreshed = await requestStatistics();
 		expect(refreshed).toMatchObject({ totalTasks: 4, statusCounts: { "In Progress": 2 } });
 	});
 
-	it("keeps task and config generations coherent during a same-root config change", async () => {
-		if (!fixture) throw new Error("Server fixture not initialized");
-		await requestStatistics();
-		const core = fixture.core;
-		const store = await fixture.services.store();
-		const oldConfig = await core.filesystem.loadConfig();
+	it("loads changed status and priority configuration on the next request", async () => {
+		const oldConfig = await filesystem.loadConfig();
 		if (!oldConfig) throw new Error("Expected statistics test config");
-		const originalRefreshTasksForTaskRead = core.refreshTasksForTaskRead.bind(core);
-		let releaseRefresh: () => void = () => {};
-		let markRefreshStarted: () => void = () => {};
-		const refreshStarted = new Promise<void>((resolve) => {
-			markRefreshStarted = resolve;
-		});
-		const refreshGate = new Promise<void>((resolve) => {
-			releaseRefresh = resolve;
-		});
-		core.refreshTasksForTaskRead = async () => {
-			markRefreshStarted();
-			await refreshGate;
-			return false;
-		};
-
-		try {
-			const pendingStatistics = requestStatistics();
-			await refreshStarted;
-			(store as unknown as { stopConfigWatcher: () => void }).stopConfigWatcher();
-			await core.filesystem.saveConfig({
-				...oldConfig,
-				statuses: ["Queued", "Done"],
-				priorities: ["Critical"],
-			});
-			releaseRefresh();
-
-			const inFlight = await pendingStatistics;
-			expect(inFlight.statusCounts).toMatchObject({ "To Do": 1, "In Progress": 0, Done: 1 });
-			expect(inFlight.statusCounts).not.toHaveProperty("Queued");
-			expect(inFlight.priorityCounts).not.toHaveProperty("critical");
-		} finally {
-			releaseRefresh();
-			core.refreshTasksForTaskRead = originalRefreshTasksForTaskRead;
-		}
-
+		await requestStatistics();
+		const published = fixture?.awaitNextPublication("config-updated");
+		await filesystem.saveConfig({ ...oldConfig, statuses: ["Queued", "Done"], priorities: ["Critical"] });
+		await published;
 		const refreshed = await requestStatistics();
 		expect(refreshed.statusCounts).toMatchObject({ Queued: 0, "To Do": 1, Done: 1 });
 		expect(refreshed.statusCounts).not.toHaveProperty("In Progress");

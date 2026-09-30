@@ -13,6 +13,7 @@ type BoardSelectionOptions = {
 	onTasksUpdated?: (tasks: Task[], requestTask: Task) => void;
 	onRefreshData?: () => Promise<void>;
 	onError: (message: string | null) => void;
+	onTaskSelected?: (taskId: string) => void;
 	visibleTaskIds: Set<string>;
 };
 
@@ -23,6 +24,7 @@ export function useBoardSelection({
 	onTasksUpdated,
 	onRefreshData,
 	onError,
+	onTaskSelected,
 	visibleTaskIds,
 }: BoardSelectionOptions) {
 	const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
@@ -34,15 +36,23 @@ export function useBoardSelection({
 		setSelectionAnchorId(null);
 		setIsSelectionDragging(false);
 	}, []);
-	const toggleTaskSelection = useCallback((taskId: string) => {
-		setSelectedTaskIds((previous) =>
-			previous.includes(taskId) ? previous.filter((id) => id !== taskId) : [...previous, taskId],
-		);
-		setSelectionAnchorId(taskId);
-	}, []);
-	const selectTaskRange = useCallback((taskIds: string[]) => {
-		setSelectedTaskIds((previous) => [...previous, ...taskIds.filter((taskId) => !previous.includes(taskId))]);
-	}, []);
+	const toggleTaskSelection = useCallback(
+		(taskId: string) => {
+			onTaskSelected?.(taskId);
+			setSelectedTaskIds((previous) =>
+				previous.includes(taskId) ? previous.filter((id) => id !== taskId) : [...previous, taskId],
+			);
+			setSelectionAnchorId(taskId);
+		},
+		[onTaskSelected],
+	);
+	const selectTaskRange = useCallback(
+		(taskIds: string[]) => {
+			for (const taskId of taskIds) onTaskSelected?.(taskId);
+			setSelectedTaskIds((previous) => [...previous, ...taskIds.filter((taskId) => !previous.includes(taskId))]);
+		},
+		[onTaskSelected],
+	);
 
 	useEffect(() => {
 		if (selectedTaskIds.length === 0) return;

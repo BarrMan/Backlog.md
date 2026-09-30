@@ -158,20 +158,18 @@ describe("FileSystem task parse cache", () => {
 		}
 	});
 
-	it("clears parsed tasks when the configured backlog root changes", async () => {
+	it("keeps parsed tasks scoped to independently selected backlog roots", async () => {
 		await filesystem.saveTask(task("TASK-1", "Primary root"));
+		const secondary = new FileSystem(testDir, { backlogDirectory: "secondary", configLocation: "folder" });
+		await secondary.ensureBacklogStructure();
+		await secondary.saveTask(task("TASK-1", "Secondary root"));
 		const parseSpy = spyOn(markdownParser, "parseTask");
 
 		try {
 			expect((await filesystem.listTasks())[0]?.title).toBe("Primary root");
-			filesystem.setBacklogDirectory("secondary");
-			await filesystem.ensureBacklogStructure();
-			await filesystem.saveTask(task("TASK-1", "Secondary root"));
-			expect((await filesystem.listTasks())[0]?.title).toBe("Secondary root");
-
-			filesystem.setBacklogDirectory("backlog");
+			expect((await secondary.listTasks())[0]?.title).toBe("Secondary root");
 			expect((await filesystem.listTasks())[0]?.title).toBe("Primary root");
-			expect(parseSpy).toHaveBeenCalledTimes(3);
+			expect(parseSpy).toHaveBeenCalledTimes(2);
 		} finally {
 			parseSpy.mockRestore();
 		}
@@ -209,7 +207,7 @@ describe("FileSystem task parse cache", () => {
 		}
 	});
 
-	it("does not repopulate the cache from reads invalidated by a root change", async () => {
+	it("does not let another selected root discard an in-flight read", async () => {
 		const content = serializeTask(task("TASK-1", "Old root"));
 		const taskPath = join(filesystem.tasksDir, "task-1 - Old root.md");
 		const inFlightRead = deferred<string>();
@@ -224,17 +222,18 @@ describe("FileSystem task parse cache", () => {
 
 		try {
 			const startedBeforeRootChange = harness.readParsedTaskFile(taskPath, staleEpoch);
-			filesystem.setBacklogDirectory("secondary");
+			const secondary = new FileSystem(testDir, { backlogDirectory: "secondary", configLocation: "folder" });
+			await secondary.ensureBacklogStructure();
 
-			// Models a worker from the old scan that was queued behind the read limit.
+			// A separately selected root must not alter this instance's parse cache.
 			expect((await harness.readParsedTaskFile(taskPath, staleEpoch)).title).toBe("Old root");
-			expect(harness.parsedTaskFiles.has(resolve(taskPath))).toBe(false);
-			expect(harness.taskFileReadGenerations.has(resolve(taskPath))).toBe(false);
+			expect(harness.parsedTaskFiles.has(resolve(taskPath))).toBe(true);
+			expect(harness.taskFileReadGenerations.has(resolve(taskPath))).toBe(true);
 
 			inFlightRead.resolve(content);
 			expect((await startedBeforeRootChange).title).toBe("Old root");
-			expect(harness.parsedTaskFiles.has(resolve(taskPath))).toBe(false);
-			expect(harness.taskFileReadGenerations.has(resolve(taskPath))).toBe(false);
+			expect(harness.parsedTaskFiles.has(resolve(taskPath))).toBe(true);
+			expect(harness.taskFileReadGenerations.has(resolve(taskPath))).toBe(true);
 		} finally {
 			fileSpy.mockRestore();
 		}

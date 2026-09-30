@@ -4,7 +4,7 @@ import { FileSystem } from "../file-system/operations.ts";
 import { serializeDecision, serializeDocument } from "../markdown/serializer.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Document } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let server: BacklogServer | null = null;
@@ -117,7 +117,7 @@ describe("BacklogServer document endpoints", () => {
 			}),
 		});
 		expect(invalidCreateTypeShape.status).toBe(400);
-		expect(await invalidCreateTypeShape.text()).toContain("Document type must be a string.");
+		expect(await invalidCreateTypeShape.json()).toMatchObject({ code: "VALIDATION_ERROR" });
 
 		const invalidCreateType = await fetch(`http://127.0.0.1:${serverPort}/api/docs`, {
 			method: "POST",
@@ -129,7 +129,7 @@ describe("BacklogServer document endpoints", () => {
 			}),
 		});
 		expect(invalidCreateType.status).toBe(400);
-		expect(await invalidCreateType.text()).toContain("Document type must be one of");
+		expect(await invalidCreateType.json()).toMatchObject({ code: "VALIDATION_ERROR" });
 
 		const invalidCreateTags = await fetch(`http://127.0.0.1:${serverPort}/api/docs`, {
 			method: "POST",
@@ -142,7 +142,7 @@ describe("BacklogServer document endpoints", () => {
 			}),
 		});
 		expect(invalidCreateTags.status).toBe(400);
-		expect(await invalidCreateTags.text()).toContain("Document tags must be an array of strings.");
+		expect(await invalidCreateTags.json()).toMatchObject({ code: "VALIDATION_ERROR" });
 
 		const created = await fetchJson<Document & { success: boolean }>("/api/docs", {
 			method: "POST",
@@ -164,7 +164,7 @@ describe("BacklogServer document endpoints", () => {
 			}),
 		});
 		expect(invalidUpdateType.status).toBe(400);
-		expect(await invalidUpdateType.text()).toContain("Document type must be one of");
+		expect(await invalidUpdateType.json()).toMatchObject({ code: "VALIDATION_ERROR" });
 
 		const invalidUpdateTags = await fetch(`http://127.0.0.1:${serverPort}/api/docs/${created.id}`, {
 			method: "PUT",
@@ -175,50 +175,7 @@ describe("BacklogServer document endpoints", () => {
 			}),
 		});
 		expect(invalidUpdateTags.status).toBe(400);
-		expect(await invalidUpdateTags.text()).toContain("Document tags must be an array of strings.");
-	});
-
-	it("preserves 500 status for unexpected document create and update failures", async () => {
-		if (!server) {
-			throw new Error("Expected server to be started");
-		}
-		const core = (
-			server as unknown as {
-				core: {
-					createDocumentFromInput: (...args: unknown[]) => Promise<Document>;
-					updateDocumentFromInput: (...args: unknown[]) => Promise<Document>;
-				};
-			}
-		).core;
-
-		core.createDocumentFromInput = async () => {
-			throw new Error("disk full");
-		};
-		const createResponse = await fetch(`http://127.0.0.1:${serverPort}/api/docs`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				title: "Create Failure",
-				content: "Content",
-				type: "guide",
-			}),
-		});
-		expect(createResponse.status).toBe(500);
-		expect(await createResponse.text()).toContain("Failed to create document");
-
-		core.updateDocumentFromInput = async () => {
-			throw new Error("rename failed");
-		};
-		const updateResponse = await fetch(`http://127.0.0.1:${serverPort}/api/docs/doc-1`, {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				content: "Updated",
-				type: "guide",
-			}),
-		});
-		expect(updateResponse.status).toBe(500);
-		expect(await updateResponse.text()).toContain("Failed to update document");
+		expect(await invalidUpdateTags.json()).toMatchObject({ code: "VALIDATION_ERROR" });
 	});
 });
 

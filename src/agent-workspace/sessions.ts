@@ -35,7 +35,7 @@ export class AgentSessionService {
 	) {
 		this.runner = options.runner ?? new BunRunner();
 		this.process = new SessionProcess(this.runner);
-		this.store = new SessionStore(this.core.fs.rootDir, this.runner);
+		this.store = new SessionStore(this.core.filesystem.rootDir, this.runner);
 		this.backgroundWorkers = !options.runner;
 	}
 
@@ -72,7 +72,7 @@ export class AgentSessionService {
 			const id = randomUUID();
 			const cwd =
 				options.cwd ??
-				(preset.worktree ? (state.worktreePath ?? join(paths.taskDir, "worktree")) : this.core.fs.rootDir);
+				(preset.worktree ? (state.worktreePath ?? join(paths.taskDir, "worktree")) : this.core.filesystem.rootDir);
 			if (preset.worktree) state.worktreePath = cwd;
 			const next: AgentSession = {
 				id,
@@ -97,7 +97,8 @@ export class AgentSessionService {
 		const reserved = session;
 		// The state claim above prevents a concurrent launch; all expensive work follows outside the lock.
 		try {
-			if (preset.worktree) await ensureSessionWorktree(this.runner, this.core.fs.rootDir, task.id, reserved.cwd);
+			if (preset.worktree)
+				await ensureSessionWorktree(this.runner, this.core.filesystem.rootDir, task.id, reserved.cwd);
 			const env = { ...process.env, ...preset.env, ...this.environment(reserved) } as Record<string, string>;
 			if (preset.prepare) await this.process.prepare(preset.prepare, reserved.cwd, env);
 			await this.store.write(
@@ -105,7 +106,7 @@ export class AgentSessionService {
 				renderSessionBootstrap({
 					taskId: task.id,
 					sessionId: reserved.id,
-					projectRoot: this.core.fs.rootDir,
+					projectRoot: this.core.filesystem.rootDir,
 					cwd: reserved.cwd,
 					configScope,
 					worktree: preset.worktree,
@@ -208,7 +209,7 @@ export class AgentSessionService {
 					path: document.path,
 					tags: document.tags,
 				};
-				await unlink(join(this.core.fs.docsDir, ...identity.path.split("/"))).catch((error) => {
+				await unlink(join(this.core.filesystem.docsDir, ...identity.path.split("/"))).catch((error) => {
 					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 				});
 				state.handoffDocumentId = identity.id;
@@ -238,7 +239,7 @@ export class AgentSessionService {
 		const handoff = request;
 		const delivery = await this.dispatchHandoff(task.id, handoff.id);
 		if (delivery === "waiting" && this.backgroundWorkers)
-			await spawnSessionWorker("handoff-dispatch", task.id, this.core.fs.rootDir);
+			await spawnSessionWorker("handoff-dispatch", task.id, this.core.filesystem.rootDir);
 		return (await this.store.read(task.id)).handoff ?? handoff;
 	}
 
@@ -293,7 +294,10 @@ export class AgentSessionService {
 		let predecessor: AgentSession | undefined;
 		await this.store.mutate(task.id, async (state) => {
 			if (!state.handoff || !["ready", "failed"].includes(state.handoff.status)) return;
-			if (!state.handoff.document || !(await Bun.file(join(this.core.fs.docsDir, state.handoff.documentPath)).exists()))
+			if (
+				!state.handoff.document ||
+				!(await Bun.file(join(this.core.filesystem.docsDir, state.handoff.documentPath)).exists())
+			)
 				throw new Error("The completed handoff document is missing; save it before continuing.");
 			predecessor = this.session(state, state.handoff.sessionId);
 			state.handoff.status = "replacing";
@@ -425,7 +429,7 @@ export class AgentSessionService {
 	private environment(session: AgentSession): Record<string, string> {
 		return {
 			...process.env,
-			BACKLOG_CWD: this.core.fs.rootDir,
+			BACKLOG_CWD: this.core.filesystem.rootDir,
 			BACKLOG_SESSION_ID: session.id,
 			BACKLOG_TASK_ID: session.taskId,
 		} as Record<string, string>;
@@ -504,7 +508,7 @@ export class AgentSessionService {
 	}
 
 	private async inProgressStatus(): Promise<string> {
-		const statuses = (await this.core.fs.loadConfig())?.statuses ?? DEFAULT_STATUSES;
+		const statuses = (await this.core.filesystem.loadConfig())?.statuses ?? DEFAULT_STATUSES;
 		const status = statuses.find(
 			(candidate) => candidate.toLocaleLowerCase() === DEFAULT_IN_PROGRESS_STATUS.toLocaleLowerCase(),
 		);

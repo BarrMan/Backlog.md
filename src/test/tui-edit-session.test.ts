@@ -61,7 +61,7 @@ describe("Core.editTaskInTui", () => {
 
 		testDir = createUniqueTestDir("test-tui-edit-session");
 		await mkdir(testDir, { recursive: true });
-		core = new Core(testDir, { enableWatchers: true });
+		core = new Core(testDir);
 		await initializeTestProject(core, "TUI Edit Session Test");
 
 		const task: Task = {

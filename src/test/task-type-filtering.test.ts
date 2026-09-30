@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { ContentStore } from "../core/content-store.ts";
-import { createTaskSearchIndex } from "../utils/task-search.ts";
 import { getTestCliPath } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
@@ -57,8 +55,6 @@ describe("task type filtering", () => {
 	});
 
 	afterEach(async () => {
-		core.disposeSearchService();
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 
@@ -89,28 +85,22 @@ describe("task type filtering", () => {
 		expect(tasks.map((task) => task.title)).toEqual(["Shared API failure"]);
 	});
 
-	it("uses the same type semantics in direct filesystem, content-store, and interactive search helpers", async () => {
+	it("uses the same type semantics in direct filesystem and persistent search helpers", async () => {
 		const filesystemTasks = await core.filesystem.listTasks({ type: ["feature", "SPIKE"] });
 		expect(filesystemTasks.map((task) => task.title).sort()).toEqual([
 			"Shared API capability",
 			"Shared API exploration",
 		]);
 
-		const store = new ContentStore(core.filesystem);
-		try {
-			await store.ensureInitialized();
-			expect(store.getTasks({ type: "BUG" }).map((task) => task.title)).toEqual(["Shared API failure"]);
-			const interactiveMatches = createTaskSearchIndex(store.getTasks()).search({
-				query: "Shared API",
-				type: ["Bug", "Spike"],
-			});
-			expect(interactiveMatches.map((task) => task.title).sort()).toEqual([
-				"Shared API exploration",
-				"Shared API failure",
-			]);
-		} finally {
-			store.dispose();
-		}
+		const persistentMatches = await core.searchPersistently({
+			query: "Shared API",
+			types: ["task"],
+			filters: { type: ["Bug", "Spike"] },
+		});
+		expect(persistentMatches.flatMap((result) => (result.type === "task" ? [result.task.title] : [])).sort()).toEqual([
+			"Shared API exploration",
+			"Shared API failure",
+		]);
 	});
 
 	it("filters CLI task list with repeated and comma-separated canonicalized values", async () => {
@@ -162,11 +152,9 @@ describe("task type filtering", () => {
 		const searchHelp = await $`bun ${cliPath} search --help`.cwd(testDir).text();
 		expect(listHelp).toContain("--type <type>");
 		expect(listHelp).toContain("type: one or more of configured task types: Bug, Epic");
-		expect(listHelp).toContain('backlog task list --type "Bug" --plain');
 		expect(searchHelp).toContain("--type <type>");
 		expect(searchHelp).toContain("--task-type <type>");
 		expect(searchHelp).toContain("task-type: one or more of configured task types: Bug, Epic");
-		expect(searchHelp).toContain('backlog search "crash" --task-type "Bug" --plain');
 
 		const taskCreationGuide = await $`bun ${cliPath} instructions task-creation`.cwd(testDir).text();
 		expect(taskCreationGuide).toContain('backlog task list --type "Bug" --plain');

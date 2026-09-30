@@ -39,10 +39,10 @@ describe("atomic task creation", () => {
 		const core = new Core(testDir);
 		await initializeTestProject(core, "Atomic Create Test", false);
 
-		const config = await core.fs.loadConfig();
+		const config = await core.filesystem.loadConfig();
 		if (config) {
 			config.checkActiveBranches = false;
-			await core.fs.saveConfig(config);
+			await core.filesystem.saveConfig(config);
 		}
 	});
 
@@ -64,8 +64,8 @@ describe("atomic task creation", () => {
 		let saveEntries = 0;
 
 		const patchSaveTask = (core: Core) => {
-			const original = core.fs.saveTask.bind(core.fs);
-			core.fs.saveTask = (async (task: Task): Promise<string> => {
+			const original = core.filesystem.saveTask.bind(core.filesystem);
+			core.filesystem.saveTask = (async (task: Task): Promise<string> => {
 				saveEntries += 1;
 				if (task.title === "Alpha") {
 					firstEnteredSave.resolve();
@@ -75,7 +75,7 @@ describe("atomic task creation", () => {
 					secondEnteredSave.resolve();
 				}
 				return await original(task);
-			}) as typeof core.fs.saveTask;
+			}) as typeof core.filesystem.saveTask;
 		};
 
 		patchSaveTask(first);
@@ -112,8 +112,8 @@ describe("atomic task creation", () => {
 			return value;
 		};
 
-		const firstOperation = first.fs.withCreateLock(() => enter("first"));
-		const secondOperation = second.fs.withCreateLock(() => enter("second"));
+		const firstOperation = first.filesystem.withCreateLock(() => enter("first"));
+		const secondOperation = second.filesystem.withCreateLock(() => enter("second"));
 		const outcomesPromise = Promise.allSettled([firstOperation, secondOperation]);
 		let outcomes: PromiseSettledResult<string>[];
 
@@ -143,15 +143,15 @@ describe("atomic task creation", () => {
 		let saveEntries = 0;
 
 		const patchSaveTask = (core: Core) => {
-			const original = core.fs.saveTask.bind(core.fs);
-			core.fs.saveTask = (async (task: Task): Promise<string> => {
+			const original = core.filesystem.saveTask.bind(core.filesystem);
+			core.filesystem.saveTask = (async (task: Task): Promise<string> => {
 				saveEntries += 1;
 				if (task.title === "Draft A") {
 					firstEnteredSave.resolve();
 					await releaseFirstSave.promise;
 				}
 				return await original(task);
-			}) as typeof core.fs.saveTask;
+			}) as typeof core.filesystem.saveTask;
 		};
 
 		patchSaveTask(first);
@@ -168,7 +168,7 @@ describe("atomic task creation", () => {
 		releaseFirstSave.resolve();
 		await Promise.all([promoteA, promoteB]);
 
-		const tasks = await setup.fs.listTasks();
+		const tasks = await setup.filesystem.listTasks();
 		expect(tasks.map((task) => task.id)).toEqual(["TASK-1", "TASK-2"]);
 		expect(tasks.map((task) => task.title)).toEqual(["Draft A", "Draft B"]);
 	});
@@ -185,15 +185,15 @@ describe("atomic task creation", () => {
 		let saveEntries = 0;
 
 		const patchSaveDraft = (core: Core) => {
-			const original = core.fs.saveDraft.bind(core.fs);
-			core.fs.saveDraft = (async (task: Task): Promise<string> => {
+			const original = core.filesystem.saveDraft.bind(core.filesystem);
+			core.filesystem.saveDraft = (async (task: Task): Promise<string> => {
 				saveEntries += 1;
 				if (task.title === "Task A") {
 					firstEnteredSave.resolve();
 					await releaseFirstSave.promise;
 				}
 				return await original(task);
-			}) as typeof core.fs.saveDraft;
+			}) as typeof core.filesystem.saveDraft;
 		};
 
 		patchSaveDraft(first);
@@ -210,7 +210,7 @@ describe("atomic task creation", () => {
 		releaseFirstSave.resolve();
 		await Promise.all([demoteA, demoteB]);
 
-		const drafts = await setup.fs.listDrafts();
+		const drafts = await setup.filesystem.listDrafts();
 		expect(drafts.map((draft) => draft.id)).toEqual(["DRAFT-1", "DRAFT-2"]);
 		expect(drafts.map((draft) => draft.title)).toEqual(["Task A", "Task B"]);
 	});
@@ -237,10 +237,10 @@ describe("atomic task creation", () => {
 		}) as typeof Bun.write;
 
 		try {
-			const firstCreate = first.fs.createMilestone("Alpha Milestone");
+			const firstCreate = first.filesystem.createMilestone("Alpha Milestone");
 			await expectResolvesWithin(firstEnteredWrite.promise, 250, "first milestone create should reach Bun.write");
 
-			const secondCreate = second.fs.createMilestone("Beta Milestone");
+			const secondCreate = second.filesystem.createMilestone("Beta Milestone");
 			await Promise.resolve();
 			await Promise.resolve();
 			expect(writeEntries).toBe(1);
@@ -260,7 +260,7 @@ describe("atomic task creation", () => {
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();
 
-		const heldLock = core.fs.withCreateLock(
+		const heldLock = core.filesystem.withCreateLock(
 			async () => {
 				lockEntered.resolve();
 				await releaseLock.promise;
@@ -270,7 +270,7 @@ describe("atomic task creation", () => {
 		await lockEntered.promise;
 
 		await expect(
-			core.fs.withCreateLock(async () => undefined, {
+			core.filesystem.withCreateLock(async () => undefined, {
 				timeoutMs: 100,
 				retryDelayMs: 25,
 				staleMs: 5_000,

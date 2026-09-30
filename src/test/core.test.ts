@@ -148,7 +148,7 @@ describe("Core", () => {
 			expect(loadedTask?.id).toBe("TASK-1");
 
 			// Check git status to see if there are uncommitted changes
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			// For now, just check that we have a commit (could be initialization or task)
 			expect(lastCommit).toBeDefined();
 			expect(lastCommit.length).toBeGreaterThan(0);
@@ -167,7 +167,7 @@ describe("Core", () => {
 			const loadedTask = await core.filesystem.loadTask("task-1");
 			expect(loadedTask?.title).toBe("Updated Task");
 
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			// For now, just check that we have a commit (could be initialization or task)
 			expect(lastCommit).toBeDefined();
 			expect(lastCommit.length).toBeGreaterThan(0);
@@ -188,8 +188,6 @@ describe("Core", () => {
 
 		it("refreshes one coherent active and completed identity snapshot before mutation", async () => {
 			await core.createTask(sampleTask, false);
-			await core.getContentStore();
-
 			const activePath = (await core.filesystem.loadTask(sampleTask.id))?.filePath;
 			if (!activePath) throw new Error("Expected active task path");
 			const completedPath = join(core.filesystem.completedDir, "task-01 - Completed collision.md");
@@ -222,63 +220,25 @@ describe("Core", () => {
 			expect(await Bun.file(activePath).text()).not.toContain("Must not change");
 		});
 
-		it("publishes completed lifecycle identity state atomically", async () => {
+		it("makes completed lifecycle state visible to the next persistent read", async () => {
 			await core.createTask(sampleTask, false);
-			const store = await core.getContentStore();
-			const observed: Array<{
-				read: string;
-				mutation: string;
-				active: string[];
-				completed: string[];
-			}> = [];
-			const unsubscribe = store.subscribe((event) => {
-				if (event.type !== "tasks") return;
-				const snapshot = store.getTaskCorpusSnapshot();
-				observed.push({
-					read: store.resolveTaskForRead(sampleTask.id).status,
-					mutation: store.resolveTaskForMutation(sampleTask.id).status,
-					active: snapshot.activeTasks.map((task) => task.id),
-					completed: snapshot.completedTasks.map((task) => task.id),
-				});
-			});
-
 			expect(await core.completeTask(sampleTask.id, false)).toBe(true);
-			unsubscribe();
-
-			expect(observed[0]).toEqual({
-				read: "found",
-				mutation: "not-found",
-				active: [],
-				completed: ["TASK-1"],
-			});
+			const snapshot = await core.loadTaskSnapshot();
+			expect(await core.getTask(sampleTask.id)).toMatchObject({ id: "TASK-1", source: "completed" });
+			expect(snapshot.activeTasks).toEqual([]);
+			expect(snapshot.completedTasks.map((task) => task.id)).toEqual(["TASK-1"]);
 		});
 
-		it("publishes archived lifecycle identity state atomically", async () => {
+		it("makes archived lifecycle state unavailable to the next persistent read", async () => {
 			await core.createTask(sampleTask, false);
-			const store = await core.getContentStore();
-			const observed: Array<{ read: string; mutation: string; active: string[]; completed: string[] }> = [];
-			const unsubscribe = store.subscribe((event) => {
-				if (event.type !== "tasks") return;
-				const snapshot = store.getTaskCorpusSnapshot();
-				observed.push({
-					read: store.resolveTaskForRead(sampleTask.id).status,
-					mutation: store.resolveTaskForMutation(sampleTask.id).status,
-					active: snapshot.activeTasks.map((task) => task.id),
-					completed: snapshot.completedTasks.map((task) => task.id),
-				});
-			});
-
 			expect((await core.archiveTask(sampleTask.id, false)).success).toBe(true);
-			unsubscribe();
-
-			expect(observed[0]).toEqual({ read: "not-found", mutation: "not-found", active: [], completed: [] });
+			expect(await core.getTask(sampleTask.id)).toBeNull();
+			expect((await core.loadTaskSnapshot()).activeTasks).toEqual([]);
 		});
 
 		it("completes the exact resolved path when the frontmatter ID differs from the filename", async () => {
 			const taskPath = join(core.filesystem.tasksDir, "task-999 - Exact-path.md");
 			await Bun.write(taskPath, serializeTask({ ...sampleTask, id: "TASK-1", status: "Done" }));
-			await core.getContentStore();
-
 			expect(await core.completeTask("TASK-1", false)).toBe(true);
 			expect(await Bun.file(taskPath).exists()).toBe(false);
 			expect(await Bun.file(join(core.filesystem.completedDir, "task-999 - Exact-path.md")).exists()).toBe(true);
@@ -287,8 +247,6 @@ describe("Core", () => {
 		it("archives the exact resolved path when the frontmatter ID differs from the filename", async () => {
 			const taskPath = join(core.filesystem.tasksDir, "task-999 - Exact-path.md");
 			await Bun.write(taskPath, serializeTask({ ...sampleTask, id: "TASK-1" }));
-			await core.getContentStore();
-
 			expect((await core.archiveTask("TASK-1", false)).success).toBe(true);
 			expect(await Bun.file(taskPath).exists()).toBe(false);
 			expect(await Bun.file(join(core.filesystem.archiveTasksDir, "task-999 - Exact-path.md")).exists()).toBe(true);
@@ -299,12 +257,10 @@ describe("Core", () => {
 			await Bun.write(taskPath, serializeTask({ ...sampleTask, id: "TASK-1" }));
 			await $`git add .`.cwd(TEST_DIR).quiet();
 			await $`git commit -m "Add mismatched task identity"`.cwd(TEST_DIR).quiet();
-			await core.getContentStore();
-
 			await core.updateTaskFromInput("TASK-1", { title: "Updated exact path" }, true);
 
 			expect(await Bun.file(taskPath).text()).toContain("title: Updated exact path");
-			expect(await core.gitOps.getLastCommitMessage()).toContain("Update task TASK-1");
+			expect(await core.git.getLastCommitMessage()).toContain("Update task TASK-1");
 			expect((await $`git status --short`.cwd(TEST_DIR).text()).trim()).toBe("");
 		});
 
@@ -323,18 +279,18 @@ describe("Core", () => {
 			const archived = await core.archiveTask("task-1", true);
 			expect(archived.success).toBe(true);
 
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			expect(lastCommit).toContain("backlog: Archive task TASK-1");
 		});
 
 		it("dispatches demote auto-commit with both moved paths", async () => {
 			await core.createTask(sampleTask, false);
-			const originalCommitFiles = core.gitOps.commitFiles.bind(core.gitOps);
+			const originalCommitFiles = core.git.commitFiles.bind(core.git);
 			let resolveCommit: (commit: { message: string; paths: string[] }) => void = () => undefined;
 			const commitCalled = new Promise<{ message: string; paths: string[] }>((resolve) => {
 				resolveCommit = resolve;
 			});
-			core.gitOps.commitFiles = async (message, paths) => {
+			core.git.commitFiles = async (message, paths) => {
 				resolveCommit({ message, paths });
 			};
 
@@ -347,7 +303,7 @@ describe("Core", () => {
 				expect(commit.paths.map(toPosixPath).some((path) => path.includes("/tasks/"))).toBe(true);
 				expect(commit.paths.map(toPosixPath).some((path) => path.includes("/drafts/"))).toBe(true);
 			} finally {
-				core.gitOps.commitFiles = originalCommitFiles;
+				core.git.commitFiles = originalCommitFiles;
 			}
 		});
 
@@ -693,18 +649,19 @@ describe("Core", () => {
 			const nestedRoot = join(TEST_DIR, "packages", "app");
 			const nestedCore = new Core(nestedRoot);
 			await initializeTestProject(nestedCore, "Nested Project", false, "planning/backlog-data");
-			const config = await nestedCore.filesystem.loadConfig();
+			const configuredCore = new Core(nestedRoot);
+			const config = await configuredCore.filesystem.loadConfig();
 			if (!config) {
 				throw new Error("Expected nested config to be loaded");
 			}
-			await nestedCore.filesystem.saveConfig({
+			await configuredCore.filesystem.saveConfig({
 				...config,
 				checkActiveBranches: true,
 				remoteOperations: false,
 				prefixes: { ...config.prefixes, task: "back" },
 			});
 
-			const taskPath = await nestedCore.filesystem.saveTask({
+			const taskPath = await configuredCore.filesystem.saveTask({
 				...sampleTask,
 				id: "BACK-1",
 				title: "Nested local version",
@@ -1224,7 +1181,7 @@ describe("Core", () => {
 			const loaded = await core.filesystem.loadDraft(draft.id);
 			expect(loaded?.id).toBe("DRAFT-1");
 
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			expect(lastCommit).toBeDefined();
 			expect(lastCommit.length).toBeGreaterThan(0);
 		});
@@ -1242,7 +1199,7 @@ describe("Core", () => {
 			const promoted = await core.promoteDraft(draft.id, true);
 			expect(promoted).toBe(true);
 
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			expect(lastCommit).toContain(`backlog: Promote draft ${draft.id.toUpperCase()}`);
 		});
 
@@ -1259,7 +1216,7 @@ describe("Core", () => {
 			const archived = await core.archiveDraft(draft.id, true);
 			expect(archived).toBe(true);
 
-			const lastCommit = await core.gitOps.getLastCommitMessage();
+			const lastCommit = await core.git.getLastCommitMessage();
 			expect(lastCommit).toContain(`backlog: Archive draft ${draft.id.toUpperCase()}`);
 		});
 

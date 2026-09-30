@@ -365,7 +365,6 @@ describe("atomic draft editing", () => {
 	});
 
 	afterEach(async () => {
-		setup.disposeContentStore();
 		if (originalGlobalLockEnv === undefined) {
 			delete process.env.USE_GLOBAL_TASK_ID_LOCK;
 		} else {
@@ -393,7 +392,6 @@ describe("atomic draft editing", () => {
 				writers.map(({ label, core }) => core.updateDraftFromInput(reference, { addLabels: [label] }, false)),
 			);
 		} finally {
-			for (const { core } of writers) core.disposeContentStore();
 		}
 
 		const succeeded = labels.filter((_, index) => outcomes[index]?.status === "fulfilled");
@@ -422,7 +420,7 @@ describe("atomic draft editing", () => {
 			let release: () => void = () => {};
 			try {
 				const held = new Promise<void>((resolveHeld) => {
-					void setup.fs.withDraftLock(reference, async () => {
+					void setup.filesystem.withDraftLock(reference, async () => {
 						resolveHeld();
 						await new Promise<void>((resolveRelease) => {
 							release = resolveRelease;
@@ -443,7 +441,6 @@ describe("atomic draft editing", () => {
 					}
 					expect(isTaskLockError(failure)).toBe(true);
 				} finally {
-					racingCore.disposeContentStore();
 				}
 			} finally {
 				release();
@@ -502,7 +499,7 @@ describe("atomic draft editing", () => {
 
 		let release: () => void = () => {};
 		const held = new Promise<void>((resolveHeld) => {
-			void setup.fs.withDraftLock(reference, async () => {
+			void setup.filesystem.withDraftLock(reference, async () => {
 				resolveHeld();
 				await new Promise<void>((resolveRelease) => {
 					release = resolveRelease;
@@ -524,7 +521,6 @@ describe("atomic draft editing", () => {
 			expect(isTaskLockError(failure)).toBe(true);
 		} finally {
 			release();
-			racingCore.disposeContentStore();
 		}
 
 		// No dual records were produced by the contended attempt; promotion then succeeds.
@@ -534,7 +530,6 @@ describe("atomic draft editing", () => {
 			expect(await promotingCore.promoteDraft(draftId, false)).toBe(true);
 			expect(await promotingCore.filesystem.loadDraft(draftId)).toBeNull();
 		} finally {
-			promotingCore.disposeContentStore();
 		}
 	});
 
@@ -561,7 +556,7 @@ describe("atomic draft editing", () => {
 		try {
 			// Holding the TASK lock on the colliding id must not block the draft edit.
 			const taskLockHeld = new Promise<void>((resolveHeld) => {
-				void setup.fs.withTaskLock(taskTwin, async () => {
+				void setup.filesystem.withTaskLock(taskTwin, async () => {
 					resolveHeld();
 					await new Promise<void>((resolveRelease) => {
 						releaseTaskLock = resolveRelease;
@@ -575,7 +570,6 @@ describe("atomic draft editing", () => {
 				const updated = await editingCore.updateDraftFromInput(draftReference, { addLabels: ["no-contention"] }, false);
 				expect(updated.labels).toContain("no-contention");
 			} finally {
-				editingCore.disposeContentStore();
 			}
 		} finally {
 			releaseTaskLock?.();
@@ -586,7 +580,7 @@ describe("atomic draft editing", () => {
 		try {
 			const holdingCore = new Core(TEST_DIR);
 			const draftLockHeld = new Promise<void>((resolveHeld) => {
-				void holdingCore.fs.withDraftLock(draftReference, async () => {
+				void holdingCore.filesystem.withDraftLock(draftReference, async () => {
 					resolveHeld();
 					await new Promise<void>((resolveRelease) => {
 						releaseDraftLock = resolveRelease;
@@ -607,7 +601,6 @@ describe("atomic draft editing", () => {
 				}
 				expect(isTaskLockError(lockFailure)).toBe(true);
 			} finally {
-				losingCore.disposeContentStore();
 			}
 		} finally {
 			releaseDraftLock?.();

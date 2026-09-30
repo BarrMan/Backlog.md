@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Task } from "../types/index.ts";
-import { formatTaskListItem } from "../ui/board.ts";
+import { formatTaskListItem } from "../ui/board/column-policy.ts";
 import { formatProjectBadge } from "../ui/project.ts";
 import { createTaskPopup } from "../ui/task-viewer-with-search.ts";
 import { createScreen } from "../ui/tui.ts";

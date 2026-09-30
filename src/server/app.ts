@@ -1,7 +1,7 @@
 import { Elysia } from "elysia";
-import type { Core } from "../core/backlog.ts";
 import indexHtml from "../web/index.html";
 import { serveAsset } from "./assets.ts";
+import { domainError } from "./errors.ts";
 import { createApiPlugin, type ServerServices } from "./resources/api.ts";
 import type { WebSocketHub } from "./websocket-hub.ts";
 
@@ -36,7 +36,6 @@ const spaPaths = [
 ];
 
 export type BacklogAppDependencies = {
-	core: Core;
 	services: ServerServices;
 	hub: WebSocketHub;
 };
@@ -45,27 +44,41 @@ export function browserHtmlRoutes(): Record<string, Bun.HTMLBundle> {
 	return Object.fromEntries(spaPaths.map((path) => [path, spaIndexHtml]));
 }
 
-export function createBacklogApp({ core, services, hub }: BacklogAppDependencies): Elysia {
+export function createBacklogApp({ services, hub }: BacklogAppDependencies): Elysia {
 	const app = new Elysia({ name: "backlog-browser" });
-	app.onError(({ code, error }) => {
+	app.onRequest(({ request, set }) => {
+		const url = new URL(request.url);
+		if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+			return services.createRequestScope().scope.validate(url.searchParams.get("projectScope"), set);
+		}
+	});
+	app.onError(({ code, error, set }) => {
 		if (code === "NOT_FOUND") return new Response("Not Found", { status: 404 });
-		if (code === "PARSE")
-			return Response.json({ error: "Request body must be valid JSON.", code: "VALIDATION_ERROR" }, { status: 400 });
+		if (code === "PARSE") {
+			set.status = 400;
+			return { error: "Request body must be valid JSON.", code: "VALIDATION_ERROR" };
+		}
 		if (code === "VALIDATION") {
-			return Response.json({ error: error.message }, { status: 400 });
+			if (error.type === "response") {
+				return new Response("Internal Server Error", { status: 500 });
+			}
+			set.status = 400;
+			return { error: error.message, code: "VALIDATION_ERROR" };
+		}
+		const mapped = domainError(error);
+		if (mapped) {
+			set.status = mapped.status;
+			return mapped.body;
 		}
 		console.error("Server Error:", error);
 		return new Response("Internal Server Error", { status: 500 });
 	});
 	app.ws("/", {
-		open: (socket) => {
-			hub.open(socket);
-			if (!services.wasReady()) void services.ready().catch(() => {});
-		},
+		open: (socket) => hub.open(socket),
 		message: (socket) => hub.message(socket),
 		close: (socket) => hub.socketClose(socket),
 	});
-	app.get("/assets/*", ({ request }) => serveAsset(request, core));
+	app.get("/assets/*", ({ request }) => serveAsset(request, services.createRequestScope().core));
 	for (const path of spaPaths) {
 		app.get(
 			path,
@@ -75,6 +88,6 @@ export function createBacklogApp({ core, services, hub }: BacklogAppDependencies
 				}),
 		);
 	}
-	app.use(createApiPlugin(core, services, hub));
+	app.use(createApiPlugin(services));
 	return app;
 }

@@ -1,14 +1,15 @@
 import type React from "react";
-import type { Task } from "../../types";
+import type { Task, TaskSummary } from "../../types";
 import { useTaskCardDrag } from "../hooks/use-task-card-drag";
+import { apiClient } from "../lib/api";
 import { formatBrowserShortcutAriaKeys, matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
 import { getAcceptanceCriteriaProgressCounts } from "./AcceptanceCriteriaProgress";
 import { TaskCardContent } from "./task-card-content";
 
 interface TaskCardProps {
-	task: Task;
+	task: Task | TaskSummary;
 	onUpdate: (taskId: string, updates: Partial<Task>) => void;
-	onEdit: (task: Task) => void;
+	onEdit: (task: Task | TaskSummary) => void;
 	onDragStart?: () => void;
 	onDragEnd?: () => void;
 	status?: string;
@@ -104,6 +105,8 @@ const TaskCard: React.FC<TaskCardProps> = (props) => {
 				onDragStart={drag.handleDragStart}
 				onDragEnd={drag.handleDragEnd}
 				onClick={selectOrEdit}
+				onFocus={() => void apiClient.loadTaskDetail(task.id).catch(() => {})}
+				onMouseEnter={() => void apiClient.loadTaskDetail(task.id).catch(() => {})}
 				onKeyDown={handleKeyDown}
 			>
 				<TaskCardContent

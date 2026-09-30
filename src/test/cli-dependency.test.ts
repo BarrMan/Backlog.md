@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, getTestCliPath, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 // Runs the CLI with stdio reported as a TTY so interactive-only behavior (the edit wizard) applies.
 async function runCliWithInteractiveTty(cwd: string, args: string[]) {
@@ -38,44 +39,44 @@ describe("CLI dependency options", () => {
 	});
 
 	it("creates and edits dependencies through both public flags", async () => {
-		await $`bun ${CLI_PATH} task create "Base task one"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Base task two"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task one"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task two"`.cwd(testDir).quiet();
 
-		const created = await $`bun ${CLI_PATH} task create "Dependent task" --dep 1 --plain`.cwd(testDir).quiet();
+		const created = await $`${CLI_COMMAND} task create "Dependent task" --dep 1 --plain`.cwd(testDir).quiet();
 		expect(created.stdout.toString()).toContain("Task TASK-3 - Dependent task");
 		expect((await core.filesystem.loadTask("TASK-3"))?.dependencies).toEqual(["TASK-1"]);
 
-		const edited = await $`bun ${CLI_PATH} task edit 3 --depends-on TASK-1,TASK-2 --plain`.cwd(testDir).quiet();
+		const edited = await $`${CLI_COMMAND} task edit 3 --depends-on TASK-1,TASK-2 --plain`.cwd(testDir).quiet();
 		expect(edited.stdout.toString()).toContain("Task TASK-3 - Dependent task");
 		expect((await core.filesystem.loadTask("TASK-3"))?.dependencies).toEqual(["TASK-1", "TASK-2"]);
 
 		// Task detail shows the resolved graph instead of repeating the raw ID list.
-		const viewed = await $`bun ${CLI_PATH} task view 3 --plain`.cwd(testDir).quiet();
+		const viewed = await $`${CLI_COMMAND} task view 3 --plain`.cwd(testDir).quiet();
 		expect(viewed.stdout.toString()).toContain("Dependency Graph:");
 		expect(viewed.stdout.toString()).toContain("TASK-1");
 		expect(viewed.stdout.toString()).toContain("TASK-2");
 	});
 
 	it("accumulates repeated dependency flags", async () => {
-		await $`bun ${CLI_PATH} task create "Base task one"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Base task two"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task one"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task two"`.cwd(testDir).quiet();
 
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1 --depends-on TASK-2`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1 --depends-on TASK-2`.cwd(testDir).quiet();
 
 		expect((await core.filesystem.loadTask("TASK-3"))?.dependencies).toEqual(["TASK-1", "TASK-2"]);
 	});
 
 	it("merges --depends-on and --dep on task create", async () => {
-		await $`bun ${CLI_PATH} task create "Base task one"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Base task two"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task one"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task two"`.cwd(testDir).quiet();
 
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1 --dep TASK-2`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1 --dep TASK-2`.cwd(testDir).quiet();
 
 		expect((await core.filesystem.loadTask("TASK-3"))?.dependencies).toEqual(["TASK-1", "TASK-2"]);
 	});
 
 	it("rejects empty dependency values on task create and draft create without creating anything", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
 
 		const emptyDependsOn = await runTestCli(["task", "create", "Empty depends-on", "--depends-on", ""], {
 			cwd: testDir,
@@ -108,18 +109,18 @@ describe("CLI dependency options", () => {
 	});
 
 	it("clears dependencies with --clear-deps", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
-		const result = await $`bun ${CLI_PATH} task edit 2 --clear-deps --plain`.cwd(testDir).quiet();
+		const result = await $`${CLI_COMMAND} task edit 2 --clear-deps --plain`.cwd(testDir).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual([]);
 	});
 
 	it("clears dependencies with --clear-deps in an interactive terminal", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
 		const result = await runCliWithInteractiveTty(testDir, ["task", "edit", "2", "--clear-deps"]);
 
@@ -130,8 +131,8 @@ describe("CLI dependency options", () => {
 
 	// On edit an explicit empty value is the second spelling of --clear-deps, matching `-a ""`.
 	it("clears dependencies with an explicit empty value", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
 		const emptyDependsOn = await runTestCli(["task", "edit", "2", "--depends-on", "", "--plain"], {
 			cwd: testDir,
@@ -139,15 +140,15 @@ describe("CLI dependency options", () => {
 		expect(emptyDependsOn.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual([]);
 
-		await $`bun ${CLI_PATH} task edit 2 --depends-on TASK-1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task edit 2 --depends-on TASK-1`.cwd(testDir).quiet();
 		const emptyDep = await runTestCli(["task", "edit", "2", "--dep", "", "--plain"], { cwd: testDir });
 		expect(emptyDep.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual([]);
 	});
 
 	it("accepts an explicit empty value together with --clear-deps", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
 		const result = await runTestCli(["task", "edit", "2", "--clear-deps", "--dep", "", "--plain"], {
 			cwd: testDir,
@@ -160,8 +161,8 @@ describe("CLI dependency options", () => {
 	// Blank values normalize away exactly as they do inside one value (`--dep "TASK-1,"`) and for `-a ""`,
 	// so a real dependency alongside a blank one still sets that dependency.
 	it("ignores an empty value when a dependency value is also given", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Dependent task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task"`.cwd(testDir).quiet();
 
 		const result = await runTestCli(["task", "edit", "2", "--depends-on", "", "--dep", "TASK-1", "--plain"], {
 			cwd: testDir,
@@ -172,10 +173,10 @@ describe("CLI dependency options", () => {
 	});
 
 	it("rejects conflicting dependency edits without changing dependencies", async () => {
-		await $`bun ${CLI_PATH} task create "Base task"`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Base task"`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Dependent task" --depends-on TASK-1`.cwd(testDir).quiet();
 
-		const conflicting = await $`bun ${CLI_PATH} task edit 2 --clear-deps --depends-on TASK-1`
+		const conflicting = await $`${CLI_COMMAND} task edit 2 --clear-deps --depends-on TASK-1`
 			.cwd(testDir)
 			.quiet()
 			.nothrow();
@@ -186,27 +187,27 @@ describe("CLI dependency options", () => {
 	});
 
 	it("documents --clear-deps in task edit help", async () => {
-		const result = await $`bun ${CLI_PATH} task edit --help`.cwd(testDir).quiet();
+		const result = await $`${CLI_COMMAND} task edit --help`.cwd(testDir).quiet();
 
 		expect(result.stdout.toString()).toContain("--clear-deps");
 	});
 
 	it("accepts a completed task as a dependency at create and edit time", async () => {
-		await $`bun ${CLI_PATH} task create "Done predecessor" -s Done`.cwd(testDir).quiet();
-		await $`bun ${CLI_PATH} task complete 1`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task create "Done predecessor" -s Done`.cwd(testDir).quiet();
+		await $`${CLI_COMMAND} task complete 1`.cwd(testDir).quiet();
 
-		const created = await $`bun ${CLI_PATH} task create "Dependent task" --dep TASK-1`.cwd(testDir).quiet().nothrow();
+		const created = await $`${CLI_COMMAND} task create "Dependent task" --dep TASK-1`.cwd(testDir).quiet().nothrow();
 		expect(created.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1"]);
 
-		await $`bun ${CLI_PATH} task create "Other target"`.cwd(testDir).quiet();
-		const edited = await $`bun ${CLI_PATH} task edit 2 --depends-on TASK-1,TASK-3`.cwd(testDir).quiet().nothrow();
+		await $`${CLI_COMMAND} task create "Other target"`.cwd(testDir).quiet();
+		const edited = await $`${CLI_COMMAND} task edit 2 --depends-on TASK-1,TASK-3`.cwd(testDir).quiet().nothrow();
 		expect(edited.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1", "TASK-3"]);
 	});
 
 	it("rejects a dependency that does not exist", async () => {
-		const result = await $`bun ${CLI_PATH} task create "Dependent task" --dep TASK-999`.cwd(testDir).quiet().nothrow();
+		const result = await $`${CLI_COMMAND} task create "Dependent task" --dep TASK-999`.cwd(testDir).quiet().nothrow();
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr.toString()).toContain("The following dependencies do not exist: TASK-999");

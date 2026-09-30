@@ -63,7 +63,7 @@ describe("addAgentInstructions", () => {
 		await Bun.write(join(TEST_DIR, "UNRELATED.txt"), "peer edit\n");
 		await $`git add UNRELATED.txt`.cwd(TEST_DIR).quiet();
 
-		await addAgentInstructions(TEST_DIR, core.gitOps, ["AGENTS.md"], true);
+		await addAgentInstructions(TEST_DIR, core.git, ["AGENTS.md"], true);
 
 		const committed = await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).text();
 		expect(committed).toContain("AGENTS.md");
@@ -86,7 +86,7 @@ describe("addAgentInstructions", () => {
 			await $`git commit -m "Add instruction symlink"`.cwd(TEST_DIR).quiet();
 
 			const core = new Core(TEST_DIR);
-			await addAgentInstructions(TEST_DIR, core.gitOps, ["AGENTS.md", ".github/copilot-instructions.md"], true);
+			await addAgentInstructions(TEST_DIR, core.git, ["AGENTS.md", ".github/copilot-instructions.md"], true);
 
 			expect(await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).text()).toContain("AGENTS.md");
 			expect(await $`git show --name-only --pretty=format:`.cwd(externalRepo).text()).toContain(

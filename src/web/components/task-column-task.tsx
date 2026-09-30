@@ -1,5 +1,5 @@
 import type React from "react";
-import type { Task } from "../../types";
+import type { Task, TaskSummary } from "../../types";
 import type { ReorderTaskPayload } from "../lib/api";
 import TaskCard from "./TaskCard";
 import type { DropPosition } from "./task-column-drag";
@@ -25,14 +25,14 @@ export function TaskColumnTask({
 	availableProjects,
 	dateFormat,
 }: {
-	task: Task;
+	task: Task | TaskSummary;
 	index: number;
 	dropPosition: DropPosition;
 	onDropPositionChange: (position: DropPosition) => void;
 	onDragStart: (taskId: string) => void;
 	onDragEnd: () => void;
 	onTaskUpdate: (taskId: string, updates: Partial<Task>) => void;
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: Task | TaskSummary) => void;
 	draggedTaskId: string | null;
 	onTaskReorder?: (payload: ReorderTaskPayload) => void;
 	selectedTaskIds?: string[];

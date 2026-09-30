@@ -29,14 +29,14 @@ async function collectBranchIds(
 				console.log(`Remote operations disabled - generating ID from local ${directory} only`);
 			}
 		} else {
-			await core.gitOps.fetch();
+			await core.git.fetch();
 		}
 
 		const backlogDir = core.filesystem.backlogDirName;
-		const branches = await core.gitOps.listAllBranches();
+		const branches = await core.git.listAllBranches();
 		const results = await Promise.all(
 			branches.map(async (branch) => {
-				const files = await core.gitOps.listFilesInTree(branch, `${backlogDir}/${directory}`);
+				const files = await core.git.listFilesInTree(branch, `${backlogDir}/${directory}`);
 				return files
 					.map((file) => numericIdFromFilename(file, prefix))
 					.filter((id): id is string => id !== null)

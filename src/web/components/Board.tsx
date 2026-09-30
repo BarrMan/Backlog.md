@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useMemo, useState } from "react";
-import type { Milestone, Task } from "../../types";
+import type { Milestone, Task, TaskSummary } from "../../types";
 import { collectAvailableLabels } from "../../utils/label-filter";
 import { getTerminalStatus } from "../../utils/terminal-status";
 import { useBoardDragVisibility } from "../hooks/use-board-drag-visibility";
@@ -8,6 +8,7 @@ import { useBoardSelection } from "../hooks/use-board-selection";
 import { useBoardTaskHighlight } from "../hooks/use-board-task-highlight";
 import { useBoardTaskMutations } from "../hooks/use-board-task-mutations";
 import { useTaskMetadataOptions } from "../hooks/use-task-metadata-options";
+import { apiClient } from "../lib/api";
 import { buildLanes, type LaneMode } from "../lib/lanes";
 import { filterBoardTasks, hasBoardFilters } from "../utils/board-view-data";
 import { canonicalizeMilestone, useMilestoneAliasMap } from "../utils/milestone-aliases";
@@ -19,10 +20,10 @@ import { CleanupSuccess, useCleanupSuccess } from "./CleanupSuccess";
 import { useBoardLaneView } from "./use-board-lane-view";
 
 export interface BoardProps {
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: TaskSummary | Task) => void;
 	onNewTask: () => void;
 	highlightTaskId?: string | null;
-	tasks: Task[];
+	tasks: TaskSummary[] | Task[];
 	onRefreshData?: () => Promise<void>;
 	onTasksUpdated?: (tasks: Task[], requestTask: Task) => void;
 	statuses: string[];
@@ -234,10 +235,11 @@ const Board: React.FC<BoardProps> = (props) => {
 		tasks,
 		statuses,
 		milestoneAliases: milestoneAliasToCanonical,
-		onTasksUpdated,
 		onRefreshData,
+		onTasksUpdated,
 		onError: setUpdateError,
 		visibleTaskIds,
+		onTaskSelected: (taskId) => void apiClient.loadTaskDetail(taskId).catch(() => {}),
 	});
 
 	const getLaneLabel = (lane: (typeof lanes)[0]): string => {

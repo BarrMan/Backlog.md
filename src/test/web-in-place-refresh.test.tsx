@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { DuplicateRepairPlan } from "../core/duplicate-task-repair.ts";
-import type { Milestone, SearchResult, Task } from "../types/index.ts";
+import type { Milestone, SearchResult, Task, TaskSummary } from "../types/index.ts";
 import App from "../web/App.tsx";
 import { HealthCheckProvider } from "../web/contexts/HealthCheckContext.tsx";
 
@@ -45,6 +45,16 @@ let duplicatePlan: DuplicateRepairPlan = emptyDuplicatePlan();
 let failNextSearch = false;
 let configHold: Promise<void> | null = null;
 let requestLog: string[] = [];
+
+const taskSummaries = (): TaskSummary[] =>
+	tasks.map(({ acceptanceCriteriaItems, definitionOfDoneItems, ...task }) => ({
+		...task,
+		acceptanceCriteriaCount: acceptanceCriteriaItems?.length ?? 0,
+		checkedAcceptanceCriteriaCount: acceptanceCriteriaItems?.filter((item) => item.checked).length ?? 0,
+		definitionOfDoneCount: definitionOfDoneItems?.length ?? 0,
+		checkedDefinitionOfDoneCount: definitionOfDoneItems?.filter((item) => item.checked).length ?? 0,
+		isReady: true,
+	}));
 
 let activeRoot: Root | null = null;
 let activeDom: JSDOM | null = null;
@@ -99,21 +109,22 @@ class FakeResizeObserver {
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
 const respond = async (url: URL): Promise<Response> => {
-	if (url.pathname === "/api/status") return json({ initialized: true, projectPath: "/tmp/project" });
+	if (url.pathname === "/api/status")
+		return json({ initialized: true, projectPath: "/tmp/project", projectScope: "test-project-scope" });
 	if (url.pathname === "/api/statuses") return json(defaultConfig.statuses);
 	if (url.pathname === "/api/config") {
 		if (configHold) await configHold;
 		return json(defaultConfig);
 	}
-	if (url.pathname === "/api/search") {
+	if (url.pathname === "/api/tasks") {
 		if (failNextSearch) {
 			failNextSearch = false;
 			// 4xx so the api client surfaces the failure without retrying.
 			return json({ error: "search unavailable" }, 400);
 		}
-		const results: SearchResult[] = tasks.map((task) => ({ type: "task", task, score: 1 }));
-		return json(results);
+		return json(taskSummaries());
 	}
+	if (url.pathname === "/api/search") return json([] satisfies SearchResult[]);
 	if (url.pathname === "/api/milestones") return json(milestones);
 	if (url.pathname === "/api/milestones/archived") return json([]);
 	if (url.pathname === "/api/tasks/duplicates") return json(duplicatePlan);
@@ -250,7 +261,7 @@ describe("in-place data refresh", () => {
 
 		// Only the search corpus is refetched: no statuses, config, milestone, or
 		// duplicate-plan burst, and no loading shell.
-		expect(requestedPaths()).toEqual(["/api/search"]);
+		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks"]);
 		expect(hasLoadingShell(container)).toBe(false);
 		// The unchanged card kept its DOM node: the view updated in place.
 		const neighborAfter = Array.from(container.querySelectorAll("h4")).find(
@@ -284,7 +295,7 @@ describe("in-place data refresh", () => {
 		await waitFor(() => columnOf("Moving card") === "In Progress", "card in the In Progress column");
 		await settle();
 
-		expect(requestedPaths()).toEqual(["/api/search"]);
+		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks"]);
 		expect(hasLoadingShell(container)).toBe(false);
 	});
 
@@ -301,7 +312,7 @@ describe("in-place data refresh", () => {
 
 		// A new task ID can introduce a duplicate, so only this path also
 		// refreshes the duplicate repair plan.
-		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks/duplicates"]);
+		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks", "/api/tasks/duplicates"]);
 		expect(hasLoadingShell(container)).toBe(false);
 	});
 
@@ -315,7 +326,7 @@ describe("in-place data refresh", () => {
 		await settle();
 
 		// The echo after a surgical drag update costs exactly one search read.
-		expect(requestedPaths()).toEqual(["/api/search"]);
+		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks"]);
 	});
 
 	it("refetches milestone entities incrementally on a milestone-scoped broadcast", async () => {
@@ -330,7 +341,7 @@ describe("in-place data refresh", () => {
 		});
 		await settle();
 
-		expect(requestedPaths()).toEqual(["/api/milestones", "/api/milestones/archived", "/api/search"]);
+		expect(requestedPaths()).toEqual(["/api/milestones", "/api/milestones/archived", "/api/search", "/api/tasks"]);
 	});
 
 	it("keeps refreshing the repair plan while duplicates exist, even for same-ID edits", async () => {
@@ -359,7 +370,7 @@ describe("in-place data refresh", () => {
 		});
 		await settle();
 
-		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks/duplicates"]);
+		expect(requestedPaths()).toEqual(["/api/search", "/api/tasks", "/api/tasks/duplicates"]);
 	});
 
 	it("routes the next refresh through the full loader while a load error stands", async () => {
@@ -386,6 +397,7 @@ describe("in-place data refresh", () => {
 			"/api/milestones/archived",
 			"/api/search",
 			"/api/statuses",
+			"/api/tasks",
 			"/api/tasks/duplicates",
 		]);
 		expect(container.textContent).not.toContain("corpus failed");
@@ -413,7 +425,7 @@ describe("in-place data refresh", () => {
 		await settle();
 
 		expect(requestLog.filter((path) => path === "/api/config").length).toBe(2);
-		expect(requestLog.filter((path) => path === "/api/search").length).toBe(2);
+		expect(requestLog.filter((path) => path === "/api/tasks").length).toBe(2);
 	});
 
 	it("falls back to the full reload when the incremental refresh fails", async () => {
@@ -434,6 +446,7 @@ describe("in-place data refresh", () => {
 			"/api/milestones/archived",
 			"/api/search",
 			"/api/statuses",
+			"/api/tasks",
 			"/api/tasks/duplicates",
 		]);
 	});

@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import { BacklogServer } from "../server/index.ts";
-import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
-function initRequest(port: number, body: Record<string, unknown>): Request {
+function initRequest(port: number, scope: string, body: Record<string, unknown>): Request {
 	return new Request(`http://127.0.0.1:${port}/api/init`, {
 		method: "POST",
-		headers: { "content-type": "application/json" },
+		headers: { "content-type": "application/json", "X-Backlog-Project-Scope": scope },
 		body: JSON.stringify({
 			projectName: "Server Init",
 			integrationMode: "none",
@@ -33,7 +33,9 @@ describe("BacklogServer init endpoint", () => {
 	const initialize = async (body: Record<string, unknown>): Promise<Response> => {
 		server = new BacklogServer(TEST_DIR);
 		await server.start(0, false);
-		return fetch(initRequest(server.getPort() ?? 0, body));
+		const port = server.getPort() ?? 0;
+		const status = (await fetch(`http://127.0.0.1:${port}/api/status`)).json() as Promise<{ projectScope: string }>;
+		return fetch(initRequest(port, (await status).projectScope, body));
 	};
 
 	it("parses string false filesystemOnly without enabling filesystem-only mode", async () => {
@@ -67,5 +69,50 @@ describe("BacklogServer init endpoint", () => {
 		expect(config?.filesystemOnly).toBe(true);
 		expect(config?.remoteOperations).toBe(false);
 		expect(config?.checkActiveBranches).toBe(false);
+	});
+
+	it("initializes a custom backlog and returns a new scope", async () => {
+		const response = await initialize({
+			backlogDirectory: "planning/custom-backlog",
+			backlogDirectorySource: "custom",
+			configLocation: "root",
+		});
+
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as { projectScope: string };
+		expect(body.projectScope).toBeString();
+		expect(await Bun.file(join(TEST_DIR, "backlog.config.yml")).exists()).toBe(true);
+		expect((await new Core(TEST_DIR).filesystem.loadConfig())?.backlogDirectory).toBe("planning/custom-backlog");
+	});
+
+	it("rejects the old scope after explicit custom initialization and accepts the returned scope", async () => {
+		server = new BacklogServer(TEST_DIR);
+		await server.start(0, false);
+		const port = server.getPort() ?? 0;
+		const before = (await (await fetch(`http://127.0.0.1:${port}/api/status`)).json()) as { projectScope: string };
+		const initialized = await fetch(
+			initRequest(port, before.projectScope, {
+				backlogDirectory: ".backlog",
+				backlogDirectorySource: ".backlog",
+				configLocation: "root",
+			}),
+		);
+		const after = (await initialized.json()) as { projectScope: string };
+		expect(initialized.status).toBe(200);
+		expect(after.projectScope).not.toBe(before.projectScope);
+		expect(
+			(
+				await fetch(`http://127.0.0.1:${port}/api/config`, {
+					headers: { "X-Backlog-Project-Scope": before.projectScope },
+				})
+			).status,
+		).toBe(409);
+		expect(
+			(
+				await fetch(`http://127.0.0.1:${port}/api/config`, {
+					headers: { "X-Backlog-Project-Scope": after.projectScope },
+				})
+			).status,
+		).toBe(200);
 	});
 });

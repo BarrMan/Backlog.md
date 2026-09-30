@@ -89,7 +89,7 @@ describe("CLI Integration", () => {
 
 			const updatedContent = "# Updated\n\nRun install steps.";
 			const result =
-				await $`bun ${CLI_PATH} doc update doc-1 --title "Install Runbook" --content ${updatedContent} -t specification --tags ops,runbook -p runbooks`
+				await $`bun ${CLI_PATH} doc update doc-1 --title "Install Runbook" --content ${updatedContent} -t design --tags ops,runbook -p runbooks`
 					.cwd(TEST_DIR)
 					.quiet();
 			expect(result.exitCode).toBe(0);
@@ -99,7 +99,7 @@ describe("CLI Integration", () => {
 			const docs = await core.filesystem.listDocuments();
 			const updated = docs.find((doc) => doc.id === "doc-1");
 			expect(updated?.title).toBe("Install Runbook");
-			expect(updated?.type).toBe("specification");
+			expect(updated?.type as string).toBe("design");
 			expect(updated?.tags).toEqual(["ops", "runbook"]);
 			expect(updated?.path).toBe("runbooks/doc-1 - Install-Runbook.md");
 			expect(updated?.rawContent).toBe(updatedContent);
@@ -153,9 +153,7 @@ describe("CLI Integration", () => {
 				.quiet()
 				.nothrow();
 			expect(invalidType.exitCode).not.toBe(0);
-			expect(invalidType.stderr.toString()).toContain(
-				"Document type must be one of: readme, guide, specification, other.",
-			);
+			expect(invalidType.stderr.toString()).toContain("Document type must be one of: guide, reference, design, other.");
 
 			const unsafePath = await $`bun ${CLI_PATH} doc update doc-1 --content "Nope" -p ../outside`
 				.cwd(TEST_DIR)
@@ -456,8 +454,8 @@ describe("CLI Integration", () => {
 			// switch back to main where status is still To Do
 			await $`git checkout main`.cwd(TEST_DIR).quiet();
 
-			await core.gitOps.fetch();
-			const branches = await core.gitOps.listRemoteBranches();
+			await core.git.fetch();
+			const branches = await core.git.listRemoteBranches();
 			const config = await core.filesystem.loadConfig();
 			const statuses = config?.statuses || [];
 
@@ -466,9 +464,9 @@ describe("CLI Integration", () => {
 
 			for (const branch of branches) {
 				const ref = `origin/${branch}`;
-				const files = await core.gitOps.listFilesInTree(ref, "backlog/tasks");
+				const files = await core.git.listFilesInTree(ref, "backlog/tasks");
 				for (const file of files) {
-					const content = await core.gitOps.showFile(ref, file);
+					const content = await core.git.showFile(ref, file);
 					const remoteTask = parseTask(content);
 					const existing = tasksById.get(remoteTask.id);
 					const currentIdx = existing ? statuses.indexOf(existing.status) : -1;

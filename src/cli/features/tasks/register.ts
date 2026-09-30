@@ -31,7 +31,7 @@ import { formatJson, printJson, taskListJson, taskViewJson } from "../../../form
 import { formatTaskPlainText } from "../../../formatters/task-plain-text.ts";
 import { Core } from "../../../index.ts";
 import { isLocalEditableTask, type Task } from "../../../types/index.ts";
-import { viewTaskEnhanced } from "../../../ui/task-viewer-with-search.ts";
+import { TaskViewerController } from "../../../ui/task-viewer-with-search.ts";
 import { formatDependencyCleanupMessage } from "../../../utils/dependency-graph.ts";
 import { formatDuplicateTaskIdWarning } from "../../../utils/duplicate-detection.ts";
 import {
@@ -73,7 +73,7 @@ async function printDuplicateIntegrityWarning(core: Core): Promise<boolean> {
 }
 
 async function loadLocalTaskView(core: Core, taskId: string) {
-	const localTasks = await core.fs.listTasks();
+	const localTasks = await core.filesystem.listTasks();
 	const task = await core.getTaskWithSubtasks(taskId, localTasks, { includeCrossBranch: false });
 	if (!task) {
 		console.error(`Task ${taskId} not found. ${LOCAL_TASK_LOOKUP_HINT}`);
@@ -180,9 +180,6 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 		} catch (error) {
 			console.error(error instanceof Error ? error.message : String(error));
 			process.exitCode = 1;
-		} finally {
-			core.disposeSearchService();
-			core.disposeContentStore();
 		}
 	}
 
@@ -376,7 +373,11 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 			const core = new Core(cwd);
 			const taskView = await loadLocalTaskView(core, taskId);
 			if (!taskView || printTaskViewOutput(taskView.detail, cwd, outputMode)) return;
-			await viewTaskEnhanced(taskView.task, { startWithDetailFocus: true, core, tasks: taskView.tasks });
+			await new TaskViewerController(taskView.task, {
+				startWithDetailFocus: true,
+				core,
+				tasks: taskView.tasks,
+			}).run();
 		});
 
 	for (const [name, description, action] of [
@@ -478,7 +479,12 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 			const core = new Core(cwd);
 			const taskView = await loadLocalTaskView(core, taskId);
 			if (!taskView || printTaskViewOutput(taskView.detail, cwd, outputMode)) return;
-			const { runUnifiedView } = await import("../../../ui/unified-view.ts");
-			await runUnifiedView({ core, initialView: "task-detail", selectedTask: taskView.task, tasks: taskView.tasks });
+			const { UnifiedViewController } = await import("../../../ui/unified-view.ts");
+			await new UnifiedViewController({
+				core,
+				initialView: "task-detail",
+				selectedTask: taskView.task,
+				tasks: taskView.tasks,
+			}).run();
 		});
 }

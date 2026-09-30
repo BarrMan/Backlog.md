@@ -14,7 +14,28 @@ const TASK_STRING_FIELDS = [
 	"implementationNotes",
 	"finalSummary",
 ] as const;
-const TASK_ARRAY_FIELDS = ["labels", "assignee", "dependencies", "references", "modifiedFiles"] as const;
+const TASK_ARRAY_FIELDS = [
+	"labels",
+	"addLabels",
+	"removeLabels",
+	"assignee",
+	"dependencies",
+	"addDependencies",
+	"removeDependencies",
+	"references",
+	"addReferences",
+	"removeReferences",
+	"documentation",
+	"addDocumentation",
+	"removeDocumentation",
+	"modifiedFiles",
+	"appendImplementationPlan",
+	"appendImplementationNotes",
+	"appendFinalSummary",
+	"removeAcceptanceCriteria",
+	"checkAcceptanceCriteria",
+	"uncheckAcceptanceCriteria",
+] as const;
 const TASK_INDEX_FIELDS = [
 	["definitionOfDoneRemove", "removeDefinitionOfDone"],
 	["definitionOfDoneCheck", "checkDefinitionOfDone"],
@@ -56,10 +77,21 @@ function copyTaskComments(input: TaskUpdateInput, body: Record<string, unknown>)
 function copyTaskChecklistFields(input: TaskUpdateInput, body: Record<string, unknown>): void {
 	if (Array.isArray(body.acceptanceCriteriaItems))
 		input.acceptanceCriteria = normalizeAcceptanceCriteriaItems(body.acceptanceCriteriaItems);
+	else if (Array.isArray(body.acceptanceCriteria))
+		input.acceptanceCriteria = body.acceptanceCriteria as TaskUpdateInput["acceptanceCriteria"];
+	if (Array.isArray(body.addAcceptanceCriteria)) input.addAcceptanceCriteria = body.addAcceptanceCriteria as never;
 	if (Array.isArray(body.definitionOfDoneAdd))
 		input.addDefinitionOfDone = body.definitionOfDoneAdd
 			.map((item) => ({ text: String(item ?? "").trim(), checked: false }))
 			.filter((item) => item.text);
+}
+
+function copyTaskUpdateFlags(input: TaskUpdateInput, body: Record<string, unknown>): void {
+	for (const field of ["clearImplementationPlan", "clearImplementationNotes", "clearFinalSummary"] as const)
+		if (typeof body[field] === "boolean") input[field] = body[field];
+	if (typeof body.rawContent === "string") input.rawContent = body.rawContent;
+	if (body.agentConfiguration === null || (body.agentConfiguration && typeof body.agentConfiguration === "object"))
+		input.agentConfiguration = body.agentConfiguration as TaskUpdateInput["agentConfiguration"];
 }
 
 export function parseDueDate(value: unknown, clearable: boolean): ValidationResult<string | null | undefined> {
@@ -98,6 +130,7 @@ export function parseTaskUpdate(body: unknown): ValidationResult<TaskUpdateInput
 	copyArrayFields(input, updates);
 	copyTaskComments(input, updates);
 	copyTaskChecklistFields(input, updates);
+	copyTaskUpdateFlags(input, updates);
 	return { value: input };
 }
 

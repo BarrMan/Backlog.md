@@ -4,7 +4,7 @@ import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import type { AgentSession, TaskSessions } from "../agent-workspace/types.ts";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { runAgentWorkspace } from "../ui/agent-workspace.ts";
+import { AgentWorkspaceController } from "../ui/agent-workspace.ts";
 import type { TaskComposerOptions } from "../ui/components/task-composer.ts";
 import { createScreen } from "../ui/tui.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
@@ -94,7 +94,7 @@ describe("agent workspace navigation ownership", () => {
 			const core = new Core(directory);
 			await initializeTestProject(core, "Workspace attach lifecycle");
 			await core.createTaskFromInput({ title: "Existing task", status: "To Do" }, false);
-			const workspace = runAgentWorkspace(core, {
+			const workspace = new AgentWorkspaceController(core, {
 				screen: screen as never,
 				service: {
 					list: async () => sessions,
@@ -110,7 +110,7 @@ describe("agent workspace navigation ownership", () => {
 						});
 					},
 				} as unknown as AgentSessionService,
-			});
+			}).run();
 			void workspace.then(() => {
 				resolved = true;
 			});
@@ -181,7 +181,7 @@ describe("agent workspace navigation ownership", () => {
 						resolve(created);
 					};
 				});
-			const workspace = runAgentWorkspace(core, { screen: screen as never, service, taskComposer });
+			const workspace = new AgentWorkspaceController(core, { screen: screen as never, service, taskComposer }).run();
 			await waitUntil(() => {
 				const tree = screen.children.find((widget) => widget.options?.label === " Tasks ");
 				return tree?.selected === 1;
@@ -238,7 +238,7 @@ describe("agent workspace navigation ownership", () => {
 			await mkdir(directory, { recursive: true });
 			const core = new Core(directory);
 			await initializeTestProject(core, "Workspace empty create");
-			const workspace = runAgentWorkspace(core, {
+			const workspace = new AgentWorkspaceController(core, {
 				screen: screen as never,
 				service: {
 					list: async (taskId: string) => ({ taskId, sessions: [] }),
@@ -248,7 +248,7 @@ describe("agent workspace navigation ownership", () => {
 					composer += 1;
 					return null;
 				},
-			});
+			}).run();
 			await waitUntil(
 				() =>
 					content(screen.children.find((widget) => widget.options?.label === " Details ")).includes("No tasks match"),
@@ -283,7 +283,7 @@ describe("agent workspace navigation ownership", () => {
 				sessions: [session("first"), session("second")],
 			};
 			const service = { list: async () => sessions, preview: async () => "" } as unknown as AgentSessionService;
-			const workspace = runAgentWorkspace(core, { screen: screen as never, service });
+			const workspace = new AgentWorkspaceController(core, { screen: screen as never, service }).run();
 			await waitUntil(() => {
 				const tree = screen.children.find((widget) => widget.options?.label === " Tasks ");
 				const details = screen.children.find((widget) => widget.options?.label === " Details ");
@@ -345,7 +345,7 @@ describe("agent workspace navigation ownership", () => {
 					calls.resetSize += 1;
 				},
 			} as unknown as AgentSessionService;
-			const workspace = runAgentWorkspace(core, { screen: screen as never, service });
+			const workspace = new AgentWorkspaceController(core, { screen: screen as never, service }).run();
 			await waitUntil(() => {
 				const tree = screen.children.find((widget) => widget.options?.label === " Tasks ");
 				const details = screen.children.find((widget) => widget.options?.label === " Details ");
@@ -425,7 +425,7 @@ describe("agent workspace navigation ownership", () => {
 					handoffs += 1;
 				},
 			} as unknown as AgentSessionService;
-			const workspace = runAgentWorkspace(core, { screen: screen as never, service });
+			const workspace = new AgentWorkspaceController(core, { screen: screen as never, service }).run();
 			await waitUntil(
 				() =>
 					content(screen.children.find((widget) => widget.options?.label === " Details ")).includes(

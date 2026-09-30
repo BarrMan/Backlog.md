@@ -126,14 +126,14 @@ describe("AgentSessionService", () => {
 		expect(state.handoff?.status).toBe("completed");
 		const documentId = (state as { handoffDocumentId?: string }).handoffDocumentId;
 		const secondRequest = await service.requestHandoff("task-1");
-		expect(await Bun.file(join(core.fs.docsDir, secondRequest.documentPath)).exists()).toBe(false);
+		expect(await Bun.file(join(core.filesystem.docsDir, secondRequest.documentPath)).exists()).toBe(false);
 		expect((await core.loadTaskById("task-1", { includeCrossBranch: false }))?.documentation).toContain(documentId);
 		await service.completeHandoff("task-1", secondRequest.id, "Second handoff.");
 		const secondState = await service.list("task-1");
 		expect((secondState as { handoffDocumentId?: string }).handoffDocumentId).toBe(documentId);
 		const document = await core.getDocument(documentId ?? "");
 		expect(document?.path).toBeDefined();
-		expect(await Bun.file(join(core.fs.docsDir, document?.path ?? "")).exists()).toBe(true);
+		expect(await Bun.file(join(core.filesystem.docsDir, document?.path ?? "")).exists()).toBe(true);
 	});
 
 	it("reconstructs a failed replacement handoff without duplicate active sessions", async () => {

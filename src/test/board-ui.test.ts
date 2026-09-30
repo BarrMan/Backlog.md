@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Task } from "../types/index.ts";
-import type { ColumnData } from "../ui/board.ts";
-import { hasMoveBlockingBoardFilters, shouldRebuildColumns } from "../ui/board.ts";
+import type { ColumnData } from "../ui/board/column-policy.ts";
+import { shouldRebuildColumns } from "../ui/board/column-policy.ts";
+import { hasMoveBlockingBoardFilters } from "../ui/board/filter-policy.ts";
 
 // Helper to create a minimal valid Task for testing
 const createTestTask = (id: string, title: string, status: string): Task => ({

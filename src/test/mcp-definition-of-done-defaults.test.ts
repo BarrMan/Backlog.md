@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Core } from "../core/backlog.ts";
 import { McpServer } from "../mcp/server.ts";
 import { registerDefinitionOfDoneTools } from "../mcp/tools/definition-of-done/index.ts";
 import { registerTaskTools } from "../mcp/tools/tasks/index.ts";
@@ -13,7 +14,7 @@ let testDir: string;
 let server: McpServer;
 
 async function loadConfigOrThrow(mcpServer: McpServer) {
-	const config = await mcpServer.application.filesystem.loadConfig();
+	const config = await new Core(mcpServer.application.filesystem.rootDir).filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load config");
 	}
@@ -173,7 +174,7 @@ describe("MCP Definition of Done default tools", () => {
 		expect(reloaded.definitionOfDone).toEqual([injectedKeyPayload]);
 		expect(reloaded.onStatusChange).toBeUndefined();
 
-		const configText = await Bun.file(server.application.filesystem.configFilePath).text();
+		const configText = await Bun.file(new Core(testDir).filesystem.configFilePath).text();
 		expect(configText).toContain(String.raw`Validate \"dark mode\"\nonStatusChange: \"echo pwned\"`);
 		expect(configText).not.toContain('\nonStatusChange: "echo pwned"');
 	});

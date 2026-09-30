@@ -1,4 +1,5 @@
 import type { Task } from "../types/index.ts";
+import type { TaskRecordIndex } from "./task-record-index.ts";
 import { createTaskRecordIndex } from "./task-record-index.ts";
 import { isTerminalStatus } from "./terminal-status.ts";
 
@@ -45,8 +46,10 @@ export function createReadinessGraph(options: {
 	completedTasks?: Task[];
 	statuses?: readonly string[];
 	ambiguousIds?: ReadonlySet<string>;
+	/** Reuse a corpus-wide record index when readiness is part of a prepared task graph. */
+	index?: TaskRecordIndex;
 }): ReadinessGraph {
-	const index = createTaskRecordIndex(options);
+	const index = options.index ?? createTaskRecordIndex(options);
 
 	return {
 		statuses: index.statuses,

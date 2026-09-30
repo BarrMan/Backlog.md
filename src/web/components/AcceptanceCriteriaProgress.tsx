@@ -1,7 +1,7 @@
-import type { Task } from "../../types";
+import type { Task, TaskSummary } from "../../types";
 
 interface AcceptanceCriteriaProgressProps {
-	task: Pick<Task, "status" | "acceptanceCriteriaItems">;
+	task: Pick<Task, "status" | "acceptanceCriteriaItems"> | TaskSummary;
 	density: "card" | "list";
 	className?: string;
 }
@@ -9,8 +9,13 @@ interface AcceptanceCriteriaProgressProps {
 const normalizeStatus = (status: string) => status.trim().toLowerCase().replace(/\s+/g, "");
 
 export function getAcceptanceCriteriaProgressCounts(
-	task: Pick<Task, "status" | "acceptanceCriteriaItems">,
+	task: Pick<Task, "status" | "acceptanceCriteriaItems"> | TaskSummary,
 ): { checked: number; total: number } | null {
+	if ("acceptanceCriteriaCount" in task) {
+		return task.acceptanceCriteriaCount > 0
+			? { checked: task.checkedAcceptanceCriteriaCount, total: task.acceptanceCriteriaCount }
+			: null;
+	}
 	const criteria = task.acceptanceCriteriaItems ?? [];
 	if (normalizeStatus(task.status) !== "inprogress" || criteria.length === 0) return null;
 

@@ -236,7 +236,7 @@ agentsCmd
 			if (clack.isCancel(selected)) return void clack.log.info("Agent instruction update cancelled.");
 			const files: AgentInstructionFile[] = Array.isArray(selected) ? (selected as AgentInstructionFile[]) : [];
 			if (files.length > 0) {
-				await addAgentInstructions(cwd, project.core.gitOps, files, project.config.autoCommit ?? false);
+				await addAgentInstructions(cwd, project.core.git, files, project.config.autoCommit ?? false);
 				console.log(`Updated ${files.length} agent instruction file(s): ${files.join(", ")}`);
 			} else console.log("No files selected for update.");
 		} catch (error) {

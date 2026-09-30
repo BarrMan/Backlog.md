@@ -19,7 +19,7 @@ import {
 	normalizeTaskId,
 	normalizeTaskIdentity,
 } from "../utils/task-path.ts";
-import { normalizeTaskLifecyclePath } from "./task-identity-index.ts";
+import { normalizeTaskLifecyclePath, type TaskIdentityIndex } from "./task-identity-index.ts";
 
 /** Default prefix for tasks */
 const DEFAULT_TASK_PREFIX = "task";
@@ -47,6 +47,16 @@ export interface BranchTaskLoadResult {
 	complete: boolean;
 }
 
+/** One immutable task read shared by persistent query and repair operations. */
+export interface TaskCorpusSnapshot {
+	tasks: Task[];
+	activeTasks: Task[];
+	completedTasks: Task[];
+	identityIndex?: TaskIdentityIndex;
+	branchStateEntries?: BranchTaskStateEntry[];
+	config?: BacklogConfig | null;
+}
+
 function extractConfiguredTaskId(filePath: string, prefix: string): string | null {
 	const filename = filePath.slice(filePath.lastIndexOf("/") + 1);
 	const taskId = extractTaskIdFromFilename(filename);
@@ -71,15 +81,6 @@ function getTaskTypeFromPath(path: string, backlogDir: string): TaskDirectoryTyp
 	}
 
 	return null;
-}
-
-/**
- * Get the appropriate loading message based on remote operations configuration
- */
-export function getTaskLoadingMessage(config: BacklogConfig | null): string {
-	return config?.remoteOperations === false
-		? "Loading tasks from local branches..."
-		: "Loading tasks from local and remote branches...";
 }
 
 interface RemoteIndexEntry {
@@ -259,6 +260,8 @@ async function hydrateTasks(winners: HydrationCandidate[], options: HydrationOpt
 				if (task) {
 					task.source = options.source;
 					task.branch = options.source === "remote" ? w.ref.replace(/^origin\//, "") : w.ref;
+					task.filePath = w.path;
+					task.contentRef = w.commit;
 					if (w.stateEntry) w.stateEntry.task = task;
 				}
 			} catch (error) {
@@ -353,6 +356,10 @@ export class BranchTaskLoader {
 	clear(): void {
 		this.commitIndexCache.clear();
 		this.taskCache.clear();
+	}
+
+	async loadPersistentTask(commit: string, path: string): Promise<Task | null> {
+		return normalizeTaskIdentity(parseTask(await this.git.showFile(commit, path)));
 	}
 
 	retainSnapshot(

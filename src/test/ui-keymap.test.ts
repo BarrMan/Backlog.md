@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
-import { runAgentWorkspace } from "../ui/agent-workspace.ts";
-import { renderBoardTui } from "../ui/board.ts";
+import { AgentWorkspaceController } from "../ui/agent-workspace.ts";
+import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { getBoardFooterContent } from "../ui/footer-content.ts";
 import { formatKeymap, keymapKeys, matchesKey, uiKeymap } from "../ui/keymap.ts";
 import { createScreen } from "../ui/tui.ts";
@@ -65,7 +65,7 @@ describe("TUI keymap", () => {
 		let workspaceOpens = 0;
 		try {
 			keymap.board.workspace = ["x"];
-			board = renderBoardTui(
+			board = new TUIRenderer(
 				[
 					{
 						id: "BACK-1",
@@ -87,7 +87,7 @@ describe("TUI keymap", () => {
 						workspaceOpens += 1;
 					},
 				},
-			);
+			).run();
 			press(screen, "S-b");
 			expect(workspaceOpens).toBe(0);
 			press(screen, "x", "x");
@@ -120,7 +120,7 @@ describe("TUI keymap", () => {
 			const core = new Core(directory);
 			await initializeTestProject(core, "Keymap workspace");
 			keymap.workspace.newTask = ["x"];
-			workspace = runAgentWorkspace(core, {
+			workspace = new AgentWorkspaceController(core, {
 				screen,
 				service: {
 					list: async (taskId: string) => ({ taskId, sessions: [] }),
@@ -130,7 +130,7 @@ describe("TUI keymap", () => {
 					composerCalls += 1;
 					return null;
 				},
-			});
+			}).run();
 			await waitUntil(() => screen.children.length > 0);
 			press(screen, "n", "n");
 			expect(composerCalls).toBe(0);

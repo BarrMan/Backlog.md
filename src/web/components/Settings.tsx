@@ -1,4 +1,7 @@
+import { useState } from "react";
 import { useSettingsForm } from "../hooks/use-settings-form";
+import { apiClient } from "../lib/api";
+import { taskDetailCacheCapacity } from "../lib/task-detail-cache";
 import { SuccessToast } from "./SuccessToast";
 import {
 	AdvancedSettings,
@@ -9,6 +12,7 @@ import {
 } from "./settings-sections";
 
 const Settings = () => {
+	const [taskDetailCacheSize, setTaskDetailCacheSize] = useState(() => taskDetailCacheCapacity());
 	const {
 		config,
 		loading,
@@ -59,7 +63,16 @@ const Settings = () => {
 					<ProjectSettings config={config} errors={errors} change={change} />
 					<WorkflowSettings config={config} statuses={statuses} change={change} />
 					<DefinitionOfDoneSettings config={config} change={change} />
-					<WebUiSettings config={config} errors={errors} change={change} />
+					<WebUiSettings
+						config={config}
+						errors={errors}
+						change={change}
+						taskDetailCacheSize={taskDetailCacheSize}
+						onTaskDetailCacheSizeChange={(size) => {
+							apiClient.setTaskDetailCacheCapacity(size);
+							setTaskDetailCacheSize(size);
+						}}
+					/>
 					<AdvancedSettings config={config} change={change} />
 
 					{/* Save/Cancel Buttons */}

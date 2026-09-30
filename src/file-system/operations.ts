@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { mkdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES, FALLBACK_STATUS } from "../constants/index.ts";
@@ -78,6 +79,11 @@ export type ContentMutation =
 
 export type ContentMutationListener = (mutation: ContentMutation) => void | Promise<void>;
 
+export type FileSystemSelection = {
+	backlogDirectory: string;
+	configLocation: BacklogConfigSource;
+};
+
 const CREATE_LOCK_ERROR_CODE = "ECREATELOCK";
 export const CREATE_LOCK_ERROR_MESSAGE =
 	"Another task create/promote/demote operation is already in progress. Please try again.";
@@ -152,6 +158,7 @@ export class FileSystem {
 	private resolvedBacklogDirName: string;
 	private resolvedConfigPath: string;
 	private configSource: BacklogConfigSource;
+	private resolutionFrozen = false;
 	private readonly projectRoot: string;
 	private cachedConfig: BacklogConfig | null = null;
 	private cachedConfigSnapshot: { path: string; content: string } | null = null;
@@ -168,13 +175,23 @@ export class FileSystem {
 	}
 	private readonly milestones: MilestoneStore;
 
-	constructor(projectRoot: string) {
+	constructor(projectRoot: string, selection?: FileSystemSelection) {
 		this.projectRoot = projectRoot;
 		const resolution = resolveBacklogDirectory(projectRoot);
-		this.resolvedBacklogDirName = resolution.backlogDir ?? DEFAULT_DIRECTORIES.BACKLOG;
-		this.resolvedBacklogDir = resolution.backlogPath ?? join(projectRoot, DEFAULT_DIRECTORIES.BACKLOG);
-		this.resolvedConfigPath = resolution.configPath ?? join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG);
-		this.configSource = resolution.configSource ?? "folder";
+		const backlogDirectory = selection?.backlogDirectory ?? resolution.backlogDir ?? DEFAULT_DIRECTORIES.BACKLOG;
+		const normalizedSelection = normalizeProjectBacklogDirectory(backlogDirectory);
+		if (!normalizedSelection) throw new Error("Backlog directory must be a project-relative path.");
+		this.resolvedBacklogDirName = normalizedSelection;
+		this.resolvedBacklogDir = selection
+			? join(projectRoot, normalizedSelection)
+			: (resolution.backlogPath ?? join(projectRoot, DEFAULT_DIRECTORIES.BACKLOG));
+		this.configSource = selection?.configLocation ?? resolution.configSource ?? "folder";
+		this.resolvedConfigPath =
+			this.configSource === "root"
+				? join(projectRoot, DEFAULT_FILES.ROOT_CONFIG)
+				: selection
+					? join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG)
+					: (resolution.configPath ?? join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG));
 		this.taskRepository = new TaskRepository({ config: async () => await this.loadConfig() });
 		this.parsedTaskFiles = this.taskRepository.parsedFiles;
 		this.taskFileReadGenerations = this.taskRepository.fileReadGenerations;
@@ -239,7 +256,22 @@ export class FileSystem {
 	invalidateConfigCache(): void {
 		this.cachedConfig = null;
 		this.cachedConfigSnapshot = null;
-		this.refreshConfigResolution();
+		if (!this.resolutionFrozen) this.refreshConfigResolution();
+	}
+
+	/** Pin this instance to its current canonical storage targets for its lifetime. */
+	freezeResolution(): void {
+		const canonical = (path: string): string => {
+			try {
+				return realpathSync(path);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				return join(canonical(dirname(path)), basename(path));
+			}
+		};
+		this.resolvedBacklogDir = canonical(this.resolvedBacklogDir);
+		this.resolvedConfigPath = canonical(this.resolvedConfigPath);
+		this.resolutionFrozen = true;
 	}
 
 	getCachedConfigContent(sourceConfigPath: string): string | null {
@@ -258,7 +290,7 @@ export class FileSystem {
 			if (!resolution.backlogDir || !resolution.backlogPath || resolution.configSource !== "root") {
 				return false;
 			}
-			this.applyConfigResolution(resolution);
+			if (!this.resolutionFrozen) this.applyConfigResolution(resolution);
 		}
 		this.cachedConfig = config;
 		this.cachedConfigSnapshot = { path: sourceConfigPath, content };
@@ -281,35 +313,22 @@ export class FileSystem {
 		this.configSource = resolution.configSource ?? "folder";
 	}
 
-	setBacklogDirectory(backlogDir: string): void {
-		const normalized = normalizeProjectBacklogDirectory(backlogDir);
-		if (!normalized) {
-			throw new Error("Backlog directory must be a project-relative path.");
-		}
-		const nextBacklogDir = join(this.projectRoot, normalized);
-		if (resolve(nextBacklogDir) !== resolve(this.resolvedBacklogDir)) {
-			this.invalidateTaskParseCache();
-		}
-		this.resolvedBacklogDirName = normalized;
-		this.resolvedBacklogDir = nextBacklogDir;
-		if (this.configSource === "folder") {
-			this.resolvedConfigPath = join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG);
-		}
-	}
-
 	private invalidateTaskParseCache(): void {
 		this.taskRepository.invalidate();
 	}
 
-	setConfigLocation(configSource: BacklogConfigSource): void {
-		this.configSource = configSource;
-		this.resolvedConfigPath =
-			configSource === "root"
-				? join(this.projectRoot, DEFAULT_FILES.ROOT_CONFIG)
-				: join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG);
-	}
-
 	resolveBacklogDirectoryInfo() {
+		if (this.resolutionFrozen)
+			return {
+				projectRoot: this.projectRoot,
+				backlogDir: this.resolvedBacklogDirName,
+				backlogPath: this.resolvedBacklogDir,
+				source: null,
+				configPath: this.resolvedConfigPath,
+				configSource: this.configSource,
+				rootConfigPath: join(this.projectRoot, DEFAULT_FILES.ROOT_CONFIG),
+				rootConfigExists: this.configSource === "root",
+			};
 		return resolveBacklogDirectory(this.projectRoot);
 	}
 

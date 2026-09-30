@@ -1,4 +1,4 @@
-import type { Task } from "../../types";
+import type { Task, TaskSummary } from "../../types";
 import { formatPriorityLabel } from "../../utils/priority-config";
 import AcceptanceCriteriaProgress, { getAcceptanceCriteriaProgressCounts } from "./AcceptanceCriteriaProgress";
 import ProjectBadge from "./ProjectBadge";
@@ -6,7 +6,7 @@ import StoredDate from "./StoredDate";
 import TaskTypeBadge from "./TaskTypeBadge";
 
 type TaskCardContentProps = {
-	task: Task;
+	task: Task | TaskSummary;
 	isFromOtherBranch: boolean;
 	availableTypes?: string[];
 	availableProjects?: string[];

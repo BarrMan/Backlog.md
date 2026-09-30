@@ -3,7 +3,6 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import type { ContentStore } from "../core/content-store.ts";
 import { parseTask } from "../markdown/parser.ts";
 import { getTestCliPath } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
@@ -27,14 +26,6 @@ ${dependencies}
 
 Keep this body, including its trailing newline.
 `;
-}
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-	let resolve = () => {};
-	const promise = new Promise<void>((accept) => {
-		resolve = accept;
-	});
-	return { promise, resolve };
 }
 
 describe("task dependency structure", () => {
@@ -67,7 +58,6 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 	let testDir: string;
 	let core: Core;
 	let taskPath: string;
-	let store: ContentStore | undefined;
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("test-malformed-dependencies");
@@ -78,8 +68,6 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 	});
 
 	afterEach(async () => {
-		store?.dispose();
-		store = undefined;
 		await safeCleanup(testDir);
 	});
 
@@ -106,7 +94,6 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 		true,
 	])("shared mutation rejects malformed source with cross-branch reads=%s", async (includeCrossBranch) => {
 		await Bun.write(taskPath, taskMarkdown("dependencies: [TASK-1]"));
-		store = await core.getContentStore();
 		expect((await core.getTask("TASK-2"))?.title).toBe("dependent");
 		const original = taskMarkdown(malformedDependencies[0][1]);
 		await Bun.write(taskPath, original);
@@ -119,7 +106,6 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 
 	it("refuses to save a stale task after the source becomes malformed", async () => {
 		await Bun.write(taskPath, taskMarkdown("dependencies: [TASK-1]"));
-		store = await core.getContentStore();
 		const stale = await core.getTask("TASK-2");
 		expect(stale).not.toBeNull();
 		if (!stale) throw new Error("Expected the initial task");
@@ -142,43 +128,10 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 		await expect(core.loadTaskById("TASK-2", { includeCrossBranch: false })).rejects.toThrow(
 			"Invalid dependencies in task TASK-2",
 		);
-		store = await core.getContentStore();
 		await expect(core.getTask("TASK-2")).rejects.toThrow("Invalid dependencies in task TASK-2");
 		await core.updateTaskFromInput("TASK-1", { title: "Healthy edit" }, false, { includeCrossBranch: false });
 		expect((await core.filesystem.loadTask("TASK-1"))?.title).toBe("Healthy edit");
 		expect(await Bun.file(taskPath).text()).toBe(original);
-	});
-
-	it.each(["missing", "malformed"])("retries a project switch while diagnosing a %s task", async (source) => {
-		if (source === "malformed") await Bun.write(taskPath, taskMarkdown(malformedDependencies[0][1]));
-		const nextRoot = join(testDir, "next-project");
-		const setup = new Core(nextRoot);
-		await initializeFilesystemTestProject(setup, "Next project");
-		await Bun.write(
-			join(setup.filesystem.tasksDir, "task-2 - current.md"),
-			taskMarkdown("dependencies: []").replace("title: dependent", "title: Current project task"),
-		);
-		store = await core.getContentStore();
-		const oldFilesystem = core.filesystem;
-		const loadOldTask = oldFilesystem.loadTask.bind(oldFilesystem);
-		const lookupStarted = deferred();
-		const lookupGate = deferred();
-		oldFilesystem.loadTask = async (id) => {
-			lookupStarted.resolve();
-			await lookupGate.promise;
-			return await loadOldTask(id);
-		};
-
-		try {
-			const reading = core.getTask("TASK-2", { refreshCrossBranch: false });
-			await lookupStarted.promise;
-			core.reinitializeProjectRoot(nextRoot);
-			lookupGate.resolve();
-
-			expect((await reading)?.title).toBe("Current project task");
-		} finally {
-			core.disposeContentStore();
-		}
 	});
 
 	it("allows unrelated CLI edits without changing valid dependency values", async () => {

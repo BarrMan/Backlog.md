@@ -538,7 +538,7 @@ describe("Enhanced init command", () => {
 
 		const configExists = await Bun.file(join(tmpDir, ".backlog", "config.yml")).exists();
 		expect(configExists).toBe(true);
-		expect(core.filesystem.backlogDirName).toBe(".backlog");
+		expect(new Core(tmpDir).filesystem.backlogDirName).toBe(".backlog");
 	});
 
 	test("initializeProject should honor .backlog source when backlogDirectory is omitted", async () => {
@@ -572,7 +572,7 @@ describe("Enhanced init command", () => {
 
 		expect(configExists).toBe(true);
 		expect(rootConfig).toContain('backlog_directory: "planning/backlog-data"');
-		expect(core.filesystem.backlogDirName).toBe("planning/backlog-data");
+		expect(freshCore.filesystem.backlogDirName).toBe("planning/backlog-data");
 		expect(freshConfig?.projectName).toBe("Custom Backlog Init");
 		expect(freshCore.filesystem.backlogDirName).toBe("planning/backlog-data");
 	});

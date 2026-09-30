@@ -13,13 +13,13 @@ export async function runTaskListProjectView(
 	options: OptionValues,
 ): Promise<void> {
 	const filter = createProjectViewFilter(request, options);
-	const { runUnifiedView } = await import("../ui/unified-view.ts");
+	const { UnifiedViewController } = await import("../ui/unified-view.ts");
 	const loaderFilters: TaskListFilter = {};
 	if (options.assignee) loaderFilters.assignee = options.assignee;
 	if (options.unassigned) loaderFilters.unassigned = true;
 	if (request.parentId) loaderFilters.parentTaskId = request.parentId;
 	const prefiltersDisplayList = Object.keys(loaderFilters).length > 0;
-	await runUnifiedView({
+	await new UnifiedViewController({
 		core,
 		initialView: "task-list",
 		tasksLoader: async (updateProgress) => {
@@ -43,5 +43,5 @@ export async function runTaskListProjectView(
 			};
 		},
 		filter,
-	});
+	}).run();
 }

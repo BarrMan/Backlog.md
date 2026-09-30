@@ -11,6 +11,7 @@ import {
 	DEFAULT_STATUSES,
 	FALLBACK_STATUS,
 } from "../constants/index.ts";
+import { FileSystem } from "../file-system/operations.ts";
 import type { BacklogConfig } from "../types/index.ts";
 import { normalizeProjectBacklogDirectory } from "../utils/backlog-directory.ts";
 import {
@@ -245,11 +246,9 @@ export async function initializeProjectFiles(
 		return;
 	}
 	const directories = resolveProjectDirectories(options);
-	core.filesystem.setBacklogDirectory(directories.backlogDirectory);
-	core.filesystem.setConfigLocation(directories.configLocation);
-	await core.filesystem.ensureBacklogStructure();
-	await core.filesystem.saveConfig(config);
-	await core.ensureConfigLoaded();
+	const filesystem = new FileSystem(core.filesystem.rootDir, directories);
+	await filesystem.ensureBacklogStructure();
+	await filesystem.saveConfig(config);
 }
 
 async function runMcpClientCommand(client: McpClientSetupKey): Promise<string> {
@@ -307,7 +306,7 @@ async function configureCliIntegration(
 ): Promise<void> {
 	if (options.agentInstructions?.length) {
 		try {
-			const writes = await addAgentInstructions(projectRoot, core.gitOps, options.agentInstructions, config.autoCommit);
+			const writes = await addAgentInstructions(projectRoot, core.git, options.agentInstructions, config.autoCommit);
 			results.agentFiles = formatAgentInstructionResults(writes);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

@@ -5,7 +5,7 @@ import { createAndReportTask } from "../../../commands/task-create.ts";
 import { loadTaskDetail } from "../../../core/task-detail.ts";
 import { formatTaskPlainText } from "../../../formatters/task-plain-text.ts";
 import { Core } from "../../../index.ts";
-import { viewTaskEnhanced } from "../../../ui/task-viewer-with-search.ts";
+import { TaskViewerController } from "../../../ui/task-viewer-with-search.ts";
 import { isAmbiguousIdError } from "../../../utils/entity-id.ts";
 import { addListWindowOptions, type ListWindowOptions } from "../../../utils/list-window.ts";
 import { parseClearableStringList, parseDelimitedStringList } from "../../../utils/task-builders.ts";
@@ -41,7 +41,7 @@ async function viewDraftById(
 			console.log(formatTaskPlainText(await loadTaskDetail(core, draft)));
 			return;
 		}
-		await viewTaskEnhanced(draft, { startWithDetailFocus: true, core });
+		await new TaskViewerController(draft, { startWithDetailFocus: true, core }).run();
 	} catch (error) {
 		if (isAmbiguousIdError(error)) {
 			console.error(error.message);
@@ -90,15 +90,15 @@ export function registerDraftCommands(program: Command, runtime: DraftRuntime): 
 				});
 				return;
 			}
-			const { runUnifiedView } = await import("../../../ui/unified-view.ts");
-			await runUnifiedView({
+			const { UnifiedViewController } = await import("../../../ui/unified-view.ts");
+			await new UnifiedViewController({
 				core,
 				initialView: "task-list",
 				selectedTask: sortedDrafts[0],
 				tasks: sortedDrafts,
 				filter: { filterDescription: "All Drafts" },
 				title: "Drafts",
-			});
+			}).run();
 		});
 
 	draftCmd

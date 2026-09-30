@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { $ } from "bun";
+import { Core } from "../core/backlog.ts";
 import { McpServer } from "../mcp/server.ts";
 import { registerMilestoneTools } from "../mcp/tools/milestones/index.ts";
 import { registerTaskTools } from "../mcp/tools/tasks/index.ts";
@@ -119,12 +120,10 @@ describe("MCP milestone tools", () => {
 		expect((await server.application.filesystem.loadMilestone("m-0"))?.dueDate).toBeUndefined();
 	});
 
-	it("assigns and clears a milestone without blocking the content store", async () => {
+	it("assigns and clears a milestone with fresh Core reads after mutations", async () => {
 		await server.testInterface.callTool({
 			params: { name: "milestone_add", arguments: { name: "Release 1.0" } },
 		});
-		await server.application.getContentStore();
-
 		await server.testInterface.callTool({
 			params: {
 				name: "task_create",
@@ -135,7 +134,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const created = await server.application.getTask("task-1");
+		const created = await new Core(TEST_DIR).getTask("task-1");
 		expect(created?.milestone).toBe("m-0");
 
 		await server.testInterface.callTool({

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from "react";
-import type { Task } from "../../../types";
+import type { Task, TaskSummary } from "../../../types";
 import { getProjectValues } from "../../../utils/project-config";
 import { getTaskTypeValues } from "../../../utils/task-type-config";
 import { AppRoutes } from "../../components/AppRoutes";
@@ -27,8 +27,8 @@ function useAppViewActions(routeDetail: ReturnType<typeof useTaskRouteDetail>) {
 	}, [openCreateModal]);
 
 	const openTaskModal = useCallback(
-		(task: Task) => {
-			openDetailModal(task.id, { record: task });
+		(task: TaskSummary | Task) => {
+			openDetailModal(task.id);
 		},
 		[openDetailModal],
 	);
@@ -41,7 +41,7 @@ function useAppViewActions(routeDetail: ReturnType<typeof useTaskRouteDetail>) {
 	);
 
 	const handleEditTask = useCallback(
-		(task: Task) => {
+		(task: TaskSummary | Task) => {
 			const basePath = location.pathname.startsWith("/board")
 				? "/board"
 				: location.pathname.startsWith("/tasks")

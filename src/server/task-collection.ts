@@ -1,91 +1,82 @@
-import type { Core } from "../core/backlog.ts";
-import { formatValidPriorityValues, resolvePriorityValue } from "../utils/priority-config.ts";
-import { formatValidStatuses, getCanonicalStatuses } from "../utils/status.ts";
-import { isAmbiguousTaskIdError } from "../utils/task-path.ts";
-import { collectDelimitedSearchParams } from "./transport.ts";
+import { type Static, t } from "elysia";
+import type { Core, TaskCollectionFilterInput } from "../core/backlog.ts";
+import type { ProjectTaskGraph } from "../core/project-task-graph.ts";
+import { toTaskSummary } from "../core/task-detail.ts";
+import { filterTaskQueryResults } from "../core/task-query-workflow.ts";
 
-type TaskCollectionQuery = Parameters<Core["queryTasks"]>[0];
-type TaskCollectionServices = { ready(): Promise<void>; wasReady(): boolean };
+const queryValue = () => t.Union([t.String(), t.Array(t.String())]);
 
-async function resolveTaskCollectionQuery(
-	url: URL,
-	core: Core,
-	refreshCrossBranch: boolean,
-): Promise<Response | TaskCollectionQuery> {
-	const config = await core.filesystem.loadConfig();
-	const priorityParam = url.searchParams.get("priority") || undefined;
-	const priority = priorityParam ? resolvePriorityValue(priorityParam, config) : undefined;
-	if (priorityParam && !priority)
-		return Response.json(
-			{ error: `Invalid priority filter. Valid values are: ${formatValidPriorityValues(config)}` },
-			{ status: 400 },
-		);
-	const excluded = collectDelimitedSearchParams(url, [
-		"excludeStatus",
-		"exclude-status",
-		"excludeStatuses",
-		"exclude-statuses",
-	]);
-	let excludeStatus: string[] | undefined;
-	if (excluded.length) {
-		const value = await getCanonicalStatuses(excluded, core);
-		if (value.invalid.length)
-			return Response.json(
-				{
-					error: `Invalid excludeStatus filter: ${value.invalid.join(", ")}. Valid statuses are: ${formatValidStatuses(value.validStatuses)}`,
-				},
-				{ status: 400 },
-			);
-		excludeStatus = value.values.length ? value.values : undefined;
-	}
-	const parent = url.searchParams.get("parent") || undefined;
-	let parentTaskId: string | undefined;
-	if (parent) {
-		try {
-			const value =
-				(await core.getTask(parent, { refreshCrossBranch })) ??
-				(await core.getTask(/^[a-zA-Z]+-/i.test(parent) ? parent : `task-${parent}`, {
-					refreshCrossBranch: false,
-				}));
-			if (!value)
-				return Response.json(
-					{ error: `Parent task ${/^[a-zA-Z]+-/i.test(parent) ? parent : `task-${parent}`} not found` },
-					{ status: 404 },
-				);
-			parentTaskId = value.id;
-		} catch (error) {
-			if (isAmbiguousTaskIdError(error)) return Response.json({ error: error.message }, { status: 409 });
-			throw error;
-		}
-	}
-	const labels = [
-		...url.searchParams.getAll("label"),
-		...url.searchParams.getAll("labels"),
-		...(url.searchParams.get("labels")?.split(",") ?? []),
-	]
-		.map((value) => value.trim())
+function values(value: string | string[]): string[] {
+	return (Array.isArray(value) ? value : [value])
+		.flatMap((item) => item.split(","))
+		.map((item) => item.trim())
 		.filter(Boolean);
-	return {
-		filters: {
-			status: url.searchParams.get("status") || undefined,
-			excludeStatus,
-			assignee: url.searchParams.get("assignee") || undefined,
-			priority,
-			parentTaskId,
-			labels: labels.length ? labels : undefined,
-		},
-		includeCrossBranch: url.searchParams.get("crossBranch") !== "false",
-		refreshCrossBranch: parent ? false : refreshCrossBranch,
-	};
 }
 
-export async function listTaskCollection(
-	request: Request,
-	core: Core,
-	services: TaskCollectionServices,
-): Promise<Response> {
-	const refreshCrossBranch = services.wasReady();
-	await services.ready();
-	const query = await resolveTaskCollectionQuery(new URL(request.url), core, refreshCrossBranch);
-	return query instanceof Response ? query : Response.json(await core.queryTasks(query));
+function first(value: string | string[]): string | undefined {
+	return (Array.isArray(value) ? value[0] : value) || undefined;
+}
+
+const multiValue = () =>
+	t.Optional(
+		t
+			.Transform(queryValue())
+			.Decode(values)
+			.Encode((value) => value),
+	);
+const firstValue = () =>
+	t.Optional(
+		t
+			.Transform(queryValue())
+			.Decode(first)
+			.Encode((value) => value ?? ""),
+	);
+const crossBranchValue = () =>
+	t.Optional(
+		t
+			.Transform(queryValue())
+			.Decode((value) => first(value) !== "false")
+			.Encode((value) => String(value)),
+	);
+
+export const taskCollectionQuery = t.Object(
+	{
+		status: firstValue(),
+		excludeStatus: multiValue(),
+		"exclude-status": multiValue(),
+		excludeStatuses: multiValue(),
+		"exclude-statuses": multiValue(),
+		assignee: firstValue(),
+		priority: firstValue(),
+		label: multiValue(),
+		labels: multiValue(),
+		parent: firstValue(),
+		crossBranch: crossBranchValue(),
+	},
+	{ additionalProperties: true },
+);
+
+type TaskCollectionQuery = Static<typeof taskCollectionQuery>;
+
+export async function listTaskCollection(queryInput: TaskCollectionQuery, core: Core, graph: ProjectTaskGraph) {
+	const filters: TaskCollectionFilterInput = {
+		status: queryInput.status,
+		excludeStatus: [
+			...(queryInput.excludeStatus ?? []),
+			...(queryInput["exclude-status"] ?? []),
+			...(queryInput.excludeStatuses ?? []),
+			...(queryInput["exclude-statuses"] ?? []),
+		],
+		assignee: queryInput.assignee,
+		priority: queryInput.priority,
+		labels: [...(queryInput.label ?? []), ...(queryInput.labels ?? [])],
+	};
+	const resolvedFilters = await core.resolveCollectionFilters(filters);
+	if (queryInput.parent) resolvedFilters.parentTaskId = graph.resolveParentTask(queryInput.parent).id;
+	const tasks = await filterTaskQueryResults(
+		(queryInput.crossBranch ?? true) ? graph.tasks : graph.activeTasks,
+		{ filters: resolvedFilters, includeCrossBranch: queryInput.crossBranch ?? true },
+		core.filesystem,
+	);
+	return tasks.map((task) => toTaskSummary(task as (typeof graph.tasks)[number]));
 }

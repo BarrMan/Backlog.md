@@ -1,11 +1,7 @@
 import type { BrowserLoadingState } from "../utils/browser-loading-state.ts";
 
-const DATA_BROADCAST_DEBOUNCE_MS = 75;
-
 export class WebSocketHub {
 	private sockets = new Set<{ send(message: string): unknown; close(): unknown }>();
-	private timer?: ReturnType<typeof setTimeout>;
-	private scope: "tasks" | "milestones" = "tasks";
 	private state: BrowserLoadingState = { type: "loading", message: null };
 
 	open = (ws: { send(message: string): unknown; close(): unknown }) => {
@@ -25,13 +21,7 @@ export class WebSocketHub {
 	}
 
 	publishData(scope: "tasks" | "milestones" = "tasks"): void {
-		if (scope === "milestones") this.scope = scope;
-		if (this.timer) clearTimeout(this.timer);
-		this.timer = setTimeout(() => {
-			this.timer = undefined;
-			this.broadcast(this.scope === "milestones" ? "milestones-updated" : "tasks-updated");
-			this.scope = "tasks";
-		}, DATA_BROADCAST_DEBOUNCE_MS);
+		this.broadcast(scope === "milestones" ? "milestones-updated" : "tasks-updated");
 	}
 
 	publishConfig(): void {
@@ -39,16 +29,17 @@ export class WebSocketHub {
 	}
 
 	async close(): Promise<void> {
-		if (this.timer) clearTimeout(this.timer);
-		this.timer = undefined;
+		this.disconnectAll();
+		this.state = { type: "loading", message: null };
+	}
+
+	disconnectAll(): void {
 		for (const socket of this.sockets) {
 			try {
 				socket.close();
 			} catch {}
 		}
 		this.sockets.clear();
-		this.scope = "tasks";
-		this.state = { type: "loading", message: null };
 	}
 
 	private broadcast(message: string): void {

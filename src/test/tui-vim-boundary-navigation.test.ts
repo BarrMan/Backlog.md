@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { ListInterface, ScreenInterface } from "neo-neo-bblessed";
 import type { Task } from "../types/index.ts";
-import { renderBoardTui } from "../ui/board.ts";
+import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { openMultiSelectFilterPopup, openSingleSelectFilterPopup } from "../ui/components/filter-popup.ts";
 import { GenericList } from "../ui/components/generic-list.ts";
 import { resolveListBoundaryNavigation } from "../ui/task-viewer-with-search.ts";
@@ -213,9 +213,9 @@ describe("vim keys stay inside board columns at boundaries", () => {
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget;
 		try {
-			const boardPromise = renderBoardTui([task("TASK-1"), task("TASK-2")], ["To Do", "Done"], "horizontal", 20, {
+			const boardPromise = new TUIRenderer([task("TASK-1"), task("TASK-2")], ["To Do", "Done"], "horizontal", 20, {
 				screen,
-			});
+			}).run();
 			await Bun.sleep(20);
 			const focused = () => (screen as unknown as { focused?: BoardWidget }).focused;
 			await run({ screen, focused, selectedRow: () => focused()?.selected });

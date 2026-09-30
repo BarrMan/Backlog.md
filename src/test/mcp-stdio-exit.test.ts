@@ -161,7 +161,6 @@ describe("MCP stdio shutdown", () => {
 			agentInstructions: [],
 			advancedConfig: { autoCommit: false },
 		});
-		await core.disposeContentStore();
 
 		let stderr = "";
 		const transport = new StdioClientTransport({

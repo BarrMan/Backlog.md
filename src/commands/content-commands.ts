@@ -209,17 +209,10 @@ export function registerContentCommands(program: Command, runtime: ContentComman
 			const listOutput = runtime.resolveListOutput(options, docSearchCommand);
 			if (!listOutput) return;
 			const core = await runtime.createCore();
-			const searchService = await core.getSearchService();
-			const contentStore = await core.getContentStore();
-			try {
-				const results = searchService
-					.search({ query: normalizedQuery, limit, types: ["document"] })
-					.filter(isDocumentSearchResult);
-				printListWindow(results, listOutput.listWindow, (items) => printDocumentSearchResults(items, normalizedQuery));
-			} finally {
-				searchService.dispose();
-				contentStore.dispose();
-			}
+			const results = (await core.searchPersistently({ query: normalizedQuery, limit, types: ["document"] })).filter(
+				isDocumentSearchResult,
+			);
+			printListWindow(results, listOutput.listWindow, (items) => printDocumentSearchResults(items, normalizedQuery));
 		});
 	addHelpSchema(docCmd.command("view <docId>"), {
 		reads: "Document metadata and markdown body",

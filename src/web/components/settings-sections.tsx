@@ -212,14 +212,35 @@ export function WebUiSettings({
 	config,
 	errors,
 	change,
+	taskDetailCacheSize,
+	onTaskDetailCacheSizeChange,
 }: {
 	config: BacklogConfig;
 	errors: Record<string, string>;
 	change: ChangeConfig;
+	taskDetailCacheSize: number;
+	onTaskDetailCacheSizeChange: (size: number) => void;
 }) {
 	return (
 		<SettingsSection title="Web UI Settings">
 			<div className="space-y-4">
+				<div>
+					<label htmlFor="taskDetailCacheSize" className={labelClass}>
+						Task detail cache size
+					</label>
+					<input
+						id="taskDetailCacheSize"
+						type="number"
+						min="1"
+						step="1"
+						value={taskDetailCacheSize}
+						onChange={(event) => {
+							const size = Number.parseInt(event.target.value, 10);
+							if (Number.isSafeInteger(size) && size > 0) onTaskDetailCacheSizeChange(size);
+						}}
+						className={inputClass}
+					/>
+				</div>
 				<div>
 					<label htmlFor="defaultPort" className={labelClass}>
 						Default Port

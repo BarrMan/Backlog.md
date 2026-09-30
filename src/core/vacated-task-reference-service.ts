@@ -3,7 +3,6 @@ import type { Task } from "../types/index.ts";
 import { formatStoredDate } from "../utils/date.ts";
 import { withoutVacatedTaskLinks } from "../utils/task-links.ts";
 import { taskIdsEqual } from "../utils/task-path.ts";
-import type { ContentStore } from "./content-store.ts";
 
 type VacatedIdCleanup = { active: Task[]; completed: Task[] };
 
@@ -19,10 +18,7 @@ function removeVacatedLinks(tasks: Task[], taskId: string): Task[] {
 
 /** Owns the locked scan and rewrite required before a task ID can be reused. */
 export class VacatedTaskReferenceService {
-	constructor(
-		private readonly filesystem: FileSystem,
-		private readonly getContentStore: () => ContentStore | undefined,
-	) {}
+	constructor(private readonly filesystem: FileSystem) {}
 
 	private async collect(taskId: string): Promise<VacatedIdCleanup> {
 		const [activeTasks, completedTasks] = await Promise.all([
@@ -63,23 +59,14 @@ export class VacatedTaskReferenceService {
 	async write(cleanup: VacatedIdCleanup): Promise<{ cleanedTaskIds: string[]; filePaths: string[] }> {
 		const filePaths: string[] = [];
 		const updatedDate = formatStoredDate();
-		const writeAll = async () => {
-			for (const task of cleanup.active) {
-				const updated = { ...task, updatedDate };
-				const savedPath = await this.filesystem.saveTask(updated);
-				filePaths.push(savedPath);
-				this.getContentStore()?.upsertTask({ ...updated, filePath: savedPath });
-			}
-			for (const task of cleanup.completed) {
-				const updated = { ...task, updatedDate };
-				const savedPath = await this.filesystem.saveTask(updated);
-				filePaths.push(savedPath);
-				this.getContentStore()?.refreshCompletedTask({ ...updated, filePath: savedPath });
-			}
-		};
-		const store = this.getContentStore();
-		if (store) await store.batchTaskUpdates(writeAll);
-		else await writeAll();
+		for (const task of cleanup.active) {
+			const updated = { ...task, updatedDate };
+			filePaths.push(await this.filesystem.saveTask(updated));
+		}
+		for (const task of cleanup.completed) {
+			const updated = { ...task, updatedDate };
+			filePaths.push(await this.filesystem.saveTask(updated));
+		}
 		return { cleanedTaskIds: cleanupTargets(cleanup).map((task) => task.id), filePaths };
 	}
 }

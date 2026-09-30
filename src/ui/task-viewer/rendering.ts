@@ -1,7 +1,7 @@
 import { stdout as output } from "node:process";
 import type { BoxInterface, LineInterface, ScreenInterface, ScrollableTextInterface } from "neo-neo-bblessed";
 import { box, line, scrollabletext } from "neo-neo-bblessed";
-import { type TaskCorpus, toTaskDetail } from "../../core/task-detail.ts";
+import type { TaskDetail } from "../../core/task-detail.ts";
 import type { Task } from "../../types/index.ts";
 import type { MilestoneFilterValueResolver } from "../../utils/milestone-filter.ts";
 import type { BoundaryNavigationKey } from "../components/generic-list.ts";
@@ -35,7 +35,7 @@ type TaskViewerRenderingOptions = {
 	configuredProjects: string[];
 	resolveMilestoneLabel: MilestoneFilterValueResolver;
 	getSelectedTask: () => Task;
-	resolveDependencyCorpus: () => TaskCorpus;
+	getTaskDetail: (task: Task) => TaskDetail;
 	getNoResultsMessage: () => string | null;
 	getFocus: () => DetailPaneFocus;
 	setFocus: (focus: DetailPaneFocus) => void;
@@ -239,7 +239,7 @@ export class TaskViewerRendering {
 		}
 		const selected = this.options.getSelectedTask();
 		this.options.screen.title = `Task ${selected.id} - ${selected.title} - ${this.options.projectName}`;
-		const detail = generateDetailContent(toTaskDetail(selected, this.options.resolveDependencyCorpus()), {
+		const detail = generateDetailContent(this.options.getTaskDetail(selected), {
 			resolveMilestoneLabel: this.options.resolveMilestoneLabel,
 			dateFormat: this.options.dateFormat,
 			configuredProjects: this.options.configuredProjects,

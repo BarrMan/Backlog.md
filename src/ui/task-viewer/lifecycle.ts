@@ -40,6 +40,6 @@ export async function runTaskLifecycleAction(
 }
 
 async function archiveTask(core: Core, task: Task) {
-	const config = await core.fs.loadConfig();
+	const config = await core.filesystem.loadConfig();
 	return core.archiveTask(task.id, config?.autoCommit ?? false);
 }

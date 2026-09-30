@@ -60,7 +60,7 @@ describe("task ID allocation across git worktrees", () => {
 		const mainTask = await mainCore.createTaskFromInput({ title: "Main task" }, false);
 
 		expect(mainTask.task.id).toBe("TASK-2");
-		expect(await mainCore.fs.loadTask("task-2")).not.toBeNull();
+		expect(await mainCore.filesystem.loadTask("task-2")).not.toBeNull();
 	});
 
 	it("allocates promoted draft task IDs after uncommitted sibling worktree tasks", async () => {
@@ -76,7 +76,7 @@ describe("task ID allocation across git worktrees", () => {
 		const promoted = await mainCore.promoteDraft("draft-1", false);
 
 		expect(promoted).toBe(true);
-		const promotedTask = await mainCore.fs.loadTask("task-2");
+		const promotedTask = await mainCore.filesystem.loadTask("task-2");
 		expect(promotedTask?.title).toBe("Draft to promote");
 	});
 
@@ -92,15 +92,15 @@ describe("task ID allocation across git worktrees", () => {
 		let saveEntries = 0;
 
 		const patchSaveTask = (core: Core) => {
-			const original = core.fs.saveTask.bind(core.fs);
-			core.fs.saveTask = (async (task: Task): Promise<string> => {
+			const original = core.filesystem.saveTask.bind(core.filesystem);
+			core.filesystem.saveTask = (async (task: Task): Promise<string> => {
 				saveEntries += 1;
 				if (task.title === "Alpha") {
 					firstEnteredSave.resolve();
 					await releaseFirstSave.promise;
 				}
 				return await original(task);
-			}) as typeof core.fs.saveTask;
+			}) as typeof core.filesystem.saveTask;
 		};
 
 		patchSaveTask(first);
@@ -125,12 +125,12 @@ describe("task ID allocation across git worktrees", () => {
 		testDir = createUniqueTestDir("worktree-prefix-id");
 		const mainRepo = await createRepository(testDir, "Worktree Prefix ID Test");
 		const mainCore = new Core(mainRepo);
-		const config = await mainCore.fs.loadConfig();
+		const config = await mainCore.filesystem.loadConfig();
 		if (!config) throw new Error("Expected initialized config");
 		config.prefixes = { task: "OPS" };
-		await mainCore.fs.saveConfig(config);
-		const repoRoot = await mainCore.gitOps.stageBacklogDirectory(mainCore.filesystem.backlogDirName);
-		await mainCore.gitOps.commitChanges("test: set custom task prefix", repoRoot);
+		await mainCore.filesystem.saveConfig(config);
+		const repoRoot = await mainCore.git.stageBacklogDirectory(mainCore.filesystem.backlogDirName);
+		await mainCore.git.commitChanges("test: set custom task prefix", repoRoot);
 
 		const sibling = await addWorktree(mainRepo, testDir, "feature-prefix");
 		const siblingCore = new Core(sibling);

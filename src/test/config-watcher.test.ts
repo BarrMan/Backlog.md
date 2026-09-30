@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { watch, writeFileSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import type { BacklogConfig } from "../types/index.ts";
@@ -45,6 +45,20 @@ async function replaceConfigFile(content: string): Promise<void> {
 	await rename(replacementPath, configPath);
 }
 
+function observeConfigEvent(configPath: string): { observed: Promise<void>; stop: () => void } {
+	let resolveObserved: () => void = () => {};
+	const observed = new Promise<void>((resolve) => {
+		resolveObserved = resolve;
+	});
+	const watcher = watch(dirname(configPath), (_eventType, filename) => {
+		if (filename && basename(filename.toString()) === basename(configPath)) {
+			watcher.close();
+			resolveObserved();
+		}
+	});
+	return { observed, stop: () => watcher.close() };
+}
+
 describe("config watcher", () => {
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("config-watcher");
@@ -60,7 +74,6 @@ describe("config watcher", () => {
 			await watcherChild.exited;
 			watcherChild = undefined;
 		}
-		core.disposeContentStore();
 		await safeCleanup(testDir);
 	});
 
@@ -427,7 +440,6 @@ describe("config watcher", () => {
 			expect(nextSnapshot.backlogDirName).toBe("custom/b");
 			expect(nextSnapshot.configPath).toBe(rootConfigPath);
 			expect((await rootFilesystem.loadConfig())?.projectName).toBe("Next valid");
-			await Bun.sleep(250);
 			expect(callbackCount).toBe(2);
 		} finally {
 			configWatcher.stop();
@@ -511,8 +523,10 @@ describe("config watcher", () => {
 			expect((await core.filesystem.loadConfig())?.projectName).toBe("Changed before startup");
 			expect(callbackCount).toBe(1);
 
+			const event = observeConfigEvent(core.filesystem.configFilePath);
 			await replaceConfigFile(changedBeforeStartup);
-			await Bun.sleep(getPlatformTimeout(700));
+			await withTimeout(event.observed, "duplicate startup config event");
+			event.stop();
 			expect(callbackCount).toBe(1);
 		} finally {
 			configWatcher.stop();
@@ -595,7 +609,6 @@ describe("config watcher", () => {
 			await Bun.sleep(getPlatformTimeout(700));
 			releaseFirst();
 			await withTimeout(newestPublished, "newest config publication");
-			await Bun.sleep(getPlatformTimeout(300));
 			expect(publishedNames).toEqual(["First held", "Newest"]);
 			expect((await core.filesystem.loadConfig())?.projectName).toBe("Newest");
 		} finally {
@@ -634,8 +647,10 @@ describe("config watcher", () => {
 			expect(callbackAttempts).toBe(11);
 			expect(cachedProjectNames).toEqual(Array.from({ length: 11 }, () => "Retried publication"));
 
+			const event = observeConfigEvent(core.filesystem.configFilePath);
 			await replaceConfigFile(updatedContent);
-			await Bun.sleep(250);
+			await withTimeout(event.observed, "duplicate retried config event");
+			event.stop();
 			expect(callbackAttempts).toBe(11);
 		} finally {
 			configWatcher.stop();

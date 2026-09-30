@@ -21,7 +21,6 @@ type CreationTransactionDependencies = {
 		generated: GitIndexEntry[],
 		previous: GitIndexEntry[],
 	) => Promise<boolean>;
-	refreshTasks: () => Promise<void>;
 };
 
 export async function readFileIfPresent(filePath: string | null): Promise<Buffer | null> {
@@ -75,6 +74,5 @@ export async function rollbackCreatedTask(
 		: true;
 	const workingPathRestored = await restoreCreatedPath(write, indexRestored);
 	await restorePreviousPath(write);
-	await dependencies.refreshTasks();
 	return { indexRestored, workingPathRestored };
 }

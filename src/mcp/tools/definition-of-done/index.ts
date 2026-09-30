@@ -5,8 +5,6 @@ import { type DefinitionOfDoneDefaultsUpsertArgs, DefinitionOfDoneHandlers } fro
 import { definitionOfDoneDefaultsGetSchema, definitionOfDoneDefaultsUpsertSchema } from "./schemas.ts";
 
 export function registerDefinitionOfDoneTools(server: McpServer): void {
-	const handlers = new DefinitionOfDoneHandlers(server.application);
-
 	const getDefaultsTool: McpToolHandler = createSimpleValidatedTool(
 		{
 			name: "definition_of_done_defaults_get",
@@ -15,7 +13,7 @@ export function registerDefinitionOfDoneTools(server: McpServer): void {
 			annotations: { title: "Get DoD Defaults", readOnlyHint: true, destructiveHint: false },
 		},
 		definitionOfDoneDefaultsGetSchema,
-		async () => handlers.getDefaults(),
+		async () => new DefinitionOfDoneHandlers(server.createOperationCore()).getDefaults(),
 	);
 
 	const upsertDefaultsTool: McpToolHandler = createSimpleValidatedTool(
@@ -26,7 +24,10 @@ export function registerDefinitionOfDoneTools(server: McpServer): void {
 			annotations: { title: "Set DoD Defaults", idempotentHint: true, destructiveHint: false },
 		},
 		definitionOfDoneDefaultsUpsertSchema,
-		async (input) => handlers.upsertDefaults(input as DefinitionOfDoneDefaultsUpsertArgs),
+		async (input) =>
+			new DefinitionOfDoneHandlers(server.createOperationCore()).upsertDefaults(
+				input as DefinitionOfDoneDefaultsUpsertArgs,
+			),
 	);
 
 	server.addTool(getDefaultsTool);

@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { Core } from "../core/backlog.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
-import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let server: BacklogServer | null = null;
@@ -124,5 +124,12 @@ describe("BacklogServer batch move endpoint", () => {
 
 		expect(status).toBe(400);
 		expect(payload.error).toContain("taskIds");
+	});
+
+	it("rejects a non-object JSON task mutation body with the validation error contract", async () => {
+		const { status, payload } = await postMove(["task-1"]);
+
+		expect(status).toBe(400);
+		expect(payload.error).toBeDefined();
 	});
 });

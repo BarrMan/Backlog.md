@@ -1,7 +1,7 @@
 /* Task viewer with search/filter header UI */
 
 import { stdout as output } from "node:process";
-import type { BoxInterface } from "neo-neo-bblessed";
+import type { BoxInterface, ScreenInterface } from "neo-neo-bblessed";
 import { box } from "neo-neo-bblessed";
 import { type Core, createRuntimeCore } from "../../core/backlog.ts";
 import { loadTaskDetail, type TaskCorpus } from "../../core/task-detail.ts";
@@ -15,6 +15,7 @@ import {
 	NO_MILESTONE_FILTER_LABEL,
 	NO_MILESTONE_FILTER_VALUE,
 } from "../../utils/milestone-filter.ts";
+import type { PriorityOption } from "../../utils/priority-config.ts";
 import { canonicalTaskId, taskIdsEqual } from "../../utils/task-id.ts";
 import { attachSubtaskSummaries } from "../../utils/task-subtasks.ts";
 import { openConfirmPopup } from "../components/confirm-popup.ts";
@@ -47,10 +48,7 @@ import { TaskViewerRendering } from "./rendering.ts";
 import { TaskViewerSession } from "./session.ts";
 
 export { createTaskPopup } from "../shared/task-popup.ts";
-export {
-	formatTaskViewerListItem,
-	generateDetailContent,
-} from "./detail-content.ts";
+export { formatTaskViewerListItem, generateDetailContent } from "./detail-content.ts";
 export {
 	type PendingSearchWrap,
 	resolveFilterExitPane,
@@ -63,10 +61,7 @@ export {
 export function buildTaskViewerMilestoneFilterModel(
 	activeMilestones: Milestone[],
 	archivedMilestones: Milestone[] = [],
-): {
-	availableMilestoneTitles: string[];
-	resolveMilestoneLabel: MilestoneFilterValueResolver;
-} {
+): { availableMilestoneTitles: string[]; resolveMilestoneLabel: MilestoneFilterValueResolver } {
 	return {
 		availableMilestoneTitles: activeMilestones.map((milestone) => milestone.title),
 		resolveMilestoneLabel: createMilestoneFilterValueResolver([...activeMilestones, ...archivedMilestones]),
@@ -100,15 +95,6 @@ export function taskViewerEmptyState(filters: TaskViewerFilterModel): { detail: 
 	};
 }
 
-/**
- * Merge the unfiltered readiness snapshot with the live display copies into the corpus the
- * dependency graph and readiness resolve against.
- *
- * Live copies win over the snapshot so status edits made in this session count. The merge works on
- * claimant groups rather than single records: an identity that either side holds more than once
- * keeps every claimant, so the shared record index still reports it ambiguous exactly as the CLI
- * does, instead of this merge quietly electing a winner.
- */
 export function mergeDependencyCorpusTasks(snapshot: Task[], liveTasks: Task[]): Task[] {
 	const groupById = (tasks: Task[]) => {
 		const groups = new Map<string, Task[]>();
@@ -120,459 +106,540 @@ export function mergeDependencyCorpusTasks(snapshot: Task[], liveTasks: Task[]):
 		}
 		return groups;
 	};
-
 	const groups = groupById(snapshot);
 	for (const [key, liveClaimants] of groupById(liveTasks)) {
 		const snapshotClaimants = groups.get(key);
-		// A live copy cannot be attributed to either claimant of a contested identity, so the
-		// snapshot's ambiguity stands until the view reloads.
 		if (snapshotClaimants && snapshotClaimants.length > 1) continue;
 		groups.set(key, liveClaimants);
 	}
 	return [...groups.values()].flat();
 }
 
-/** Display task details with search/filter header UI. */
-export async function viewTaskEnhanced(
-	task: Task,
-	options: {
-		tasks?: Task[];
-		core?: Core;
-		title?: string;
-		filterDescription?: string;
-		searchQuery?: string;
-		statusFilter?: string | string[];
-		excludeStatus?: string[];
-		typeFilter?: string[];
-		projectFilter?: string[];
-		priorityFilter?: string;
-		milestoneFilter?: string;
-		labelFilter?: string[];
+export type TaskViewerOptions = {
+	tasks?: Task[];
+	core?: Core;
+	title?: string;
+	filterDescription?: string;
+	searchQuery?: string;
+	statusFilter?: string | string[];
+	excludeStatus?: string[];
+	typeFilter?: string[];
+	projectFilter?: string[];
+	priorityFilter?: string;
+	milestoneFilter?: string;
+	labelFilter?: string[];
+	labelMatch?: LabelMatchMode;
+	readyFilter?: boolean;
+	readinessTasks?: Task[];
+	limit?: number;
+	startWithDetailFocus?: boolean;
+	startWithSearchFocus?: boolean;
+	startupWarning?: string;
+	viewSwitcher?: import("../view-switcher.ts").ViewSwitcher;
+	subscribeUpdates?: (
+		update: (nextTasks: Task[], nextStatuses: string[], nextLabels: string[], nextSelectedTask?: Task) => void,
+	) => void;
+	onTaskChange?: (task: Task) => void;
+	onTabPress?: () => Promise<void>;
+	onFilterChange?: (filters: {
+		searchQuery: string;
+		statusFilter: string[];
+		excludeStatus: string[];
+		typeFilter: string[];
+		projectFilter: string[];
+		priorityFilter: string;
+		labelFilter: string[];
 		labelMatch?: LabelMatchMode;
-		readyFilter?: boolean;
-		/** Unfiltered corpus for dependency readiness; defaults to the tasks being displayed. */
-		readinessTasks?: Task[];
-		limit?: number;
-		startWithDetailFocus?: boolean;
-		startWithSearchFocus?: boolean;
-		startupWarning?: string;
-		viewSwitcher?: import("../view-switcher.ts").ViewSwitcher;
-		subscribeUpdates?: (
-			update: (nextTasks: Task[], nextStatuses: string[], nextLabels: string[], nextSelectedTask?: Task) => void,
-		) => void;
-		onTaskChange?: (task: Task) => void;
-		onTabPress?: () => Promise<void>;
-		onFilterChange?: (filters: {
-			searchQuery: string;
-			statusFilter: string[];
-			excludeStatus: string[];
-			typeFilter: string[];
-			projectFilter: string[];
-			priorityFilter: string;
-			labelFilter: string[];
-			labelMatch?: LabelMatchMode;
-			milestoneFilter: string;
-		}) => void;
-	} = {},
-): Promise<void> {
-	if (output.isTTY === false) {
-		console.log(formatTaskPlainText(await loadTaskDetail(options.core ?? (await createRuntimeCore()), task)));
-		return;
-	}
+		milestoneFilter: string;
+	}) => void;
+};
 
-	// Reuse the caller's Core so every surface reads the same project root.
-	const core = options.core || (await createRuntimeCore({ enableWatchers: true }));
-
-	const loadingScreen = await createLoadingScreen("Loading tasks");
-	let loaded: Awaited<ReturnType<typeof loadTaskViewerData>>;
-	try {
-		loadingScreen?.update("Loading configuration...");
-		loaded = await loadTaskViewerData(core, options.tasks);
-	} finally {
-		await loadingScreen?.close();
-	}
-	const initialTasks = loaded.allTasks;
-	let statuses = loaded.statuses;
-	let labels = loaded.labels;
-	const priorityOptions = loaded.priorityOptions;
-	const configuredTaskTypes = loaded.configuredTaskTypes;
-	const configuredProjects = loaded.configuredProjects;
-	let availableLabels: string[] = [];
-	const contentStore = loaded.contentStore ?? null;
-	// Completed tasks are loaded alongside the milestone metadata so dependency readiness can
-	// resolve dependencies that already left the active corpus, without a second full task load.
-	const [milestoneEntities, archivedMilestones, completedTasks] = await Promise.all([
-		core.filesystem.listMilestones(),
-		core.filesystem.listArchivedMilestones(),
-		core.filesystem.listCompletedTasks(),
-	]);
-	const { availableMilestoneTitles, resolveMilestoneLabel } = buildTaskViewerMilestoneFilterModel(
-		milestoneEntities,
-		archivedMilestones,
-	);
-
-	const { dateFormat, projectName } = loaded;
-
-	// One shared index over the loaded corpus, however that corpus arrived. Searching exactly the
-	// tasks this list renders is what keeps its results identical to the other surfaces'.
-
-	// Collect available labels from config, tasks, and CLI-provided filters.
-	availableLabels = collectAvailableLabels(initialTasks, [...labels, ...(options.labelFilter ?? [])]);
-
-	// Dependency readiness must resolve against the whole corpus, not the filtered display list, so
-	// it uses the unfiltered snapshot when the caller narrowed what is shown. Both sides stay
-	// mutable because completing a task from this view moves it between them.
-	let readinessSnapshot = options.readinessTasks ? [...options.readinessTasks] : null;
-	const readinessCompletedTasks = [...completedTasks];
-	let activeSession: TaskViewerSession | null = null;
-	// The corpus that both readiness and the dependency graph resolve against, so the two never
-	// disagree about which records this view can see.
-	const resolveDependencyCorpus = (): TaskCorpus => {
-		let tasks = activeSession?.getTasks() ?? initialTasks;
-		if (readinessSnapshot) {
-			tasks = mergeDependencyCorpusTasks(readinessSnapshot, tasks);
-		}
-		return { tasks, completedTasks: readinessCompletedTasks, statuses };
+/** Coordinates the task-viewer session, controls, and screen lifecycle. */
+export class TaskViewerController {
+	private core!: Core;
+	private screen!: ScreenInterface;
+	private filterHeader!: FilterHeader;
+	private rendering!: TaskViewerRendering;
+	private session!: TaskViewerSession;
+	private statuses: string[] = [];
+	private labels: string[] = [];
+	private availableLabels: string[] = [];
+	private configuredTaskTypes: string[] = [];
+	private configuredProjects: string[] = [];
+	private priorityOptions: PriorityOption[] = [];
+	private availableMilestoneTitles: string[] = [];
+	private resolveMilestoneLabel!: MilestoneFilterValueResolver;
+	private dateFormat = "";
+	private projectName = "";
+	private screenTitle = "";
+	private readinessSnapshot: Task[] | null = null;
+	private readinessCompletedTasks: Task[] = [];
+	private searchQuery = "";
+	private statusFilter: string[] = [];
+	private excludeStatusFilter: string[] = [];
+	private taskTypeFilter: string[] = [];
+	private projectFilter: string[] = [];
+	private priorityFilter = "";
+	private labelFilter: string[] = [];
+	private milestoneFilter = "";
+	private labelMatch: LabelMatchMode = "any";
+	private taskLimit: number | undefined;
+	private requireInitialFilterSelection = false;
+	private currentFocus: "filters" | "list" | "detail" = "list";
+	private filterPopupOpen = false;
+	private modalOpen = false;
+	private pendingSearchWrap: PendingSearchWrap = null;
+	private filterExitPane: PaneFocus = "list";
+	private taskList: GenericList<Task> | null = null;
+	private listEmptyStateBox: BoxInterface | null = null;
+	private noResultsMessage: string | null = null;
+	private transientHelpContent: string | null = null;
+	private helpRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly screenKeyBindings: Array<{ keys: string[]; handler: () => unknown }> = [];
+	private readonly resizeHandler = () => {
+		this.filterHeader.rebuild();
+		this.taskList?.updateItems(this.session.filteredTasks);
+		this.updateHelpBar();
 	};
+	private closed = false;
 
-	const initialFilters = normalizeTaskViewerInitialFilters(
-		options,
-		{ statuses, configuredTaskTypes, configuredProjects },
-		availableLabels,
-	);
-	let searchQuery = initialFilters.searchQuery;
-	let statusFilter = initialFilters.statusFilter;
-	const excludeStatusFilter = initialFilters.excludeStatusFilter;
-	let taskTypeFilter = initialFilters.taskTypeFilter;
-	let projectFilter = initialFilters.projectFilter;
-	let priorityFilter = initialFilters.priorityFilter;
-	let labelFilter = initialFilters.labelFilter;
-	let milestoneFilter = initialFilters.milestoneFilter;
-	let labelMatch: LabelMatchMode = initialFilters.labelMatch;
-	const taskLimit = initialFilters.taskLimit;
-	let requireInitialFilterSelection = initialFilters.filtersActive;
+	constructor(
+		private readonly task: Task,
+		private readonly options: TaskViewerOptions = {},
+	) {}
 
-	const enrichTask = (candidate: Task | null): Task | null => {
-		if (!candidate) return null;
-		return attachSubtaskSummaries(candidate, session.getTasks());
-	};
-
-	// Find the initial selected task
-	const session = new TaskViewerSession(
-		initialTasks,
-		{
-			search: searchQuery,
-			status: statusFilter,
-			excludeStatus: excludeStatusFilter,
-			taskTypes: taskTypeFilter,
-			projects: projectFilter,
-			priority: priorityFilter,
-			labels: labelFilter,
-			milestone: milestoneFilter,
-			labelMatch,
-			limit: taskLimit,
-		},
-		task,
-		resolveMilestoneLabel,
-		resolveDependencyCorpus,
-		Boolean(options.readyFilter),
-	);
-	activeSession = session;
-	const filteredTasks = session.filteredTasks;
-	let noResultsMessage: string | null = null;
-
-	const screenTitle = formatTuiTitle(options.title || "Tasks", projectName);
-	const screen = createScreen({ title: screenTitle });
-
-	// Main container
-	const container = box({
-		parent: screen,
-		width: "100%",
-		height: "100%",
-	});
-
-	// State for tracking focus
-	let currentFocus: "filters" | "list" | "detail" = "list";
-	let filterPopupOpen = false;
-	let modalOpen = false;
-	let pendingSearchWrap: PendingSearchWrap = null;
-	let filterExitPane: PaneFocus = "list";
-
-	// Create filter header component
-	let filterHeader: FilterHeader;
-
-	const focusFilterControl = (filterId: FilterControlId) => focusTaskFilterControl(filterHeader, filterId);
-
-	const openFilterPicker = async (filterId: Exclude<FilterControlId, "search">) => {
-		if (filterPopupOpen) {
-			return;
-		}
-		filterPopupOpen = true;
-
-		try {
-			const nextFilters = await openTaskFilterPicker({
-				screen,
-				filterId,
-				filters: {
-					search: searchQuery,
-					status: statusFilter,
-					taskTypes: taskTypeFilter,
-					projects: projectFilter,
-					priority: priorityFilter,
-					labels: labelFilter,
-					milestone: milestoneFilter,
-				},
-				statuses,
-				taskTypes: configuredTaskTypes,
-				projects: configuredProjects,
-				priorityOptions,
-				labels: availableLabels,
-				milestones: availableMilestoneTitles,
-			});
-			if (nextFilters !== null) {
-				searchQuery = nextFilters.search;
-				statusFilter = nextFilters.status;
-				taskTypeFilter = nextFilters.taskTypes;
-				projectFilter = nextFilters.projects;
-				priorityFilter = nextFilters.priority;
-				labelFilter = nextFilters.labels;
-				labelMatch = "any";
-				milestoneFilter = nextFilters.milestone;
-				filterHeader.setFilters(nextFilters);
-				applyFilters();
-				notifyFilterChange();
-			}
-			return;
-		} finally {
-			filterPopupOpen = false;
-			focusFilterControl(filterId);
-			screen.render();
-		}
-	};
-
-	filterHeader = createFilterHeader({
-		parent: container,
-		statuses,
-		availableLabels,
-		availableMilestones: availableMilestoneTitles,
-		visibleFilters: taskFilterHeaderControls(configuredProjects),
-		initialFilters: {
-			search: searchQuery,
-			status: statusFilter,
-			taskTypes: taskTypeFilter,
-			projects: projectFilter,
-			priority: priorityFilter,
-			labels: labelFilter,
-			milestone: milestoneFilter,
-		},
-		onFilterChange: (filters: FilterState) => {
-			const labelsChanged = !areLabelSelectionsEqual(labelFilter, filters.labels);
-			searchQuery = filters.search;
-			statusFilter = filters.status;
-			taskTypeFilter = filters.taskTypes;
-			projectFilter = filters.projects;
-			priorityFilter = filters.priority;
-			labelFilter = filters.labels;
-			if (labelsChanged) {
-				labelMatch = "any";
-			}
-			milestoneFilter = filters.milestone;
-			applyFilters();
-			notifyFilterChange();
-		},
-		onFilterPickerOpen: (filterId) => {
-			void openFilterPicker(filterId);
-		},
-	});
-
-	// Handle focus changes from filter header
-	filterHeader.setFocusChangeHandler((focus) => {
-		if (focus !== null) {
-			if (currentFocus !== "filters") {
-				filterExitPane = currentFocus === "detail" ? "detail" : "list";
-			}
-			currentFocus = "filters";
-			setActivePane("none");
-			updateHelpBar();
-		}
-	});
-	filterHeader.setExitRequestHandler((direction) => {
-		filterHeader.setBorderColor("cyan");
-		const targetPane = resolveFilterExitPane(filterExitPane, Boolean(taskList), Boolean(rendering.descriptionBox));
-		if (targetPane === "list" && taskList) {
-			const selected = taskList.getSelectedIndex();
-			const currentIndex = Array.isArray(selected) ? selected[0] : selected;
-			const targetIndex = resolveSearchExitTargetIndex(
-				direction,
-				pendingSearchWrap,
-				filteredTasks.length,
-				currentIndex,
+	async run(): Promise<void> {
+		if (output.isTTY === false) {
+			console.log(
+				formatTaskPlainText(await loadTaskDetail(this.options.core ?? (await createRuntimeCore()), this.task)),
 			);
-			focusTaskList(targetIndex);
-		} else if (targetPane === "detail" && rendering.descriptionBox) {
-			focusDetailPane();
+			return;
 		}
-		pendingSearchWrap = null;
-	});
+		await this.load();
+		this.createInterface();
+		this.bindScreen();
+		this.start();
+		return this.waitForClose();
+	}
 
-	// Get dynamic header height
-	const getHeaderHeight = () => filterHeader.getHeight();
-
-	let rendering: TaskViewerRendering;
-	const taskListPane = () => rendering.taskListPane;
-	let transientHelpContent: string | null = null;
-	let helpRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-
-	function showTransientHelp(message: string, durationMs = 3000) {
-		transientHelpContent = message;
-		if (helpRestoreTimer) {
-			clearTimeout(helpRestoreTimer);
-			helpRestoreTimer = null;
+	private async load(): Promise<void> {
+		this.core = this.options.core ?? (await createRuntimeCore());
+		const loadingScreen = await createLoadingScreen("Loading tasks");
+		let loaded: Awaited<ReturnType<typeof loadTaskViewerData>>;
+		try {
+			loadingScreen?.update("Loading configuration...");
+			loaded = await loadTaskViewerData(this.core, this.options.tasks);
+		} finally {
+			await loadingScreen?.close();
 		}
-		updateHelpBar();
-		helpRestoreTimer = setTimeout(() => {
-			transientHelpContent = null;
-			helpRestoreTimer = null;
-			updateHelpBar();
+		this.statuses = loaded.statuses;
+		this.labels = loaded.labels;
+		this.priorityOptions = loaded.priorityOptions;
+		this.configuredTaskTypes = loaded.configuredTaskTypes;
+		this.configuredProjects = loaded.configuredProjects;
+		this.dateFormat = loaded.dateFormat ?? "";
+		this.projectName = loaded.projectName ?? "";
+		const [milestones, archivedMilestones, completedTasks] = await Promise.all([
+			this.core.filesystem.listMilestones(),
+			this.core.filesystem.listArchivedMilestones(),
+			this.core.filesystem.listCompletedTasks(),
+		]);
+		const milestoneModel = buildTaskViewerMilestoneFilterModel(milestones, archivedMilestones);
+		this.availableMilestoneTitles = milestoneModel.availableMilestoneTitles;
+		this.resolveMilestoneLabel = milestoneModel.resolveMilestoneLabel;
+		this.availableLabels = collectAvailableLabels(loaded.allTasks, [
+			...this.labels,
+			...(this.options.labelFilter ?? []),
+		]);
+		this.readinessSnapshot = this.options.readinessTasks ? [...this.options.readinessTasks] : null;
+		this.readinessCompletedTasks = [...completedTasks];
+		const initial = normalizeTaskViewerInitialFilters(
+			this.options,
+			{
+				statuses: this.statuses,
+				configuredTaskTypes: this.configuredTaskTypes,
+				configuredProjects: this.configuredProjects,
+			},
+			this.availableLabels,
+		);
+		this.searchQuery = initial.searchQuery;
+		this.statusFilter = initial.statusFilter;
+		this.excludeStatusFilter = initial.excludeStatusFilter;
+		this.taskTypeFilter = initial.taskTypeFilter;
+		this.projectFilter = initial.projectFilter;
+		this.priorityFilter = initial.priorityFilter;
+		this.labelFilter = initial.labelFilter;
+		this.milestoneFilter = initial.milestoneFilter;
+		this.labelMatch = initial.labelMatch;
+		this.taskLimit = initial.taskLimit;
+		this.requireInitialFilterSelection = initial.filtersActive;
+		this.session = new TaskViewerSession(
+			loaded.allTasks,
+			this.filters(),
+			this.task,
+			this.resolveMilestoneLabel,
+			(tasks) => this.dependencyCorpus(tasks),
+			Boolean(this.options.readyFilter),
+		);
+	}
+
+	private createInterface(): void {
+		this.screenTitle = formatTuiTitle(this.options.title || "Tasks", this.projectName);
+		this.screen = createScreen({ title: this.screenTitle });
+		const container = box({ parent: this.screen, width: "100%", height: "100%" });
+		this.filterHeader = createFilterHeader({
+			parent: container,
+			statuses: this.statuses,
+			availableLabels: this.availableLabels,
+			availableMilestones: this.availableMilestoneTitles,
+			visibleFilters: taskFilterHeaderControls(this.configuredProjects),
+			initialFilters: this.headerFilters(),
+			onFilterChange: (filters) => this.updateFilters(filters),
+			onFilterPickerOpen: (filterId) => void this.openFilterPicker(filterId),
+		});
+		this.rendering = new TaskViewerRendering({
+			screen: this.screen,
+			container,
+			getHeaderHeight: () => this.filterHeader.getHeight(),
+			startupWarning: this.options.startupWarning,
+			screenTitle: this.screenTitle,
+			projectName: this.projectName,
+			dateFormat: this.dateFormat,
+			configuredProjects: this.configuredProjects,
+			resolveMilestoneLabel: this.resolveMilestoneLabel,
+			getSelectedTask: () => this.session.selected,
+			getTaskDetail: (candidate) => this.session.getTaskDetail(candidate),
+			getNoResultsMessage: () => this.noResultsMessage,
+			getFocus: () => this.currentFocus,
+			setFocus: (focus) => {
+				this.currentFocus = focus;
+			},
+			focusTaskList: () => this.focusTaskList(),
+			focusSearch: () => this.filterHeader.focusSearch(),
+			clearPendingSearchWrap: () => {
+				this.pendingSearchWrap = null;
+			},
+			updateHelpBar: () => this.updateHelpBar(),
+		});
+		this.filterHeader.setFocusChangeHandler((focus) => {
+			if (focus !== null) {
+				if (this.currentFocus !== "filters") this.filterExitPane = this.currentFocus === "detail" ? "detail" : "list";
+				this.currentFocus = "filters";
+				this.setActivePane("none");
+				this.updateHelpBar();
+			}
+		});
+		this.filterHeader.setExitRequestHandler((direction) => this.exitFilters(direction));
+	}
+
+	private bindScreen(): void {
+		this.screen.on("resize", this.resizeHandler);
+		this.bindScreenKey(keymapKeys("shared", "search"), () => this.focusSearch());
+		this.bindScreenKey(keymapKeys("shared", "find"), () => this.focusSearch());
+		this.bindPickerShortcut("filterStatus", "status");
+		this.bindPickerShortcut("filterType", "type");
+		if (this.configuredProjects.length > 0) this.bindPickerShortcut("filterProject", "project");
+		this.bindPickerShortcut("filterPriority", "priority");
+		this.bindPickerShortcut("filterLabels", "labels");
+		this.bindPickerShortcut("filterMilestone", "milestone");
+		this.bindScreenKey(keymapKeys("taskList", "edit"), () => {
+			if (!this.modalOpen) void this.openEditor();
+		});
+		this.bindScreenKey(keymapKeys("taskList", "copy"), () => void this.copyTaskId());
+		this.bindScreenKey(keymapKeys("taskList", "complete"), () => void this.runLifecycle("complete"));
+		this.bindScreenKey(keymapKeys("taskList", "archive"), () => void this.runLifecycle("archive"));
+		this.bindScreenKey(keymapKeys("shared", "help"), () => void this.openHelp());
+		this.bindScreenKey(keymapKeys("shared", "escape"), () => this.escape());
+		this.bindScreenKey(keymapKeys("shared", "quitWithoutEscape"), () => this.quit());
+		if (this.options.onTabPress) this.bindScreenKey(keymapKeys("shared", "tab"), () => void this.switchView());
+	}
+
+	private start(): void {
+		this.updateHelpBar();
+		if (this.requireInitialFilterSelection) this.applyFilters();
+		else this.taskList = this.createTaskList();
+		this.options.subscribeUpdates?.((tasks, statuses, labels, selected) =>
+			this.applyUpdates(tasks, statuses, labels, selected),
+		);
+		this.refreshDetailPane();
+		if (this.options.startWithSearchFocus) this.filterHeader.focusSearch();
+		else if (this.options.startWithDetailFocus && this.rendering.descriptionBox) this.focusDetailPane();
+		else if (this.taskList) this.focusTaskList();
+		this.screen.render();
+	}
+
+	private dependencyCorpus(activeTasks: Task[]): TaskCorpus {
+		let tasks = activeTasks;
+		if (this.readinessSnapshot) tasks = mergeDependencyCorpusTasks(this.readinessSnapshot, tasks);
+		return { tasks, completedTasks: this.readinessCompletedTasks, statuses: this.statuses };
+	}
+
+	private filters(): TaskViewerFilterModel {
+		return {
+			search: this.searchQuery,
+			status: this.statusFilter,
+			excludeStatus: this.excludeStatusFilter,
+			taskTypes: this.taskTypeFilter,
+			projects: this.projectFilter,
+			priority: this.priorityFilter,
+			labels: this.labelFilter,
+			milestone: this.milestoneFilter,
+			labelMatch: this.labelMatch,
+			limit: this.taskLimit,
+		};
+	}
+
+	private headerFilters(): FilterState {
+		return {
+			search: this.searchQuery,
+			status: this.statusFilter,
+			taskTypes: this.taskTypeFilter,
+			projects: this.projectFilter,
+			priority: this.priorityFilter,
+			labels: this.labelFilter,
+			milestone: this.milestoneFilter,
+		};
+	}
+
+	private updateFilters(filters: FilterState): void {
+		const labelsChanged = !areLabelSelectionsEqual(this.labelFilter, filters.labels);
+		this.searchQuery = filters.search;
+		this.statusFilter = filters.status;
+		this.taskTypeFilter = filters.taskTypes;
+		this.projectFilter = filters.projects;
+		this.priorityFilter = filters.priority;
+		this.labelFilter = filters.labels;
+		this.milestoneFilter = filters.milestone;
+		if (labelsChanged) this.labelMatch = "any";
+		this.applyFilters();
+		this.notifyFilterChange();
+	}
+
+	private async openFilterPicker(filterId: Exclude<FilterControlId, "search">): Promise<void> {
+		if (this.filterPopupOpen) return;
+		this.filterPopupOpen = true;
+		try {
+			const filters = await openTaskFilterPicker({
+				screen: this.screen,
+				filterId,
+				filters: this.headerFilters(),
+				statuses: this.statuses,
+				taskTypes: this.configuredTaskTypes,
+				projects: this.configuredProjects,
+				priorityOptions: this.priorityOptions,
+				labels: this.availableLabels,
+				milestones: this.availableMilestoneTitles,
+			});
+			if (filters) {
+				this.labelMatch = "any";
+				this.updateFilters(filters);
+				this.filterHeader.setFilters(filters);
+			}
+		} finally {
+			this.filterPopupOpen = false;
+			focusTaskFilterControl(this.filterHeader, filterId);
+			this.screen.render();
+		}
+	}
+
+	private applyFilters(): void {
+		this.session.updateFilters(this.filters());
+		this.rendering.taskListPane.setLabel?.(` Tasks (${this.session.filteredTasks.length}) `);
+		this.taskList?.destroy();
+		this.taskList = null;
+		if (this.session.filteredTasks.length === 0) {
+			const emptyState = taskViewerEmptyState(this.filters());
+			this.noResultsMessage = emptyState.detail;
+			this.showListEmptyState(emptyState.list);
+		} else {
+			this.noResultsMessage = null;
+			this.hideListEmptyState();
+			this.taskList = this.createTaskList();
+			const selectedIndex = this.session.filteredTasks.findIndex((task) => task.id === this.session.selected.id);
+			const index = this.requireInitialFilterSelection || selectedIndex < 0 ? 0 : selectedIndex;
+			const selected = this.session.filteredTasks[index];
+			if (selected && this.session.select(this.enrichTask(selected) ?? selected))
+				this.options.onTaskChange?.(this.session.selected);
+			this.taskList?.setSelectedIndex(index);
+			this.requireInitialFilterSelection = false;
+		}
+		this.refreshDetailPane();
+		this.screen.render();
+	}
+
+	private createTaskList(): GenericList<Task> {
+		const taskList = createGenericList<Task>({
+			parent: this.rendering.taskListPane,
+			title: "",
+			items: this.session.filteredTasks,
+			selectedIndex: Math.max(
+				0,
+				this.session.filteredTasks.findIndex((task) => task.id === this.session.selected.id),
+			),
+			border: false,
+			scrollbar: false,
+			top: 1,
+			left: 1,
+			width: "100%-4",
+			height: "100%-3",
+			itemRenderer: (task) =>
+				formatTaskViewerListItem(task, this.taskListSummaryWidth(), this.dateFormat, this.configuredProjects),
+			onSelect: (selected) => void this.applySelection((Array.isArray(selected) ? selected[0] : selected) ?? null),
+			onHighlight: (selected) => void this.applySelection(selected),
+			onBoundaryNavigation: (direction, selectedIndex, total, key) =>
+				this.handleListBoundary(direction, selectedIndex, total, key),
+			showHelp: false,
+		});
+		const listBox = taskList.getListBox();
+		listBox.on("focus", () => {
+			this.currentFocus = "list";
+			this.setActivePane("list");
+			this.screen.render();
+			this.updateHelpBar();
+		});
+		listBox.on("blur", () => {
+			this.setActivePane("none");
+			this.screen.render();
+		});
+		listBox.key(keymapKeys("taskList", "focusDetail"), () => {
+			this.focusDetailPane();
+			return false;
+		});
+		return taskList;
+	}
+
+	private handleListBoundary(
+		direction: "up" | "down",
+		selectedIndex: number,
+		total: number,
+		key: "arrow" | "vim",
+	): boolean {
+		const navigation = resolveListBoundaryNavigation(direction, selectedIndex, total, key);
+		if (navigation === "move") return false;
+		if (navigation === "search") {
+			this.pendingSearchWrap = direction === "up" ? "to-last" : "to-first";
+			this.filterHeader.focusSearch();
+		}
+		return true;
+	}
+
+	private async applySelection(selectedTask: Task | null): Promise<void> {
+		if (!selectedTask || selectedTask.id === this.session.selected.id) return;
+		this.session.select(this.enrichTask(selectedTask) ?? selectedTask);
+		this.options.onTaskChange?.(this.session.selected);
+		const requestId = this.session.beginSelectionRefresh();
+		this.refreshDetailPane();
+		this.screen.render();
+		const refreshed = await this.core.getTaskWithSubtasks(selectedTask.id, this.session.getTasks());
+		if (!this.session.isCurrentSelectionRefresh(requestId)) return;
+		if (refreshed) {
+			this.session.select(refreshed);
+			this.options.onTaskChange?.(refreshed);
+		}
+		this.refreshDetailPane();
+		this.screen.render();
+	}
+
+	private enrichTask(task: Task | null): Task | null {
+		return task ? attachSubtaskSummaries(task, this.session.getTasks()) : null;
+	}
+	private refreshDetailPane(): void {
+		this.rendering.refreshDetailPane();
+	}
+	private setActivePane(pane: "list" | "detail" | "none"): void {
+		this.rendering.setActivePane(pane);
+	}
+	private taskListSummaryWidth(): number {
+		return Math.max(1, Math.floor((typeof this.screen.width === "number" ? this.screen.width : 80) * 0.4) - 4);
+	}
+
+	private focusTaskList(index?: number): void {
+		if (!this.taskList) {
+			if (this.rendering.descriptionBox) this.focusDetailPane();
+			return;
+		}
+		this.currentFocus = "list";
+		this.setActivePane("list");
+		if (typeof index === "number") this.taskList.setSelectedIndex(index);
+		this.taskList.focus();
+		this.updateHelpBar();
+		this.screen.render();
+	}
+
+	private focusDetailPane(): void {
+		if (!this.rendering.descriptionBox) return;
+		this.currentFocus = "detail";
+		this.setActivePane("detail");
+		this.rendering.descriptionBox.focus();
+		this.updateHelpBar();
+		this.screen.render();
+	}
+
+	private focusSearch(): void {
+		if (!this.modalOpen) {
+			this.pendingSearchWrap = null;
+			this.filterHeader.focusSearch();
+		}
+	}
+	private exitFilters(direction: "up" | "down" | "escape"): void {
+		this.filterHeader.setBorderColor("cyan");
+		const pane = resolveFilterExitPane(
+			this.filterExitPane,
+			Boolean(this.taskList),
+			Boolean(this.rendering.descriptionBox),
+		);
+		if (pane === "list" && this.taskList) {
+			const selected = this.taskList.getSelectedIndex();
+			const index = Array.isArray(selected) ? selected[0] : selected;
+			this.focusTaskList(
+				resolveSearchExitTargetIndex(
+					direction === "up" ? "up" : "down",
+					this.pendingSearchWrap,
+					this.session.filteredTasks.length,
+					index,
+				),
+			);
+		} else if (pane === "detail") this.focusDetailPane();
+		this.pendingSearchWrap = null;
+	}
+
+	private updateHelpBar(): void {
+		if (this.transientHelpContent) {
+			this.setHelp(this.transientHelpContent);
+			return;
+		}
+		const filterFocus = this.filterHeader.getCurrentFocus();
+		const content =
+			this.currentFocus === "filters" && filterFocus
+				? filterFocus === "search"
+					? ` {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Cursor (edge=Prev/Next) | {cyan-fg}[${formatKeymap("shared", "up")}/${formatKeymap("shared", "down")}]{/} Back to Tasks | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel | {gray-fg}(Live search){/}`
+					: ` {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Open Picker | {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Prev/Next | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Back`
+				: this.currentFocus === "detail"
+					? ` {cyan-fg}[${formatKeymap("shared", "tab")}]{/} View | {cyan-fg}[${formatKeymap("taskList", "focusList")}]{/} List | {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}]{/} Scroll | {cyan-fg}[${formatKeymap("taskList", "edit")}]{/} Edit | {cyan-fg}[${formatKeymap("taskList", "copy")}]{/} Yank | {cyan-fg}[${formatKeymap("shared", "help")}]{/} Help | {cyan-fg}[${formatKeymap("shared", "quitWithoutEscape")}]{/} Quit`
+					: getTaskListFooterContent({ hasProjects: this.configuredProjects.length > 0 });
+		this.setHelp(content);
+	}
+
+	private setHelp(content: string): void {
+		const width = typeof this.screen.width === "number" ? this.screen.width : 80;
+		this.rendering.setHelpBarContent(content, width, formatFooterContent);
+		this.screen.render();
+	}
+	private showTransientHelp(message: string, durationMs = 3000): void {
+		this.transientHelpContent = message;
+		if (this.helpRestoreTimer) clearTimeout(this.helpRestoreTimer);
+		this.updateHelpBar();
+		this.helpRestoreTimer = setTimeout(() => {
+			this.transientHelpContent = null;
+			this.helpRestoreTimer = null;
+			this.updateHelpBar();
 		}, durationMs);
 	}
 
-	function getTerminalWidth(): number {
-		return typeof screen.width === "number" ? screen.width : 80;
-	}
-
-	function getTaskListSummaryWidth(): number {
-		return Math.max(1, Math.floor(getTerminalWidth() * 0.4) - 4);
-	}
-
-	function setHelpBarContent(content: string) {
-		rendering.setHelpBarContent(content, getTerminalWidth(), formatFooterContent);
-	}
-
-	function setActivePane(active: "list" | "detail" | "none") {
-		rendering.setActivePane(active);
-	}
-
-	function focusTaskList(targetIndex?: number): void {
-		if (!taskList) {
-			if (rendering.descriptionBox) {
-				currentFocus = "detail";
-				setActivePane("detail");
-				rendering.descriptionBox.focus();
-				updateHelpBar();
-				screen.render();
-			}
-			return;
-		}
-		currentFocus = "list";
-		setActivePane("list");
-		if (typeof targetIndex === "number") {
-			taskList.setSelectedIndex(targetIndex);
-		}
-		taskList.focus();
-		updateHelpBar();
-		screen.render();
-	}
-
-	function focusDetailPane(): void {
-		if (!rendering.descriptionBox) return;
-		currentFocus = "detail";
-		setActivePane("detail");
-		rendering.descriptionBox.focus();
-		updateHelpBar();
-		screen.render();
-	}
-
-	rendering = new TaskViewerRendering({
-		screen,
-		container,
-		getHeaderHeight,
-		startupWarning: options.startupWarning,
-		screenTitle,
-		projectName: projectName ?? "",
-		dateFormat: dateFormat ?? "",
-		configuredProjects,
-		resolveMilestoneLabel,
-		getSelectedTask: () => session.selected,
-		resolveDependencyCorpus,
-		getNoResultsMessage: () => noResultsMessage,
-		getFocus: () => currentFocus,
-		setFocus: (focus) => {
-			currentFocus = focus;
-		},
-		focusTaskList,
-		focusSearch: () => filterHeader.focusSearch(),
-		clearPendingSearchWrap: () => {
-			pendingSearchWrap = null;
-		},
-		updateHelpBar,
-	});
-
-	// Helper to notify filter changes
-	function notifyFilterChange() {
-		if (options.onFilterChange) {
-			options.onFilterChange({
-				searchQuery,
-				statusFilter,
-				excludeStatus: excludeStatusFilter,
-				typeFilter: taskTypeFilter,
-				projectFilter,
-				priorityFilter,
-				labelFilter,
-				labelMatch,
-				milestoneFilter,
-			});
-		}
-	}
-
-	// Function to apply filters and refresh the task list
-	function applyFilters() {
-		const filters: TaskViewerFilterModel = {
-			search: searchQuery,
-			status: statusFilter,
-			excludeStatus: excludeStatusFilter,
-			taskTypes: taskTypeFilter,
-			projects: projectFilter,
-			priority: priorityFilter,
-			labels: labelFilter,
-			milestone: milestoneFilter,
-			labelMatch,
-			limit: taskLimit,
-		};
-		session.updateFilters(filters);
-
-		taskListPane().setLabel?.(`\u00A0Tasks (${filteredTasks.length})\u00A0`);
-		taskList?.destroy();
-		taskList = null;
-		if (filteredTasks.length === 0) {
-			const emptyState = taskViewerEmptyState(filters);
-			noResultsMessage = emptyState.detail;
-			showListEmptyState(emptyState.list);
-		} else {
-			noResultsMessage = null;
-			hideListEmptyState();
-			taskList = createTaskList();
-			const selectedIndex = filteredTasks.findIndex((task) => task.id === session.selected.id);
-			const desiredIndex = requireInitialFilterSelection || selectedIndex < 0 ? 0 : selectedIndex;
-			const selected = filteredTasks[desiredIndex];
-			if (selected && session.select(enrichTask(selected) ?? selected)) options.onTaskChange?.(session.selected);
-			taskList?.setSelectedIndex(desiredIndex);
-			requireInitialFilterSelection = false;
-		}
-		refreshDetailPane();
-		screen.render();
-	}
-
-	// Task list component
-	let taskList: GenericList<Task> | null = null;
-	let listEmptyStateBox: BoxInterface | null = null;
-
-	function showListEmptyState(message: string) {
-		if (listEmptyStateBox) {
-			listEmptyStateBox.destroy();
-		}
-		listEmptyStateBox = box({
-			parent: taskListPane(),
+	private showListEmptyState(message: string): void {
+		this.listEmptyStateBox?.destroy();
+		this.listEmptyStateBox = box({
+			parent: this.rendering.taskListPane,
 			top: 1,
 			left: 1,
 			width: "100%-4",
@@ -582,547 +649,185 @@ export async function viewTaskEnhanced(
 			style: { fg: "gray" },
 		});
 	}
-
-	function hideListEmptyState() {
-		if (listEmptyStateBox) {
-			listEmptyStateBox.destroy();
-			listEmptyStateBox = null;
-		}
+	private hideListEmptyState(): void {
+		this.listEmptyStateBox?.destroy();
+		this.listEmptyStateBox = null;
 	}
-
-	async function applySelection(selectedTask: Task | null) {
-		if (!selectedTask) return;
-		if (selectedTask.id === session.selected.id) {
-			return;
-		}
-		const enriched = enrichTask(selectedTask);
-		session.select(enriched ?? selectedTask);
-		options.onTaskChange?.(session.selected);
-		const requestId = session.beginSelectionRefresh();
-		refreshDetailPane();
-		screen.render();
-		const refreshed = await core.getTaskWithSubtasks(selectedTask.id, session.getTasks());
-		if (!session.isCurrentSelectionRefresh(requestId)) {
-			return;
-		}
-		if (refreshed) {
-			session.select(refreshed);
-			options.onTaskChange?.(refreshed);
-		}
-		refreshDetailPane();
-		screen.render();
-	}
-
-	function createTaskList(): GenericList<Task> | null {
-		const initialIndex = Math.max(
-			0,
-			filteredTasks.findIndex((t) => t.id === session.selected.id),
-		);
-
-		taskList = createGenericList<Task>({
-			parent: taskListPane(),
-			title: "",
-			items: filteredTasks,
-			selectedIndex: initialIndex,
-			border: false,
-			scrollbar: false,
-			top: 1,
-			left: 1,
-			width: "100%-4",
-			height: "100%-3",
-			itemRenderer: (task: Task) =>
-				formatTaskViewerListItem(task, getTaskListSummaryWidth(), dateFormat, configuredProjects),
-			onSelect: (selected: Task | Task[]) => {
-				const selectedTask = Array.isArray(selected) ? selected[0] : selected;
-				void applySelection(selectedTask || null);
-			},
-			onHighlight: (selected: Task | null) => {
-				void applySelection(selected);
-			},
-			onBoundaryNavigation: (direction, selectedIndex, total, key) => {
-				const navigation = resolveListBoundaryNavigation(direction, selectedIndex, total, key);
-				if (navigation === "move") {
-					return false;
-				}
-				if (navigation === "search") {
-					pendingSearchWrap = direction === "up" ? "to-last" : "to-first";
-					filterHeader.focusSearch();
-				}
-				// "stay" consumes the key so vim navigation neither wraps nor leaves the list.
-				return true;
-			},
-			showHelp: false,
+	private notifyFilterChange(): void {
+		this.options.onFilterChange?.({
+			searchQuery: this.searchQuery,
+			statusFilter: this.statusFilter,
+			excludeStatus: this.excludeStatusFilter,
+			typeFilter: this.taskTypeFilter,
+			projectFilter: this.projectFilter,
+			priorityFilter: this.priorityFilter,
+			labelFilter: this.labelFilter,
+			labelMatch: this.labelMatch,
+			milestoneFilter: this.milestoneFilter,
 		});
-
-		// Focus handler for task list
-		if (taskList) {
-			const listBox = taskList.getListBox();
-			listBox.on("focus", () => {
-				currentFocus = "list";
-				setActivePane("list");
-				screen.render();
-				updateHelpBar();
-			});
-			listBox.on("blur", () => {
-				setActivePane("none");
-				screen.render();
-			});
-			listBox.key(keymapKeys("taskList", "focusDetail"), () => {
-				focusDetailPane();
-				return false;
-			});
-		}
-
-		return taskList;
 	}
 
-	function refreshDetailPane() {
-		rendering.refreshDetailPane();
-	}
-
-	// Dynamic help bar content
-	function updateHelpBar() {
-		if (transientHelpContent) {
-			setHelpBarContent(transientHelpContent);
-			screen.render();
-			return;
-		}
-
-		let content = "";
-
-		const filterFocus = filterHeader.getCurrentFocus();
-		if (currentFocus === "filters" && filterFocus) {
-			if (filterFocus === "search") {
-				content = ` {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Cursor (edge=Prev/Next) | {cyan-fg}[${formatKeymap("shared", "up")}/${formatKeymap("shared", "down")}]{/} Back to Tasks | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Cancel | {gray-fg}(Live search){/}`;
-			} else {
-				content = ` {cyan-fg}[${formatKeymap("shared", "activate")}]{/} Open Picker | {cyan-fg}[${formatKeymap("shared", "previous")}/${formatKeymap("shared", "next")}]{/} Prev/Next | {cyan-fg}[${formatKeymap("shared", "escape")}]{/} Back`;
-			}
-		} else if (currentFocus === "detail") {
-			content = ` {cyan-fg}[${formatKeymap("shared", "tab")}]{/} View | {cyan-fg}[${formatKeymap("taskList", "focusList")}]{/} List | {cyan-fg}[${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}]{/} Scroll | {cyan-fg}[${formatKeymap("taskList", "edit")}]{/} Edit | {cyan-fg}[${formatKeymap("taskList", "copy")}]{/} Yank | {cyan-fg}[${formatKeymap("shared", "help")}]{/} Help | {cyan-fg}[${formatKeymap("shared", "quitWithoutEscape")}]{/} Quit`;
-		} else {
-			// Task list help
-			content = getTaskListFooterContent({ hasProjects: configuredProjects.length > 0 });
-		}
-
-		setHelpBarContent(content);
-		screen.render();
-	}
-
-	const openCurrentTaskInEditor = async () => {
-		if (filterPopupOpen || currentFocus === "filters" || noResultsMessage) {
-			return;
-		}
-		const selectedTask = session.selected;
+	private async openEditor(): Promise<void> {
+		if (this.filterPopupOpen || this.currentFocus === "filters" || this.noResultsMessage) return;
 		await editTaskViewerTask({
-			core,
-			screen,
-			task: selectedTask,
-			onSaved: (savedTask) => {
-				session.replaceTask(savedTask);
-				const enhancedTask = enrichTask(savedTask) ?? savedTask;
-				session.select(enhancedTask);
-				options.onTaskChange?.(enhancedTask);
+			core: this.core,
+			screen: this.screen,
+			task: this.session.selected,
+			onSaved: (task) => {
+				this.session.replaceTask(task, this.filters());
+				const enhanced = this.enrichTask(task) ?? task;
+				this.session.select(enhanced);
+				this.options.onTaskChange?.(enhanced);
 			},
-			refresh: applyFilters,
-			showHelp: showTransientHelp,
-		});
-	};
-
-	const getCurrentShortcutTask = (): Task | null => {
-		if (noResultsMessage) {
-			return null;
-		}
-		return resolveTaskListSelection(filteredTasks, taskList?.getSelectedIndex(), session.selected);
-	};
-
-	const removeTaskFromCurrentView = (taskId: string) => {
-		const currentIndex = filteredTasks.findIndex((taskItem) => taskItem.id === taskId);
-		const remainingFilteredTasks = filteredTasks.filter((taskItem) => taskItem.id !== taskId);
-		const nextIndex = Math.min(Math.max(currentIndex, 0), remainingFilteredTasks.length - 1);
-		const nextTask = remainingFilteredTasks[nextIndex] ?? null;
-
-		session.removeTask(taskId);
-		if (nextTask) {
-			session.select(enrichTask(nextTask) ?? nextTask);
-			options.onTaskChange?.(session.selected);
-		}
-		applyFilters();
-	};
-
-	const runWithModalGuard = async <T>(operation: () => Promise<T>): Promise<T> => {
-		modalOpen = true;
-		try {
-			return await operation();
-		} finally {
-			modalOpen = false;
-		}
-	};
-
-	const applyTaskLifecycleShortcut = async (task: Task, action: "complete" | "archive") => {
-		await runTaskViewerLifecycleShortcut({
-			core,
-			screen,
-			task,
-			action,
-			confirm: openConfirmPopup,
-			runModal: runWithModalGuard,
-			onCompleted: (completedTask, completedAction) => {
-				readinessSnapshot =
-					readinessSnapshot?.filter((candidate) => !taskIdsEqual(candidate.id, completedTask.id)) ?? null;
-				if (completedAction === "complete") readinessCompletedTasks.push(completedTask);
-				removeTaskFromCurrentView(completedTask.id);
-			},
-			showHelp: showTransientHelp,
-		});
-	};
-
-	// Handle resize
-	screen.on("resize", () => {
-		filterHeader.rebuild();
-		taskList?.updateItems(filteredTasks);
-		updateHelpBar();
-	});
-
-	// Keyboard shortcuts
-	screen.key(keymapKeys("shared", "search"), () => {
-		if (modalOpen) return;
-		pendingSearchWrap = null;
-		filterHeader.focusSearch();
-	});
-
-	screen.key(keymapKeys("shared", "find"), () => {
-		if (modalOpen) return;
-		pendingSearchWrap = null;
-		filterHeader.focusSearch();
-	});
-
-	screen.key(keymapKeys("taskList", "filterStatus"), () => {
-		if (modalOpen) return;
-		void openFilterPicker("status");
-	});
-
-	screen.key(keymapKeys("taskList", "filterType"), () => {
-		if (modalOpen || filterPopupOpen) return;
-		void openFilterPicker("type");
-	});
-
-	if (configuredProjects.length > 0) {
-		// Not "g"/"G": those already scroll the detail pane to top/bottom (see the
-		// boxInstance bindings above) and a screen-level handler here would conflict.
-		screen.key(keymapKeys("taskList", "filterProject"), () => {
-			if (modalOpen || filterPopupOpen) return;
-			void openFilterPicker("project");
+			refresh: () => this.applyFilters(),
+			showHelp: (message) => this.showTransientHelp(message),
 		});
 	}
 
-	screen.key(keymapKeys("taskList", "filterPriority"), () => {
-		if (modalOpen) return;
-		void openFilterPicker("priority");
-	});
-
-	screen.key(keymapKeys("taskList", "filterLabels"), () => {
-		if (modalOpen) return;
-		void openFilterPicker("labels");
-	});
-
-	screen.key(keymapKeys("taskList", "filterMilestone"), () => {
-		if (modalOpen) return;
-		void openFilterPicker("milestone");
-	});
-
-	screen.key(keymapKeys("taskList", "edit"), () => {
-		if (modalOpen) return;
-		void openCurrentTaskInEditor();
-	});
-
-	screen.key(keymapKeys("taskList", "copy"), async () => {
-		if (modalOpen || filterPopupOpen || currentFocus === "filters") return;
-		const task = getCurrentShortcutTask();
+	private async copyTaskId(): Promise<void> {
+		if (this.modalOpen || this.filterPopupOpen || this.currentFocus === "filters") return;
+		const task = this.currentShortcutTask();
 		if (!task) return;
-		const success = await copyToClipboard(task.id);
-		if (success) {
-			showTransientHelp(` {green-fg}Copied ${task.id} to clipboard{/}`);
-		} else {
-			showTransientHelp(" {red-fg}Failed to copy to clipboard{/}");
+		this.showTransientHelp(
+			(await copyToClipboard(task.id))
+				? ` {green-fg}Copied ${task.id} to clipboard{/}`
+				: " {red-fg}Failed to copy to clipboard{/}",
+		);
+	}
+
+	private currentShortcutTask(): Task | null {
+		return this.noResultsMessage
+			? null
+			: resolveTaskListSelection(this.session.filteredTasks, this.taskList?.getSelectedIndex(), this.session.selected);
+	}
+	private async runLifecycle(action: "complete" | "archive"): Promise<void> {
+		if (this.modalOpen || this.filterPopupOpen || this.currentFocus === "filters") return;
+		const task = this.currentShortcutTask();
+		if (!task) return;
+		this.modalOpen = true;
+		try {
+			await runTaskViewerLifecycleShortcut({
+				core: this.core,
+				screen: this.screen,
+				task,
+				action,
+				confirm: openConfirmPopup,
+				runModal: async (operation) => operation(),
+				onCompleted: (completed, completedAction) => {
+					this.readinessSnapshot =
+						this.readinessSnapshot?.filter((candidate) => !taskIdsEqual(candidate.id, completed.id)) ?? null;
+					if (completedAction === "complete") this.readinessCompletedTasks.push(completed);
+					this.removeTask(completed.id);
+				},
+				showHelp: (message) => this.showTransientHelp(message),
+			});
+		} finally {
+			this.modalOpen = false;
 		}
-	});
+	}
 
-	screen.key(keymapKeys("taskList", "complete"), async () => {
-		if (modalOpen || filterPopupOpen || currentFocus === "filters") return;
-		const task = getCurrentShortcutTask();
-		if (!task) return;
-		await applyTaskLifecycleShortcut(task, "complete");
-	});
+	private removeTask(taskId: string): void {
+		const filtered = this.session.filteredTasks;
+		const index = filtered.findIndex((task) => task.id === taskId);
+		const next = filtered.filter((task) => task.id !== taskId)[Math.max(0, Math.min(index, filtered.length - 2))];
+		this.session.removeTask(taskId, this.filters());
+		if (next) {
+			this.session.select(this.enrichTask(next) ?? next);
+			this.options.onTaskChange?.(this.session.selected);
+		}
+		this.applyFilters();
+	}
 
-	screen.key(keymapKeys("taskList", "archive"), async () => {
-		if (modalOpen || filterPopupOpen || currentFocus === "filters") return;
-		const task = getCurrentShortcutTask();
-		if (!task) return;
-		await applyTaskLifecycleShortcut(task, "archive");
-	});
-
-	screen.key(keymapKeys("shared", "help"), async () => {
-		if (modalOpen || filterPopupOpen) return;
-		await runWithModalGuard(() => openHelpPopup(screen, "task-list", { hasProjects: configuredProjects.length > 0 }));
-	});
-
-	screen.key(keymapKeys("shared", "escape"), () => {
-		if (modalOpen || filterPopupOpen) {
+	private bindPickerShortcut(
+		shortcut: "filterStatus" | "filterType" | "filterProject" | "filterPriority" | "filterLabels" | "filterMilestone",
+		filter: Exclude<FilterControlId, "search">,
+	): void {
+		this.bindScreenKey(keymapKeys("taskList", shortcut), () => {
+			if (!this.modalOpen && !this.filterPopupOpen) void this.openFilterPicker(filter);
+		});
+	}
+	private bindScreenKey(keys: string[], handler: () => unknown): void {
+		this.screen.key(keys, handler);
+		this.screenKeyBindings.push({ keys, handler });
+	}
+	private async openHelp(): Promise<void> {
+		if (!this.modalOpen && !this.filterPopupOpen) {
+			this.modalOpen = true;
+			try {
+				await openHelpPopup(this.screen, "task-list", { hasProjects: this.configuredProjects.length > 0 });
+			} finally {
+				this.modalOpen = false;
+			}
+		}
+	}
+	private escape(): void {
+		if (this.modalOpen || this.filterPopupOpen) return;
+		if (this.currentFocus === "filters") {
+			this.filterHeader.setBorderColor("cyan");
+			const pane = resolveFilterExitPane(
+				this.filterExitPane,
+				Boolean(this.taskList),
+				Boolean(this.rendering.descriptionBox),
+			);
+			if (pane === "list" && this.taskList) this.focusTaskList();
+			else if (pane === "detail") this.focusDetailPane();
 			return;
 		}
-		if (currentFocus === "filters") {
-			filterHeader.setBorderColor("cyan");
-			const targetPane = resolveFilterExitPane(filterExitPane, Boolean(taskList), Boolean(rendering.descriptionBox));
-			if (targetPane === "list" && taskList) {
-				focusTaskList();
-			} else if (targetPane === "detail" && rendering.descriptionBox) {
-				focusDetailPane();
-			}
-		} else if (currentFocus !== "list") {
-			if (taskList) {
-				focusTaskList();
-			}
-		} else {
-			// If already in task list, quit
-			contentStore?.dispose();
-			filterHeader.destroy();
-			screen.destroy();
+		if (this.currentFocus !== "list" && this.taskList) this.focusTaskList();
+		else if (this.currentFocus === "list") this.quit();
+	}
+	private quit(): void {
+		if (!this.modalOpen && !this.filterPopupOpen) {
+			this.cleanup();
+			this.screen.destroy();
 			process.exit(0);
 		}
-	});
-
-	// Tab key handling for view switching - only when in task list
-	if (options.onTabPress) {
-		screen.key(keymapKeys("shared", "tab"), async () => {
-			// Keep tab as filter-navigation while filters are focused.
-			if (modalOpen || filterPopupOpen || currentFocus === "filters") {
-				return;
-			}
-			if (currentFocus === "list" || currentFocus === "detail") {
-				// Cleanup before switching
-				contentStore?.dispose();
-				filterHeader.destroy();
-				screen.destroy();
-				await options.onTabPress?.();
-			}
-		});
 	}
-
-	// Quit handlers
-	screen.key(keymapKeys("shared", "quitWithoutEscape"), () => {
-		if (modalOpen || filterPopupOpen) {
-			return;
-		}
-		contentStore?.dispose();
-		filterHeader.destroy();
-		screen.destroy();
-		process.exit(0);
-	});
-
-	// Initial setup
-	updateHelpBar();
-
-	// Apply filters first if any are set
-	if (initialFilters.filtersActive) {
-		applyFilters();
-	} else {
-		taskList = createTaskList();
+	private async switchView(): Promise<void> {
+		if (this.modalOpen || this.filterPopupOpen || this.currentFocus === "filters") return;
+		this.cleanup();
+		this.screen.destroy();
+		await this.options.onTabPress?.();
 	}
-	options.subscribeUpdates?.((nextTasks, nextStatuses, nextLabels, nextSelectedTask) => {
-		statuses = nextStatuses;
-		labels = nextLabels;
-		availableLabels = collectAvailableLabels(nextTasks, labels);
-		session.updateTasks(nextTasks);
-
-		const previousTaskId = session.selected.id;
-		const currentTask =
-			session.getTasks().find((candidate) => candidate.id === nextSelectedTask?.id) ??
-			session.getTasks().find((candidate) => candidate.id === session.selected.id) ??
-			session.getTasks()[0];
-		if (currentTask) {
-			session.select(enrichTask(currentTask) ?? currentTask);
-			if (session.selected.id !== previousTaskId) options.onTaskChange?.(session.selected);
+	private applyUpdates(tasks: Task[], statuses: string[], labels: string[], selected?: Task): void {
+		this.statuses = statuses;
+		this.labels = labels;
+		this.availableLabels = collectAvailableLabels(tasks, labels);
+		this.session.updateTasks(tasks, this.filters());
+		const previous = this.session.selected.id;
+		const current =
+			this.session.getTasks().find((task) => task.id === selected?.id) ??
+			this.session.getTasks().find((task) => task.id === this.session.selected.id) ??
+			this.session.getTasks()[0];
+		if (current) {
+			this.session.select(this.enrichTask(current) ?? current);
+			if (this.session.selected.id !== previous) this.options.onTaskChange?.(this.session.selected);
 		}
-		applyFilters();
-	});
-	refreshDetailPane();
-
-	if (options.startWithSearchFocus) {
-		filterHeader.focusSearch();
-	} else if (options.startWithDetailFocus) {
-		if (rendering.descriptionBox) {
-			focusDetailPane();
-		}
-	} else {
-		// Focus the task list initially and highlight it
-		if (taskList) {
-			focusTaskList();
-		}
+		this.applyFilters();
 	}
-
-	screen.render();
-
-	// Wait for screen to close
-	return new Promise<void>((resolve) => {
-		screen.on("destroy", () => {
-			if (helpRestoreTimer) {
-				clearTimeout(helpRestoreTimer);
-				helpRestoreTimer = null;
-			}
-			contentStore?.dispose();
-			resolve();
-		});
-	});
+	private waitForClose(): Promise<void> {
+		return new Promise((resolve) =>
+			this.screen.on("destroy", () => {
+				this.cleanup();
+				resolve();
+			}),
+		);
+	}
+	private cleanup(): void {
+		if (this.closed) return;
+		this.closed = true;
+		if (this.helpRestoreTimer) clearTimeout(this.helpRestoreTimer);
+		this.helpRestoreTimer = null;
+		(this.screen as unknown as { removeListener(event: string, listener: () => void): void }).removeListener(
+			"resize",
+			this.resizeHandler,
+		);
+		for (const { keys, handler } of this.screenKeyBindings) this.screen.unkey(keys, handler);
+		this.screenKeyBindings.length = 0;
+		this.filterHeader.destroy();
+		this.taskList?.destroy();
+		this.taskList = null;
+		this.listEmptyStateBox?.destroy();
+		this.listEmptyStateBox = null;
+	}
 }
-
-/*
-async function createTaskPopupLegacy(
-	screen: ScreenInterface,
-	task: Task,
-	resolveMilestoneLabel?: (milestone: string) => string,
-	dateFormat?: string,
-	configuredProjects?: string[],
-): Promise<{
-	background: BoxInterface;
-	popup: BoxInterface;
-	contentArea: ScrollableTextInterface;
-	close: () => void;
-} | null> {
-	if (output.isTTY === false) return null;
-
-	const popup = box({
-		parent: screen,
-		top: "center",
-		left: "center",
-		width: "85%",
-		height: "80%",
-		border: "line",
-		style: {
-			border: { fg: "gray" },
-		},
-		keys: true,
-		tags: true,
-		autoPadding: true,
-	});
-
-	const background = box({
-		parent: screen,
-		top: Number(popup.top ?? 0) - 1,
-		left: Number(popup.left ?? 0) - 2,
-		width: Number(popup.width ?? 0) + 4,
-		height: Number(popup.height ?? 0) + 2,
-		style: {
-			bg: "black",
-		},
-	});
-
-	popup.setFront?.();
-
-	const { headerContent, bodyContent } = generateDetailContent(task, {
-		resolveMilestoneLabel,
-		dateFormat,
-		configuredProjects,
-	});
-
-	// Calculate header height based on content and available width
-	const popupWidth = typeof popup.width === "number" ? popup.width : 80;
-	const availableWidth = popupWidth - 6;
-
-	let headerLineCount = 0;
-	for (const headerLine of headerContent) {
-		const plainText = headerLine.replace(/\{[^}]+\}/g, "");
-		const lineCount = Math.max(1, Math.ceil(plainText.length / availableWidth));
-		headerLineCount += lineCount;
-	}
-
-	box({
-		parent: popup,
-		top: 0,
-		left: 1,
-		right: 1,
-		height: headerLineCount,
-		tags: true,
-		wrap: true,
-		scrollable: false,
-		padding: { left: 1, right: 1 },
-		content: headerContent.join("\n"),
-	});
-
-	line({
-		parent: popup,
-		top: headerLineCount,
-		left: 1,
-		right: 1,
-		orientation: "horizontal",
-		style: { fg: "gray" },
-	});
-
-	box({
-		parent: popup,
-		content: ` ${formatKeymap("shared", "escape")} `,
-		top: -1,
-		right: 1,
-		width: 5,
-		height: 1,
-		style: { inverse: true, bold: true },
-	});
-
-	const contentArea = scrollabletext({
-		parent: popup,
-		top: headerLineCount + 1,
-		left: 1,
-		right: 1,
-		bottom: 1,
-		keys: true,
-		vi: true,
-		mouse: true,
-		tags: true,
-		wrap: true,
-		padding: { left: 1, right: 1, top: 0, bottom: 0 },
-		content: bodyContent.join("\n"),
-		scrollbar: { ch: " ", inverse: true },
-		style: { scrollbar: { bg: "gray" } },
-	});
-
-	addScrollKeys(contentArea, screen);
-
-	const closePopup = () => {
-		popup.destroy();
-		background.destroy();
-		screen.render();
-	};
-
-	popup.key(keymapKeys("shared", "quit"), () => {
-		closePopup();
-		return false;
-	});
-
-	contentArea.on("focus", () => {
-		const popupStyle = popup.style as { border?: { fg?: string } };
-		popupStyle.border = { ...(popupStyle.border ?? {}), fg: "yellow" };
-		screen.render();
-	});
-
-	contentArea.on("blur", () => {
-		const popupStyle = popup.style as { border?: { fg?: string } };
-		popupStyle.border = { ...(popupStyle.border ?? {}), fg: "gray" };
-		screen.render();
-	});
-
-	contentArea.key(keymapKeys("shared", "escape"), () => {
-		closePopup();
-		return false;
-	});
-
-	setImmediate(() => {
-		contentArea.focus();
-	});
-
-	return {
-		background,
-		popup,
-		contentArea,
-		close: closePopup,
-	};
-}
-*/

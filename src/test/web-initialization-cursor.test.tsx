@@ -74,7 +74,7 @@ describe("Web Cursor initialization", () => {
 		let initialized = false;
 		apiClient.initializeProject = async (options) => {
 			submitted = options;
-			return { success: true, projectName: options.projectName };
+			return { success: true, projectName: options.projectName, projectScope: "initialization-test" };
 		};
 
 		activeRoot = createRoot(container);

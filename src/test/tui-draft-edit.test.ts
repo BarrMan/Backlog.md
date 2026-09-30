@@ -65,7 +65,7 @@ describe("Core.editTaskInTui draft resolution", () => {
 
 		testDir = createUniqueTestDir("test-tui-draft-edit");
 		await mkdir(testDir, { recursive: true });
-		core = new Core(testDir, { enableWatchers: true });
+		core = new Core(testDir);
 		await initializeTestProject(core, "TUI Draft Edit Test");
 
 		await core.createTask(
@@ -236,7 +236,7 @@ process.exit(0);
 			if (!existsSync(editedSentinel)) throw new Error("editor never wrote its sentinel");
 
 			void new Promise<void>((resolveHeld) => {
-				void core.fs.withDraftLock(reference, async () => {
+				void core.filesystem.withDraftLock(reference, async () => {
 					await writeFile(lockHeldSentinel, "");
 					resolveHeld();
 					await new Promise<void>((resolveRelease) => {

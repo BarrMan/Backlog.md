@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ScreenInterface } from "neo-neo-bblessed";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { renderBoardTui } from "../ui/board.ts";
+import { type BoardTuiOptions, TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { getHelpShortcuts } from "../ui/components/help-popup.ts";
 import { createScreen } from "../ui/tui.ts";
 import { initializeTestProject, withTimeout } from "./test-utils.ts";
@@ -89,7 +89,7 @@ afterEach(async () => {
 	await rm(TEST_DIR, { recursive: true, force: true });
 });
 
-type BoardFilters = NonNullable<Parameters<typeof renderBoardTui>[4]>["filters"];
+type BoardFilters = BoardTuiOptions["filters"];
 
 async function withBoard(
 	run: (context: {
@@ -121,7 +121,7 @@ async function withBoard(
 		resolveBoardReady = resolve;
 	});
 	try {
-		boardPromise = renderBoardTui(tasks, STATUSES, "horizontal", 20, {
+		boardPromise = new TUIRenderer(tasks, STATUSES, "horizontal", 20, {
 			screen,
 			core,
 			filters: options?.filters,
@@ -136,7 +136,7 @@ async function withBoard(
 						},
 					}
 				: {}),
-		});
+		}).run();
 		await withTimeout(boardReady, "board ready", 1000);
 		const quit = async () => {
 			if (closed) return;
@@ -168,6 +168,23 @@ async function withBoard(
 }
 
 describe("TUI board single-task mover", () => {
+	it("can close from onReady without leaving run unresolved", async () => {
+		const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget;
+		try {
+			const board = new TUIRenderer([createTask("TASK-1", "To Do", 1000)], STATUSES, "horizontal", 20, {
+				screen,
+				onReady: () => pressKey(screen, "q"),
+			}).run();
+			await withTimeout(board, "close from onReady", 1000);
+		} finally {
+			screen.destroy();
+			if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+		}
+	});
+
 	it("enters move mode on M and shows the move-mode footer", async () => {
 		await withBoard(({ screen, footer }) => {
 			pressKey(screen, "m");

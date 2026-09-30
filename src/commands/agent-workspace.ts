@@ -10,7 +10,7 @@ import { AgentSessionService } from "../agent-workspace/sessions.ts";
 import type { AgentConfigScope, AgentConfiguration, AgentPreset } from "../agent-workspace/types.ts";
 import { spawnSessionWorker } from "../agent-workspace/worker.ts";
 import type { Core } from "../core/backlog.ts";
-import { runUnifiedView } from "../ui/unified-view.ts";
+import { UnifiedViewController } from "../ui/unified-view.ts";
 import { addHelpSchema, choiceType } from "./help-schema.ts";
 
 const SCOPES = ["root", "project", "card"] as const;
@@ -91,7 +91,7 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 		examples: ["backlog workspace"],
 	})
 		.description("open the task-centered agent workspace")
-		.action(async () => runUnifiedView({ core: await getCore.project(), initialView: "workspace" }));
+		.action(async () => new UnifiedViewController({ core: await getCore.project(), initialView: "workspace" }).run());
 
 	const sessions = addHelpSchema(program.command("agent-session"), {
 		reads: "Task session state, output, and handoff records",
@@ -165,7 +165,7 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 			const content = options.file ? await readFile(options.file, "utf8") : options.content;
 			const core = await getCore.project();
 			await new AgentSessionService(core).completeHandoff(taskId, options.request, content);
-			await spawnSessionWorker("handoff-continue", taskId, core.fs.rootDir);
+			await spawnSessionWorker("handoff-continue", taskId, core.filesystem.rootDir);
 		});
 	sessions
 		.command("handoff-continue <taskId>")

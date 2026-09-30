@@ -1,6 +1,6 @@
 import type React from "react";
 import { useMemo, useState } from "react";
-import type { Milestone, MilestoneBucket, Task } from "../../types";
+import type { Milestone, MilestoneBucket, Task, TaskSummary } from "../../types";
 import { createTaskSearchIndex } from "../../utils/task-search";
 import { filterMilestoneBuckets, groupMilestoneBuckets } from "../features/milestones/buckets";
 import { MilestoneFeedbackProvider, useMilestoneFeedback } from "../features/milestones/feedback";
@@ -13,7 +13,7 @@ import { resolveMilestoneBucketExpanded } from "./milestone-bucket-expansion";
 import UnassignedMilestoneTasks from "./UnassignedMilestoneTasks";
 
 interface MilestonesPageProps {
-	tasks: Task[];
+	tasks: TaskSummary[] | Task[];
 	statuses: string[];
 	milestoneEntities: Milestone[];
 	archivedMilestones: Milestone[];

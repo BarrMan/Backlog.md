@@ -89,6 +89,14 @@ async function pressKey(key: string, options: KeyboardEventInit = {}): Promise<v
 	});
 }
 
+async function waitForRequest(started: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt += 1) {
+		if (started()) return;
+		await Bun.sleep(10);
+	}
+	throw new Error("Repair request did not start");
+}
+
 function buttonWithText(container: HTMLElement, text: string): HTMLButtonElement {
 	const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
 		candidate.textContent?.includes(text),
@@ -125,7 +133,13 @@ describe("DuplicateIdWarning", () => {
 	it("requires a second explicit confirmation before applying the preview fingerprint", async () => {
 		let repairedCalls = 0;
 		let requestBody = "";
-		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input) === "/api/status") {
+				return new Response(JSON.stringify({ projectScope: "test-project" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
 			requestBody = String(init?.body ?? "");
 			return new Response(JSON.stringify({ repairedFiles: 1, changes: [], references: [], remainingGroups: [] }), {
 				status: 200,
@@ -142,6 +156,7 @@ describe("DuplicateIdWarning", () => {
 		expect(container.textContent).toContain("Confirm repair");
 		await click(buttonWithText(container, "Repair 1 file"));
 
+		await waitForRequest(() => requestBody.length > 0);
 		expect(JSON.parse(requestBody)).toEqual({ fingerprint: "preview-fingerprint" });
 		expect(repairedCalls).toBe(1);
 	});

@@ -1,15 +1,16 @@
-import type { Milestone, Task } from "../../types";
+import type { Milestone, Task, TaskSummary } from "../../types";
 import { formatPriorityLabel } from "../../utils/priority-config";
+import { apiClient } from "../lib/api";
 import { getMilestoneLabel } from "../utils/milestones";
 import AcceptanceCriteriaProgress from "./AcceptanceCriteriaProgress";
 import StoredDate from "./StoredDate";
 
 interface TaskListRowProps {
-	task: Task;
+	task: TaskSummary | Task;
 	availablePriorities?: string[];
 	milestoneEntities: Milestone[];
 	dateFormat?: string;
-	onEditTask: (task: Task) => void;
+	onEditTask: (task: TaskSummary | Task) => void;
 }
 
 function getAssigneeInitials(value: string): string {
@@ -69,6 +70,7 @@ export function TaskListRow({
 	return (
 		<tr
 			onClick={() => onEditTask(task)}
+			onMouseEnter={() => void apiClient.loadTaskDetail(task.id).catch(() => {})}
 			className={`cursor-pointer transition-colors ${
 				isFromOtherBranch
 					? "bg-amber-50/50 hover:bg-amber-100/70 dark:bg-amber-900/10 dark:hover:bg-amber-900/20"

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import type { Task } from "../../types";
+import type { TaskSummary } from "../../types";
 import { resolvePriorityValue } from "../../utils/priority-config";
 import { resolveProjectValue } from "../../utils/project-config";
 import { resolveTaskTypeValue } from "../../utils/task-type-config";
@@ -49,7 +49,7 @@ export function useBoardRouteState() {
 export function useBoardHighlight(
 	searchParams: URLSearchParams,
 	setSearchParams: ReturnType<typeof useSearchParams>[1],
-	onEditTask: (task: Task) => void,
+	onEditTask: (task: TaskSummary | import("../../types").Task) => void,
 ) {
 	const [highlightTaskId, setHighlightTaskId] = useState<string | null>(null);
 	useEffect(() => {
@@ -67,7 +67,7 @@ export function useBoardHighlight(
 
 	return {
 		highlightTaskId,
-		handleEditTask: (task: Task) => {
+		handleEditTask: (task: TaskSummary | import("../../types").Task) => {
 			setHighlightTaskId(null);
 			onEditTask(task);
 		},

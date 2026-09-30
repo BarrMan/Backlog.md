@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import type { Task } from "../types/index.ts";
-import { prepareBoardColumns } from "../ui/board.ts";
+import { prepareBoardColumns } from "../ui/board/column-policy.ts";
 import { compareTaskIds } from "../utils/task-sorting.ts";
 import { getTestCliPath } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
@@ -51,7 +51,6 @@ describe("subtask ordering consistency", () => {
 	});
 
 	afterEach(async () => {
-		core.disposeContentStore();
 		await safeCleanup(TEST_DIR);
 	});
 

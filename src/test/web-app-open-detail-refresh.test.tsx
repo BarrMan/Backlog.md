@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { type TaskDetail, toTaskDetail } from "../core/task-detail.ts";
-import type { BacklogConfig, SearchResult, Task } from "../types/index.ts";
+import type { BacklogConfig, SearchResult, Task, TaskSummary } from "../types/index.ts";
 import App from "../web/App.tsx";
 import { HealthCheckProvider } from "../web/contexts/HealthCheckContext.tsx";
 import { apiClient } from "../web/lib/api.ts";
@@ -31,6 +31,7 @@ function makeTask(id: string, status: string, dependencies: string[] = []): Task
 type FakeSocket = {
 	onmessage: ((event: { data: string }) => void) | null;
 	onclose: (() => void) | null;
+	url: string;
 	close(): void;
 };
 
@@ -97,9 +98,11 @@ function setupDom(url: string): { container: HTMLElement; sockets: FakeSocket[] 
 		onopen: (() => void) | null = null;
 		onerror: ((error: unknown) => void) | null = null;
 		readyState = 1;
+		url: string;
 		static readonly OPEN = 1;
 		static readonly CONNECTING = 0;
-		constructor() {
+		constructor(url: string) {
+			this.url = url;
 			sockets.push(this);
 		}
 		close() {
@@ -135,18 +138,43 @@ function stubApi(handlers: {
 		fetchConfig: apiClient.fetchConfig.bind(apiClient),
 		fetchMilestones: apiClient.fetchMilestones.bind(apiClient),
 		fetchArchivedMilestones: apiClient.fetchArchivedMilestones.bind(apiClient),
+		fetchTasks: apiClient.fetchTasks.bind(apiClient),
 		search: apiClient.search.bind(apiClient),
 		fetchDuplicateTaskRepairPlan: apiClient.fetchDuplicateTaskRepairPlan.bind(apiClient),
 		fetchTask: apiClient.fetchTask.bind(apiClient),
+		getProjectScope: apiClient.getProjectScope.bind(apiClient),
 	};
 	restore.push(() => Object.assign(apiClient, originals));
 
-	apiClient.checkStatus = async () => ({ initialized: true, projectName: "Readiness" }) as never;
+	apiClient.checkStatus = async () =>
+		({ initialized: true, projectName: "Readiness", projectScope: "test scope" }) as never;
+	apiClient.getProjectScope = async () => "test scope";
 	apiClient.fetchStatuses = async () => statuses;
 	apiClient.fetchConfig = async () => ({ projectName: "Readiness", statuses }) as BacklogConfig;
 	apiClient.fetchMilestones = async () => [];
 	apiClient.fetchArchivedMilestones = async () => [];
 	apiClient.search = async () => handlers.search();
+	apiClient.fetchTasks = async () =>
+		handlers
+			.search()
+			.filter((result): result is Extract<SearchResult, { type: "task" }> => result.type === "task")
+			.map(
+				({ task }) =>
+					({
+						id: task.id,
+						title: task.title,
+						status: task.status,
+						assignee: task.assignee,
+						createdDate: task.createdDate,
+						labels: task.labels,
+						dependencies: task.dependencies,
+						acceptanceCriteriaCount: task.acceptanceCriteriaItems?.length ?? 0,
+						checkedAcceptanceCriteriaCount: task.acceptanceCriteriaItems?.filter((item) => item.checked).length ?? 0,
+						definitionOfDoneCount: task.definitionOfDoneItems?.length ?? 0,
+						checkedDefinitionOfDoneCount: task.definitionOfDoneItems?.filter((item) => item.checked).length ?? 0,
+						isReady: true,
+					}) satisfies TaskSummary,
+			);
 	apiClient.fetchDuplicateTaskRepairPlan = async () => ({ groups: [] }) as never;
 	apiClient.fetchTask = async (id: string) => handlers.fetchTask(id);
 }
@@ -171,6 +199,7 @@ const waitForText = async (container: HTMLElement, text: string) =>
 	await waitFor(JSON.stringify(text), () => Boolean(container.textContent?.includes(text)));
 
 afterEach(() => {
+	apiClient.detailCache.invalidate();
 	if (activeRoot) {
 		act(() => activeRoot?.unmount());
 		activeRoot = null;
@@ -216,6 +245,7 @@ describe("open task detail across refreshes", () => {
 			await Promise.resolve();
 		});
 		await waitForText(container, "Unknown dependency TASK-9");
+		expect(sockets.some((socket) => socket.url === "ws://localhost/?projectScope=test%20scope")).toBe(true);
 		const readsAfterOpen = detailReads;
 
 		// Someone files the dependency as completed work. Nothing in the browser's corpus moves.
@@ -402,22 +432,13 @@ describe("open task detail across refreshes", () => {
 		});
 		await settle(2);
 		const routedRead = pending[pending.length - 1];
-		expect(routedRead).not.toBe(staleRead);
+		expect(routedRead).toBe(staleRead);
 
 		await act(async () => {
 			routedRead?.(readyDetail);
 			await Promise.resolve();
 		});
 		await waitForText(container, "Ready to start");
-
-		// The read from before the modal closed answers last, and must not land on the reopened one.
-		await act(async () => {
-			staleRead?.(blockedDetail);
-			await Promise.resolve();
-		});
-		await settle(3);
-		expect(container.textContent).toContain("Ready to start");
-		expect(container.textContent).not.toContain("Unknown dependency TASK-9");
 	});
 
 	it("keeps the routed task on screen when an older task's refresh read answers late", async () => {
@@ -473,13 +494,14 @@ describe("open task detail across refreshes", () => {
 		await settle(2);
 		expect(pending.get(beta.id)?.length).toBeGreaterThan(0);
 
-		// ...and a refresh arrives while it is, which starts a read of the task still on screen.
+		// ...and a refresh arrives while it is. The selected route owns the request, so it must not
+		// restart a detail read for the task that was left behind.
 		await act(async () => {
 			for (const socket of sockets) socket.onmessage?.({ data: "tasks-updated" });
 			await Promise.resolve();
 		});
 		await settle(2);
-		expect(pending.get(alpha.id)?.length).toBeGreaterThan(0);
+		expect(pending.get(alpha.id)).toBeUndefined();
 
 		// Answer the reads of the task the route now names.
 		const answer = async (id: string, task: Task) => {
@@ -492,8 +514,6 @@ describe("open task detail across refreshes", () => {
 		await answer(beta.id, beta);
 		await waitFor("the modal to show the routed task", () => dialogText().includes("Beta task"));
 
-		// The reads of the task left behind answer last. The URL says TASK-2, so the modal has to.
-		await answer(alpha.id, alpha);
 		expect(dialogText()).toContain("Beta task");
 		expect(dialogText()).not.toContain("Alpha task");
 	});

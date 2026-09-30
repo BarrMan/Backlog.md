@@ -178,7 +178,7 @@ export interface DependencyDefects {
  * one finding while distinct cycles sharing a task are all reported.
  */
 export async function findDependencyDefects(core: Core): Promise<DependencyDefects> {
-	const corpus = await loadDependencyCorpus(core.fs);
+	const corpus = await loadDependencyCorpus(core.filesystem);
 	const graphCorpus = dependencyGraphCorpus(corpus);
 	const selfDependencies: DependencyDefects["selfDependencies"] = [];
 	const cycles: string[][] = [];

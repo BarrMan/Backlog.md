@@ -128,8 +128,6 @@ describe("CLI JSON watch", () => {
 			await watch.process.exited;
 			await watch.reading;
 		}
-		core.disposeContentStore();
-		core.disposeSearchService();
 		await safeCleanup(directory);
 	});
 

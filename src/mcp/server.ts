@@ -59,7 +59,7 @@ type ServerInitOptions = {
 type ServerRequestExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 export class McpServer {
-	public readonly application: Core;
+	public application: Core;
 	private readonly server: Server;
 	private transport?: StdioServerTransport;
 	private stopping = false;
@@ -82,7 +82,7 @@ export class McpServer {
 	>();
 
 	constructor(projectRoot: string, instructions: string, version = "0.0.0") {
-		this.application = new Core(projectRoot, { enableWatchers: true });
+		this.application = new Core(projectRoot);
 
 		this.server = new Server(
 			{
@@ -101,7 +101,11 @@ export class McpServer {
 		);
 
 		this.rootActivation = new McpRootActivation(
-			this.application,
+			() => this.application,
+			(projectRoot) => new Core(projectRoot),
+			(application) => {
+				this.application = application;
+			},
 			projectRoot,
 			(config, root) => this.setCapabilities(config, root),
 			(message, options) => this.log(message, options),
@@ -116,9 +120,9 @@ export class McpServer {
 	 * returns to the launch-directory project instead of init-required.
 	 *
 	 * The first request-scoped handler invocation can query MCP roots to look
-	 * for a valid backlog project. If found, the activation owner reinitializes the Core,
-	 * registers the full toolset, and notifies the client. Subsequent requests
-	 * reuse the cached resolution until the client reports roots changes.
+	 * for a valid backlog project. If found, the activation owner replaces the immutable Core,
+	 * registers the full toolset, and notifies the client. A roots change resolves a fresh
+	 * binding even when its project root is unchanged.
 	 */
 	enableRootsDiscovery(options: { debug?: boolean; startupConfig: BacklogConfig | null }): void {
 		this.rootActivation.enable(options);
@@ -138,8 +142,7 @@ export class McpServer {
 	}
 
 	/**
-	 * Reinitialize Core with a discovered project root and register the full
-	 * toolset, replacing fallback-mode registrations.
+	 * Register the full toolset for the currently selected immutable Core instance.
 	 */
 	private async setCapabilities(config: BacklogConfig | null, projectRoot: string): Promise<void> {
 		if (config) this.registerProjectCapabilities(config);
@@ -245,13 +248,16 @@ export class McpServer {
 			await this.server.close();
 		} finally {
 			this.transport = undefined;
-			this.application.disposeSearchService();
-			this.application.disposeContentStore();
 		}
 	}
 
 	public getServer(): Server {
 		return this.server;
+	}
+
+	/** Each MCP operation reads through a fresh immutable Core for the selected project root. */
+	public createOperationCore(): Core {
+		return new Core(this.application.filesystem.rootDir);
 	}
 
 	// -- Internal handlers --------------------------------------------------

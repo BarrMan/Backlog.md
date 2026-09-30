@@ -82,7 +82,7 @@ remote_operations: false
 		expect(filepath).toContain("task-1");
 
 		// List tasks should work without remote operations
-		const tasks = await core.listTasksWithMetadata();
+		const tasks = await core.queryTasks({ includeCrossBranch: false });
 		expect(tasks).toHaveLength(1);
 		expect(tasks[0]?.id).toBe("TASK-1");
 		expect(tasks[0]?.title).toBe("Test task in offline mode");
@@ -119,7 +119,7 @@ remote_operations: false
 		await core.createTask(task1);
 		await core.createTask(task2);
 
-		const tasks = await core.listTasksWithMetadata();
+		const tasks = await core.queryTasks({ includeCrossBranch: false });
 		expect(tasks).toHaveLength(2);
 
 		const taskIds = tasks.map((t) => t.id);

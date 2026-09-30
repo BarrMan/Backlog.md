@@ -24,7 +24,7 @@ export class TaskCreationService {
 		const type = await this.core.normalizeTaskType(input.type);
 		const project = await this.core.normalizeProject(input.project);
 		const createdDate = formatStoredDate();
-		const config = await this.core.fs.loadConfig();
+		const config = await this.core.filesystem.loadConfig();
 		const autoCommitEnabled = await this.core.shouldAutoCommit(autoCommit);
 
 		const { task, write } = await this.core.withCreateLock(async () => {
@@ -32,7 +32,7 @@ export class TaskCreationService {
 				? await this.core.resolveParentTaskIdForCreate(prepared.requestedParentTaskId)
 				: undefined;
 			const id = await this.core.generateNextId(prepared.isDraft ? EntityType.Draft : EntityType.Task, parentTaskId);
-			const { valid, invalid } = await validateDependencies(prepared.dependencies, this.core.fs, {
+			const { valid, invalid } = await validateDependencies(prepared.dependencies, this.core.filesystem, {
 				id,
 				title: prepared.title,
 				status: prepared.isDraft ? "Draft" : status || config?.defaultStatus || FALLBACK_STATUS,
@@ -54,9 +54,9 @@ export class TaskCreationService {
 				createdDate,
 			});
 			const previousPath = prepared.isDraft
-				? await this.core.fs.resolveDraftFilePath(task.id)
+				? await this.core.filesystem.resolveDraftFilePath(task.id)
 				: await getTaskPath(task.id, this.core);
-			const targetPath = await this.core.fs.getTaskWritePath(task, prepared.isDraft);
+			const targetPath = await this.core.filesystem.getTaskWritePath(task, prepared.isDraft);
 			const targetContent = await readFileIfPresent(targetPath);
 			const previousIndexEntries = autoCommitEnabled ? await this.core.git.getIndexEntries(targetPath) : undefined;
 			const filePath = await this.core.writePreparedTask(task, prepared.isDraft);
