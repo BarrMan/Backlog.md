@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import type { McpServer } from "../mcp/server.ts";
+import { describe, expect, it, spyOn } from "bun:test";
+import { Core } from "../core/backlog.ts";
 import { TaskHandlers } from "../mcp/tools/tasks/handlers.ts";
 import type { Task } from "../types/index.ts";
 
@@ -37,15 +37,18 @@ const completedTask: Task = {
 };
 
 describe("MCP task tools local filtering", () => {
-	const mockConfig = { statuses: ["To Do", "In Progress", "Done"] };
+	const mockConfig = {
+		projectName: "Test",
+		statuses: ["To Do", "In Progress", "Done"],
+		labels: [],
+		dateFormat: "YYYY-MM-DD",
+	};
 
 	it("filters cross-branch tasks out of task_list", async () => {
-		const handlers = new TaskHandlers({
-			queryTasks: async () => [localTask, remoteTask],
-			filesystem: {
-				loadConfig: async () => mockConfig,
-			},
-		} as unknown as McpServer);
+		const core = new Core(process.cwd());
+		spyOn(core, "queryTasks").mockResolvedValue([localTask, remoteTask]);
+		spyOn(core.filesystem, "loadConfig").mockResolvedValue(mockConfig);
+		const handlers = new TaskHandlers(core);
 
 		const result = await handlers.listTasks({});
 		const text = (result.content ?? [])
@@ -61,16 +64,16 @@ describe("MCP task tools local filtering", () => {
 		let includeCompleted = false;
 		const laterActiveTask = { ...localTask, id: "task-20" };
 		const earlierCompletedTask = { ...completedTask, id: "task-1" };
-		const handlers = new TaskHandlers({
-			loadTasks: async () => {
-				crossBranchLoads++;
-				return [localTask, remoteTask];
-			},
-			loadWorkingCopyTasks: async (requestedIncludeCompleted = false) => {
-				includeCompleted = requestedIncludeCompleted;
-				return [earlierCompletedTask, laterActiveTask];
-			},
-		} as unknown as McpServer);
+		const core = new Core(process.cwd());
+		spyOn(core, "loadTasks").mockImplementation(async () => {
+			crossBranchLoads++;
+			return [localTask, remoteTask];
+		});
+		spyOn(core, "loadWorkingCopyTasks").mockImplementation(async (requestedIncludeCompleted = false) => {
+			includeCompleted = requestedIncludeCompleted;
+			return [earlierCompletedTask, laterActiveTask];
+		});
+		const handlers = new TaskHandlers(core);
 
 		const results = [await handlers.searchTasks({ query: "task" }), await handlers.searchTasks({ query: "task" })];
 		const texts = results.map((result) =>

@@ -1,6 +1,6 @@
 import { basename, join } from "node:path";
 import { DEFAULT_STATUSES } from "../../../constants/index.ts";
-import { TaskArchiveStatusError, type VacatedTaskResult } from "../../../core/backlog.ts";
+import { type Core, TaskArchiveStatusError, type VacatedTaskResult } from "../../../core/backlog.ts";
 import { findLocalDuplicateTaskIds } from "../../../core/duplicate-task-repair.ts";
 import { loadTaskDetail, loadTaskListItems } from "../../../core/task-detail.ts";
 import { isCreateLockError, isTaskLockError } from "../../../file-system/operations.ts";
@@ -25,7 +25,6 @@ import { sortByOrdinalAndPriority } from "../../../utils/task-sorting.ts";
 import { getTerminalStatus, isTerminalStatus } from "../../../utils/terminal-status.ts";
 import { formatUtcDateForDisplay } from "../../../utils/utc-date-display.ts";
 import { BacklogToolError } from "../../errors/mcp-errors.ts";
-import type { McpServer } from "../../server.ts";
 import type { CallToolResult } from "../../types.ts";
 import { formatTaskCallResult } from "../../utils/task-response.ts";
 
@@ -109,7 +108,7 @@ function buildTaskListFilters(args: TaskListArgs): TaskListFilter | undefined {
 }
 
 export class TaskHandlers {
-	constructor(private readonly core: McpServer) {}
+	constructor(private readonly core: Core) {}
 
 	private async resolveMilestoneInput(milestone: string): Promise<string> {
 		return resolveMilestoneInputFromFilesystem(milestone, this.core.filesystem);

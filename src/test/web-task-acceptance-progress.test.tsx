@@ -137,7 +137,7 @@ describe("browser task acceptance criteria progress", () => {
 
 	it("includes card progress in the accessible name", () => {
 		const container = renderCard(createTask({ acceptanceCriteriaItems: createCriteria(4, 7) }));
-		const card = container.querySelector("[role='button']");
+		const card = container.querySelector("button[aria-label^='Open task-']");
 
 		expect(card?.getAttribute("aria-label")).toBe("Open task-1: Task summary. Acceptance criteria progress: 4 of 7");
 	});

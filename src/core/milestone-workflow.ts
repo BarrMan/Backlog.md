@@ -42,6 +42,25 @@ type MilestoneTaskUpdate = {
 	updatedTaskFilePaths: Set<string>;
 };
 
+type MilestoneRenamePreparation = {
+	source: Milestone;
+	active: Milestone[];
+	archived: Milestone[];
+	to: string;
+	dueDate: string | undefined;
+	titleChanged: boolean;
+	dueDateChanged: boolean;
+	shouldUpdateTasks: boolean;
+};
+
+type MilestoneRemovalPreparation = {
+	source: Milestone;
+	active: Milestone[];
+	archived: Milestone[];
+	taskHandling: "clear" | "keep" | "reassign";
+	reassignedMilestone?: Milestone;
+};
+
 async function updateTaskMilestones(core: Core, tasks: Task[], milestone: string | null): Promise<MilestoneTaskUpdate> {
 	const previousMilestones = new Map<string, string | undefined>();
 	const updatedTaskFilePaths = new Set<string>();
@@ -127,7 +146,7 @@ export class MilestoneWorkflow {
 		}
 	}
 
-	async rename(input: MilestoneRenameInput): Promise<MilestoneRenameResult> {
+	private async prepareRename(input: MilestoneRenameInput): Promise<MilestoneRenamePreparation> {
 		const from = normalizeMilestoneName(input.from);
 		const to = normalizeMilestoneName(input.to);
 		if (!from || !to)
@@ -151,8 +170,20 @@ export class MilestoneWorkflow {
 		}
 		const titleChanged = to !== source.title.trim();
 		const dueDateChanged = dueDate !== source.dueDate;
-		if (!titleChanged && !dueDateChanged)
-			return { source, milestone: source, titleChanged, dueDateChanged, updatedTaskIds: [], skippedTaskUpdate: false };
+		if (titleChanged) this.ensureRenameDoesNotConflict(source, to, active);
+		return {
+			source,
+			active,
+			archived,
+			to,
+			dueDate,
+			titleChanged,
+			dueDateChanged,
+			shouldUpdateTasks: titleChanged && (input.updateTasks ?? true),
+		};
+	}
+
+	private ensureRenameDoesNotConflict(source: Milestone, to: string, active: Milestone[]): void {
 		const conflict = active.find(
 			(milestone) =>
 				milestoneKey(milestone.id) !== milestoneKey(source.id) &&
@@ -163,11 +194,76 @@ export class MilestoneWorkflow {
 				`Milestone alias conflict: "${to}" matches existing milestone "${conflict.title}" (${conflict.id}).`,
 				"VALIDATION_ERROR",
 			);
-		const shouldUpdateTasks = titleChanged && (input.updateTasks ?? true);
-		const tasks = shouldUpdateTasks ? await this.core.filesystem.listTasks() : [];
-		const keys = shouldUpdateTasks
-			? taskMatchKeys(from, source, !titleAliasCollides(source, [...active, ...archived]))
-			: new Set<string>();
+	}
+
+	private async updateMatchingTasks(
+		source: Milestone,
+		input: string,
+		milestones: Milestone[],
+		replacement: string | null,
+	): Promise<MilestoneTaskUpdate> {
+		const tasks = await this.core.filesystem.listTasks();
+		const keys = taskMatchKeys(input, source, !titleAliasCollides(source, milestones));
+		return updateTaskMilestones(
+			this.core,
+			tasks.filter((task) => keys.has(milestoneKey(task.milestone ?? ""))),
+			replacement,
+		);
+	}
+
+	private async rollbackRename(source: Milestone, updates: MilestoneTaskUpdate): Promise<string> {
+		const taskFailures = await rollbackTaskMilestones(this.core, updates.previousMilestones);
+		const renameResult = await this.core.renameMilestone(source.id, source.title, false, source.dueDate ?? null);
+		const details = [
+			!renameResult.success ? "failed to rollback milestone file rename" : "",
+			taskFailures.length ? `failed to rollback task milestones for: ${taskFailures.join(", ")}` : "",
+		].filter(Boolean);
+		return details.length ? ` (${details.join("; ")})` : "";
+	}
+
+	private async prepareRemoval(input: MilestoneRemoveInput): Promise<MilestoneRemovalPreparation> {
+		const name = normalizeMilestoneName(input.name);
+		if (!name) throw new MilestoneWorkflowError("Milestone name cannot be empty.", "VALIDATION_ERROR");
+		const [active, archived] = await Promise.all([
+			this.core.filesystem.listMilestones(),
+			this.core.filesystem.listArchivedMilestones(),
+		]);
+		const source = findActiveMilestoneByAlias(name, active);
+		if (!source) throw new MilestoneWorkflowError(`Milestone not found: "${name}"`, "NOT_FOUND");
+		const taskHandling = input.taskHandling ?? "clear";
+		if (taskHandling !== "reassign") return { source, active, archived, taskHandling };
+		if (!input.reassignTo?.trim())
+			throw new MilestoneWorkflowError("reassignTo is required when taskHandling is reassign.", "VALIDATION_ERROR");
+		const reassignedMilestone = findActiveMilestoneByAlias(normalizeMilestoneName(input.reassignTo), active);
+		if (!reassignedMilestone)
+			throw new MilestoneWorkflowError(`Target milestone not found: "${input.reassignTo}"`, "VALIDATION_ERROR");
+		if (milestoneKey(reassignedMilestone.id) === milestoneKey(source.id))
+			throw new MilestoneWorkflowError("reassignTo must be different from the removed milestone.", "VALIDATION_ERROR");
+		return { source, active, archived, taskHandling, reassignedMilestone };
+	}
+
+	private async rollbackRemoval(
+		archivedResult: { sourcePath?: string; targetPath?: string },
+		updates: MilestoneTaskUpdate,
+	): Promise<string[]> {
+		const details: string[] = [];
+		if (archivedResult.sourcePath && archivedResult.targetPath) {
+			try {
+				await moveFile(archivedResult.targetPath, archivedResult.sourcePath);
+			} catch {
+				details.push("failed to rollback milestone archive");
+			}
+		}
+		const failures = await rollbackTaskMilestones(this.core, updates.previousMilestones);
+		if (failures.length) details.push(`failed rollback for: ${failures.join(", ")}`);
+		return details;
+	}
+
+	async rename(input: MilestoneRenameInput): Promise<MilestoneRenameResult> {
+		const preparation = await this.prepareRename(input);
+		const { source, active, archived, to, titleChanged, dueDateChanged, shouldUpdateTasks } = preparation;
+		if (!titleChanged && !dueDateChanged)
+			return { source, milestone: source, titleChanged, dueDateChanged, updatedTaskIds: [], skippedTaskUpdate: false };
 		const renamed = await this.core.renameMilestone(source.id, to, false, input.dueDate);
 		if (!renamed.success || !renamed.milestone)
 			throw new MilestoneWorkflowError(`Failed to rename milestone "${source.title}".`, "INTERNAL_ERROR");
@@ -176,22 +272,9 @@ export class MilestoneWorkflow {
 			updatedTaskIds: [],
 			updatedTaskFilePaths: new Set(),
 		};
-		const rollback = async () => {
-			const taskFailures = await rollbackTaskMilestones(this.core, updates.previousMilestones);
-			const renameResult = await this.core.renameMilestone(source.id, source.title, false, source.dueDate ?? null);
-			const details = [
-				!renameResult.success ? "failed to rollback milestone file rename" : "",
-				taskFailures.length ? `failed to rollback task milestones for: ${taskFailures.join(", ")}` : "",
-			].filter(Boolean);
-			return details.length ? ` (${details.join("; ")})` : "";
-		};
 		try {
 			if (shouldUpdateTasks)
-				updates = await updateTaskMilestones(
-					this.core,
-					tasks.filter((task) => keys.has(milestoneKey(task.milestone ?? ""))),
-					source.id,
-				);
+				updates = await this.updateMatchingTasks(source, input.from, [...active, ...archived], source.id);
 			await this.commit(`backlog: ${titleChanged ? "Rename" : "Update"} milestone ${source.id}`, {
 				sourcePath: renamed.sourcePath,
 				targetPath: renamed.targetPath,
@@ -199,7 +282,7 @@ export class MilestoneWorkflow {
 			});
 		} catch {
 			throw new MilestoneWorkflowError(
-				`Failed while finalizing milestone rename "${source.title}"${await rollback()}.`,
+				`Failed while finalizing milestone rename "${source.title}"${await this.rollbackRename(source, updates)}.`,
 				"INTERNAL_ERROR",
 			);
 		}
@@ -216,27 +299,7 @@ export class MilestoneWorkflow {
 	}
 
 	async remove(input: MilestoneRemoveInput): Promise<MilestoneRemoveResult> {
-		const name = normalizeMilestoneName(input.name);
-		if (!name) throw new MilestoneWorkflowError("Milestone name cannot be empty.", "VALIDATION_ERROR");
-		const [active, archived] = await Promise.all([
-			this.core.filesystem.listMilestones(),
-			this.core.filesystem.listArchivedMilestones(),
-		]);
-		const source = findActiveMilestoneByAlias(name, active);
-		if (!source) throw new MilestoneWorkflowError(`Milestone not found: "${name}"`, "NOT_FOUND");
-		const taskHandling = input.taskHandling ?? "clear";
-		const reassignedMilestone =
-			taskHandling === "reassign"
-				? findActiveMilestoneByAlias(normalizeMilestoneName(input.reassignTo ?? ""), active)
-				: undefined;
-		if (taskHandling === "reassign" && !input.reassignTo?.trim())
-			throw new MilestoneWorkflowError("reassignTo is required when taskHandling is reassign.", "VALIDATION_ERROR");
-		if (taskHandling === "reassign" && !reassignedMilestone)
-			throw new MilestoneWorkflowError(`Target milestone not found: "${input.reassignTo}"`, "VALIDATION_ERROR");
-		if (reassignedMilestone && milestoneKey(reassignedMilestone.id) === milestoneKey(source.id))
-			throw new MilestoneWorkflowError("reassignTo must be different from the removed milestone.", "VALIDATION_ERROR");
-		const tasks = taskHandling === "keep" ? [] : await this.core.filesystem.listTasks();
-		const keys = taskMatchKeys(name, source, !titleAliasCollides(source, [...active, ...archived]));
+		const { source, active, archived, taskHandling, reassignedMilestone } = await this.prepareRemoval(input);
 		let updates: MilestoneTaskUpdate = {
 			previousMilestones: new Map(),
 			updatedTaskIds: [],
@@ -244,9 +307,10 @@ export class MilestoneWorkflow {
 		};
 		try {
 			if (taskHandling !== "keep")
-				updates = await updateTaskMilestones(
-					this.core,
-					tasks.filter((task) => keys.has(milestoneKey(task.milestone ?? ""))),
+				updates = await this.updateMatchingTasks(
+					source,
+					input.name,
+					[...active, ...archived],
 					reassignedMilestone?.id ?? null,
 				);
 		} catch {
@@ -271,15 +335,7 @@ export class MilestoneWorkflow {
 				taskFilePaths: updates.updatedTaskFilePaths,
 			});
 		} catch {
-			const details: string[] = [];
-			if (archivedResult.sourcePath && archivedResult.targetPath)
-				try {
-					await moveFile(archivedResult.targetPath, archivedResult.sourcePath);
-				} catch {
-					details.push("failed to rollback milestone archive");
-				}
-			const failures = await rollbackTaskMilestones(this.core, updates.previousMilestones);
-			if (failures.length) details.push(`failed rollback for: ${failures.join(", ")}`);
+			const details = await this.rollbackRemoval(archivedResult, updates);
 			throw new MilestoneWorkflowError(
 				`Failed while finalizing milestone removal "${source.title}"${details.length ? ` (${details.join("; ")})` : ""}.`,
 				"INTERNAL_ERROR",

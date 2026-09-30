@@ -23,11 +23,7 @@ export function getAcceptanceCriteriaProgressCounts(
 const RING_RADIUS = 5;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
-export default function AcceptanceCriteriaProgress({
-	task,
-	density,
-	className = "",
-}: AcceptanceCriteriaProgressProps) {
+export default function AcceptanceCriteriaProgress({ task, density, className = "" }: AcceptanceCriteriaProgressProps) {
 	const progress = getAcceptanceCriteriaProgressCounts(task);
 	if (!progress) return null;
 

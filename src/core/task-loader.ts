@@ -219,6 +219,24 @@ function normalizeLocalBranch(branch: string, currentBranch: string): string | n
 	return br;
 }
 
+function isRemoteBranch(branch: string): boolean {
+	return branch
+		.trim()
+		.replace(/^refs\/remotes\//, "")
+		.startsWith("origin/");
+}
+
+function pinnedBranchRef(tip: GitBranchTip, currentBranch: string, includeRemote: boolean): PinnedBranchRef | null {
+	if (isRemoteBranch(tip.name)) {
+		if (!includeRemote) return null;
+		const branch = normalizeRemoteBranch(tip.name);
+		return branch ? { branch, ref: `origin/${branch}`, commit: tip.commit, source: "remote" } : null;
+	}
+	if (!currentBranch || tip.current) return null;
+	const branch = normalizeLocalBranch(tip.name, currentBranch);
+	return branch ? { branch, ref: branch, commit: tip.commit, source: "local-branch" } : null;
+}
+
 /**
  * Hydrate tasks by fetching their content
  * Only call this for the "winner" tasks that we actually need
@@ -386,40 +404,13 @@ export class BranchTaskLoader {
 			while (queue.length > 0) {
 				const branchRef = queue.pop();
 				if (!branchRef) break;
-				try {
-					const tree = await this.loadCommitIndex(branchRef.commit, backlogDir, prefix, historyCutoff);
-					const index = branchRef.source === "remote" ? remoteIndex : localIndex;
-					for (const cached of tree) {
-						const lastModified = new Date(cached.lastModified);
-						const entry: RemoteIndexEntry = {
-							id: cached.id,
-							branch: branchRef.branch,
-							path: cached.path,
-							lastModified,
-							commit: branchRef.commit,
-						};
-						if (cached.type) {
-							entry.stateEntry = {
-								id: cached.id,
-								type: cached.type,
-								branch: branchRef.ref,
-								path: cached.path,
-								lastModified,
-							};
-							stateEntries.push(entry.stateEntry);
-						}
-						if (cached.type === "task" || (includeCompleted && cached.type === "completed")) {
-							const entries = index.get(cached.id);
-							if (entries) entries.push(entry);
-							else index.set(cached.id, [entry]);
-						}
-					}
-				} catch (error) {
-					complete = false;
-					if (process.env.DEBUG) {
-						console.debug(`Skipping branch ${branchRef.ref}: ${error}`);
-					}
-				}
+				const indexed = await this.indexBranch(
+					branchRef,
+					{ backlogDir, prefix, historyCutoff, includeCompleted },
+					stateEntries,
+					branchRef.source === "remote" ? remoteIndex : localIndex,
+				);
+				complete = indexed && complete;
 			}
 		});
 		await Promise.all(workers);
@@ -475,28 +466,13 @@ export class BranchTaskLoader {
 		userConfig: BacklogConfig | null,
 		snapshotCurrentBranch?: string,
 	): Promise<PinnedBranchRef[]> {
-		const isRemote = (name: string) => {
-			const normalized = name.trim().replace(/^refs\/remotes\//, "");
-			return normalized.startsWith("origin/");
-		};
-		const currentTip = tips.find((tip) => tip.current && !isRemote(tip.name));
+		const currentTip = tips.find((tip) => tip.current && !isRemoteBranch(tip.name));
 		const currentBranch = currentTip?.name ?? snapshotCurrentBranch ?? (await this.git.getCurrentBranch()).trim();
 		const refs: PinnedBranchRef[] = [];
 		const seen = new Set<string>();
 
 		for (const tip of tips) {
-			let branchRef: PinnedBranchRef | null = null;
-			if (isRemote(tip.name)) {
-				if (userConfig?.remoteOperations === false) continue;
-				const branch = normalizeRemoteBranch(tip.name);
-				if (branch) {
-					branchRef = { branch, ref: `origin/${branch}`, commit: tip.commit, source: "remote" };
-				}
-			} else if (currentBranch && !tip.current) {
-				const branch = normalizeLocalBranch(tip.name, currentBranch);
-				if (branch) branchRef = { branch, ref: branch, commit: tip.commit, source: "local-branch" };
-			}
-
+			const branchRef = pinnedBranchRef(tip, currentBranch, userConfig?.remoteOperations !== false);
 			if (!branchRef) continue;
 			const key = `${branchRef.source}\0${branchRef.ref}\0${branchRef.commit}`;
 			if (seen.has(key)) continue;
@@ -504,6 +480,52 @@ export class BranchTaskLoader {
 			refs.push(branchRef);
 		}
 		return refs;
+	}
+
+	private async indexBranch(
+		branchRef: PinnedBranchRef,
+		options: { backlogDir: string; prefix: string; historyCutoff: Date | undefined; includeCompleted: boolean },
+		stateEntries: BranchTaskStateEntry[],
+		index: Map<string, RemoteIndexEntry[]>,
+	): Promise<boolean> {
+		try {
+			const tree = await this.loadCommitIndex(
+				branchRef.commit,
+				options.backlogDir,
+				options.prefix,
+				options.historyCutoff,
+			);
+			for (const cached of tree) this.addIndexedTask(cached, branchRef, options.includeCompleted, stateEntries, index);
+			return true;
+		} catch (error) {
+			if (process.env.DEBUG) console.debug(`Skipping branch ${branchRef.ref}: ${error}`);
+			return false;
+		}
+	}
+
+	private addIndexedTask(
+		cached: CachedTaskTreeEntry,
+		branchRef: PinnedBranchRef,
+		includeCompleted: boolean,
+		stateEntries: BranchTaskStateEntry[],
+		index: Map<string, RemoteIndexEntry[]>,
+	): void {
+		const lastModified = new Date(cached.lastModified);
+		const entry: RemoteIndexEntry = {
+			id: cached.id,
+			branch: branchRef.branch,
+			path: cached.path,
+			lastModified,
+			commit: branchRef.commit,
+		};
+		if (cached.type) {
+			entry.stateEntry = { id: cached.id, type: cached.type, branch: branchRef.ref, path: cached.path, lastModified };
+			stateEntries.push(entry.stateEntry);
+		}
+		if (cached.type !== "task" && (!includeCompleted || cached.type !== "completed")) return;
+		const entries = index.get(cached.id);
+		if (entries) entries.push(entry);
+		else index.set(cached.id, [entry]);
 	}
 
 	private commitIndexKey(commit: string, backlogDir: string, prefix: string, cutoff: Date | undefined): string {

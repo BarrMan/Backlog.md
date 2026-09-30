@@ -795,6 +795,24 @@ describe("ContentStore", () => {
 		expect(tasks.map((task) => task.title)).toContain("Updated Task");
 	});
 
+	it("subscribes to filesystem mutations without replacing save methods", async () => {
+		store.dispose();
+		const saveTask = filesystem.saveTask;
+		const saveDocument = filesystem.saveDocument;
+		const saveDecision = filesystem.saveDecision;
+		store = new ContentStore(filesystem);
+
+		expect(filesystem.saveTask).toBe(saveTask);
+		expect(filesystem.saveDocument).toBe(saveDocument);
+		expect(filesystem.saveDecision).toBe(saveDecision);
+
+		await filesystem.saveTask(sampleTask);
+		await store.ensureInitialized();
+		await filesystem.saveTask({ ...sampleTask, title: "Published by filesystem mutation" });
+
+		expect(store.getTasks()[0]?.title).toBe("Published by filesystem mutation");
+	});
+
 	it("does not let an older task refresh overwrite a newer persisted upsert", async () => {
 		store.dispose();
 		const saveTaskToDisk = filesystem.saveTask.bind(filesystem);

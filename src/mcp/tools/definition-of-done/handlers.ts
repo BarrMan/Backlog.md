@@ -1,5 +1,5 @@
+import type { Core } from "../../../core/backlog.ts";
 import { BacklogToolError } from "../../errors/mcp-errors.ts";
-import type { McpServer } from "../../server.ts";
 import type { CallToolResult } from "../../types.ts";
 
 export type DefinitionOfDoneDefaultsUpsertArgs = {
@@ -21,7 +21,7 @@ function formatDefinitionOfDoneDefaults(items: string[]): string {
 }
 
 export class DefinitionOfDoneHandlers {
-	constructor(private readonly core: McpServer) {}
+	constructor(private readonly core: Core) {}
 
 	private async loadConfigOrThrow() {
 		const config = await this.core.filesystem.loadConfig();

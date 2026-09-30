@@ -3,8 +3,8 @@ import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Task } from "../types/index.ts";
-import { apiClient } from "../web/lib/api.ts";
 import Board from "../web/components/Board.tsx";
+import { apiClient } from "../web/lib/api.ts";
 
 // jsdom has no drag controller, so it cannot show the browser bug this guards: Chromium aborts a
 // native drag whose dragstart handler mutates the board layout, which is what re-showing the

@@ -19,7 +19,7 @@ import {
 } from "./schemas.ts";
 
 export function registerDocumentTools(server: McpServer, _config: BacklogConfig): void {
-	const handlers = new DocumentHandlers(server);
+	const handlers = new DocumentHandlers(server.application);
 
 	const listDocumentsTool: McpToolHandler = createSimpleValidatedTool(
 		{

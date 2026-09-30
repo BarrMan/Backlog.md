@@ -96,37 +96,51 @@ class FakeResizeObserver {
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
+const staticResponses = new Map<string, unknown>([
+	["/api/status", { initialized: true, projectPath: "/tmp/project" }],
+	["/api/statuses", defaultConfig.statuses],
+	["/api/config", defaultConfig],
+	["/api/milestones", []],
+	["/api/milestones/archived", []],
+	["/api/version", { version: "test" }],
+]);
+
+const respondToSearch = async (url: URL): Promise<Response | null> => {
+	if (url.pathname !== "/api/search") return null;
+	if (failRefreshSearch) {
+		archiveRecoveryEvents.push("refresh");
+		throw new Error("Search network failure");
+	}
+	if (searchHold) await searchHold;
+	return json(tasks.map((task) => ({ type: "task", task, score: 1 })) satisfies SearchResult[]);
+};
+
+const respondToTask = (url: URL): Response | null => {
+	if (!url.pathname.startsWith("/api/task/")) return null;
+	const id = decodeURIComponent(url.pathname.slice("/api/task/".length));
+	const task = tasks.find((candidate) => candidate.id === id);
+	return task ? json(task) : json({ error: `Task ${id} not found` }, 404);
+};
+
+const respondToArchive = (url: URL, init?: RequestInit): Response | null => {
+	if (!url.pathname.startsWith("/api/tasks/") || init?.method !== "DELETE") return null;
+	const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
+	tasks = tasks.filter((task) => task.id !== id);
+	return reportArchiveMoved
+		? json({ error: "dependent cleanup failed", archiveState: "moved" }, 500)
+		: json({ success: true, cleanedTaskIds: cleanedTaskIds[id] ?? [] });
+};
+
 const respond = async (url: URL, init?: RequestInit): Promise<Response> => {
-	if (url.pathname === "/api/status") return json({ initialized: true, projectPath: "/tmp/project" });
-	if (url.pathname === "/api/statuses") return json(defaultConfig.statuses);
-	if (url.pathname === "/api/config") return json(defaultConfig);
-	if (url.pathname === "/api/search") {
-		if (failRefreshSearch) {
-			archiveRecoveryEvents.push("refresh");
-			throw new Error("Search network failure");
-		}
-		if (searchHold) await searchHold;
-		return json(tasks.map((task) => ({ type: "task", task, score: 1 })) satisfies SearchResult[]);
-	}
-	if (url.pathname === "/api/milestones" || url.pathname === "/api/milestones/archived") return json([]);
+	const staticResponse = staticResponses.get(url.pathname);
+	if (staticResponse) return json(staticResponse);
+	const searchResponse = await respondToSearch(url);
+	if (searchResponse) return searchResponse;
 	if (url.pathname === "/api/tasks/duplicates") return json(emptyDuplicatePlan());
-	if (url.pathname === "/api/version") return json({ version: "test" });
-	if (url.pathname.startsWith("/api/task/")) {
-		const id = decodeURIComponent(url.pathname.slice("/api/task/".length));
-		const task = tasks.find((candidate) => candidate.id === id);
-		return task ? json(task) : json({ error: `Task ${id} not found` }, 404);
-	}
-	if (url.pathname.startsWith("/api/tasks/") && init?.method === "DELETE") {
-		const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
-		tasks = tasks.filter((task) => task.id !== id);
-		if (reportArchiveMoved) {
-			return json(
-				{ error: "dependent cleanup failed", archiveState: "moved" },
-				500,
-			);
-		}
-		return json({ success: true, cleanedTaskIds: cleanedTaskIds[id] ?? [] });
-	}
+	const taskResponse = respondToTask(url);
+	if (taskResponse) return taskResponse;
+	const archiveResponse = respondToArchive(url, init);
+	if (archiveResponse) return archiveResponse;
 	return json([]);
 };
 
@@ -240,9 +254,7 @@ const renderTaskList = async (): Promise<HTMLElement> => {
 };
 
 const findButton = (container: HTMLElement, matches: (text: string) => boolean): HTMLButtonElement => {
-	const button = Array.from(container.querySelectorAll("button")).find((element) =>
-		matches(element.textContent ?? ""),
-	);
+	const button = Array.from(container.querySelectorAll("button")).find((element) => matches(element.textContent ?? ""));
 	expect(button).toBeTruthy();
 	return button as HTMLButtonElement;
 };

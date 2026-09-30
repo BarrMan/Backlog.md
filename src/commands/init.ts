@@ -324,51 +324,53 @@ async function selectIntegration(
 	let mode = resolveInitialIntegrationMode(options, nonInteractive);
 	let tipShown = false;
 	while (true) {
-		if (!mode) {
-			if (!tipShown) {
-				clack.note("CLI instructions are recommended for AI tool integration.", "AI setup tip");
-				tipShown = true;
-			}
-			const response = await clack.select({
-				message: "How would you like your AI tools to connect to Backlog.md?",
-				initialValue: "cli",
-				options: [
-					{ label: "via CLI instructions (recommended)", value: "cli" },
-					{
-						label: "via MCP connector (optional for Claude Code, Codex, Gemini CLI, Kiro, Cursor, etc.)",
-						value: "mcp",
-					},
-					{ label: "Skip for now (I am not using Backlog.md with AI tools)", value: "none" },
-				],
-			});
-			if (clack.isCancel(response)) return cancelInitialization();
-			mode = normalizeInitIntegrationOption(String(response)) ?? "mcp";
-			console.log("");
-		}
-		if (mode === "cli") {
-			const selection = await selectCliInstructions(options.agentInstructions, nonInteractive);
-			if (selection) return { mode, ...selection };
-			mode = null;
-			console.log("");
-			continue;
-		}
-		if (mode === "mcp") {
-			if (nonInteractive)
-				return {
-					mode,
-					agentFiles: [],
-					agentInstructionsSkipped: false,
-					mcpClientSetupSummary: "skipped (non-interactive)",
-				};
-			const summary = await configureInitMcpClients(cwd, MCP_GUIDE_URL);
-			if (summary !== null)
-				return { mode, agentFiles: [], agentInstructionsSkipped: false, mcpClientSetupSummary: summary };
-			mode = null;
-			console.log("");
-			continue;
-		}
-		return { mode: "none", agentFiles: [], agentInstructionsSkipped: false };
+		const selectedMode = mode ?? (await promptForIntegrationMode(tipShown));
+		if (!selectedMode) return cancelInitialization();
+		tipShown ||= mode === null;
+		if (mode === null) console.log("");
+		const selection = await selectIntegrationMode(cwd, options, nonInteractive, selectedMode);
+		if (selection) return selection;
+		mode = null;
+		console.log("");
 	}
+}
+
+async function promptForIntegrationMode(tipShown: boolean): Promise<IntegrationMode | null> {
+	if (!tipShown) clack.note("CLI instructions are recommended for AI tool integration.", "AI setup tip");
+	const response = await clack.select({
+		message: "How would you like your AI tools to connect to Backlog.md?",
+		initialValue: "cli",
+		options: [
+			{ label: "via CLI instructions (recommended)", value: "cli" },
+			{ label: "via MCP connector (optional for Claude Code, Codex, Gemini CLI, Kiro, Cursor, etc.)", value: "mcp" },
+			{ label: "Skip for now (I am not using Backlog.md with AI tools)", value: "none" },
+		],
+	});
+	return clack.isCancel(response) ? null : (normalizeInitIntegrationOption(String(response)) ?? "mcp");
+}
+
+async function selectIntegrationMode(
+	cwd: string,
+	options: InitCommandOptions,
+	nonInteractive: boolean,
+	mode: IntegrationMode,
+): Promise<IntegrationSelection | null> {
+	if (mode === "none") return { mode, agentFiles: [], agentInstructionsSkipped: false };
+	if (mode === "cli") {
+		const selection = await selectCliInstructions(options.agentInstructions, nonInteractive);
+		return selection ? { mode, ...selection } : null;
+	}
+	if (nonInteractive)
+		return {
+			mode,
+			agentFiles: [],
+			agentInstructionsSkipped: false,
+			mcpClientSetupSummary: "skipped (non-interactive)",
+		};
+	const summary = await configureInitMcpClients(cwd, MCP_GUIDE_URL);
+	return summary === null
+		? null
+		: { mode, agentFiles: [], agentInstructionsSkipped: false, mcpClientSetupSummary: summary };
 }
 
 function resolveInitialIntegrationMode(options: InitCommandOptions, nonInteractive: boolean): IntegrationMode | null {

@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
+import { decodeConfigYaml } from "../file-system/config.ts";
 import { resolveBacklogDirectory } from "../utils/backlog-directory.ts";
-import { parseColonConfigLine } from "../utils/config-line.ts";
 import { getPriorityLabels } from "../utils/priority-config.ts";
 import { getProjectValues } from "../utils/project-config.ts";
 import { BACKLOG_CWD_ENV } from "../utils/runtime-cwd.ts";
@@ -81,57 +81,11 @@ export function addHelpSchema(command: Command, schema: HelpSchema): Command {
 	return command.addHelpText("after", () => renderHelpSchema(schema));
 }
 
-function stripYamlScalar(value: string): string {
-	return value
-		.trim()
-		.replace(/^['"]|['"]$/g, "")
-		.trim();
-}
-
-function parseFlowList(value: string): string[] | null {
-	const trimmed = value.trim();
-	if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-		return null;
-	}
-
-	return trimmed.slice(1, -1).split(",").map(stripYamlScalar).filter(Boolean);
-}
-
-function parseBlockList(lines: string[], startIndex: number): string[] {
-	const blockValues: string[] = [];
-	for (let blockIndex = startIndex; blockIndex < lines.length; blockIndex++) {
-		const blockLine = lines[blockIndex] ?? "";
-		const trimmedBlockLine = blockLine.trim();
-		if (!trimmedBlockLine || trimmedBlockLine.startsWith("#")) continue;
-		if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmedBlockLine)) break;
-		const itemMatch = trimmedBlockLine.match(/^-\s*(.+)$/);
-		if (itemMatch?.[1]) blockValues.push(stripYamlScalar(itemMatch[1]));
-	}
-	return blockValues.filter(Boolean);
-}
-
 function parseArrayFromConfig(content: string, keyName: string): string[] | null {
-	const lines = content.split(/\r?\n/);
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index]?.trim() ?? "";
-		if (!line || line.startsWith("#")) {
-			continue;
-		}
-		const match = line.match(new RegExp(`^${keyName}\\s*:\\s*(.*)$`));
-		if (!match) {
-			continue;
-		}
-
-		const inlineValue = match[1] ?? "";
-		const flowList = parseFlowList(inlineValue);
-		if (flowList) {
-			return flowList;
-		}
-
-		return parseBlockList(lines, index + 1);
-	}
-
-	return null;
+	const decoded = decodeConfigYaml(content, keyName);
+	return "value" in decoded && Array.isArray(decoded.value)
+		? decoded.value.filter((value): value is string => typeof value === "string")
+		: null;
 }
 
 function parseStatusesFromConfig(content: string): string[] | null {
@@ -151,15 +105,9 @@ function parseProjectsFromConfig(content: string): string[] | null {
 }
 
 function parseStringValueFromConfig(content: string, keys: string[]): string | null {
-	for (const rawLine of content.split(/\r?\n/)) {
-		const parsed = parseColonConfigLine(rawLine);
-		if (!parsed) continue;
-		const { key } = parsed;
-		if (!keys.includes(key)) {
-			continue;
-		}
-		const value = stripYamlScalar(parsed.value);
-		return value || null;
+	for (const key of keys) {
+		const decoded = decodeConfigYaml(content, key);
+		if ("value" in decoded && typeof decoded.value === "string") return decoded.value.trim() || null;
 	}
 	return null;
 }

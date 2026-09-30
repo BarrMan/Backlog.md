@@ -28,7 +28,11 @@ function makeTask(id: string, status: string, dependencies: string[] = []): Task
 }
 
 /** The one message the app listens to for "the records on disk changed". */
-type FakeSocket = { onmessage: ((event: { data: string }) => void) | null; onclose: (() => void) | null; close(): void };
+type FakeSocket = {
+	onmessage: ((event: { data: string }) => void) | null;
+	onclose: (() => void) | null;
+	close(): void;
+};
 
 /**
  * Everything this file plants on the global object, restored afterwards. Bun runs test files in one
@@ -319,7 +323,7 @@ describe("open task detail across refreshes", () => {
 		});
 		await waitForText(container, "Draft with dependency");
 
-		const row = Array.from(container.querySelectorAll("div.cursor-pointer")).find((element) =>
+		const row = Array.from(container.querySelectorAll("button.cursor-pointer")).find((element) =>
 			element.textContent?.includes("Draft with dependency"),
 		);
 		expect(row).toBeTruthy();
@@ -521,7 +525,7 @@ describe("open task detail across refreshes", () => {
 			await Promise.resolve();
 		});
 		await waitForText(container, "Draft with dependency");
-		const row = Array.from(container.querySelectorAll("div.cursor-pointer")).find((element) =>
+		const row = Array.from(container.querySelectorAll("button.cursor-pointer")).find((element) =>
 			element.textContent?.includes("Draft with dependency"),
 		);
 		await act(async () => {

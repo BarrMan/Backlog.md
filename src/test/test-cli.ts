@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { captureProcessOutput } from "../process/capture.ts";
 
 export function getTestCliPath(): string {
-	return process.env.BACKLOG_TEST_CLI_BUNDLE?.trim() || join(process.cwd(), "src", "cli.ts");
+	return process.env.BACKLOG_TEST_CLI_BUNDLE?.trim() || join(process.cwd(), "src", "cli", "index.ts");
 }
 
 export async function runTestCli(

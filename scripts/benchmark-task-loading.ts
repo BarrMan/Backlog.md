@@ -478,8 +478,8 @@ function coreSurface(projectRoot: string): BenchmarkSurface {
 
 function mcpSurface(projectRoot: string): BenchmarkSurface {
 	const server = new McpServer(projectRoot, "Task loading benchmark");
-	const handlers = new TaskHandlers(server);
-	const instrumentation = instrumentCore(server);
+	const handlers = new TaskHandlers(server.application);
+	const instrumentation = instrumentCore(server.application);
 	return {
 		async operation() {
 			const result = await handlers.searchTasks({ query: "benchmark-task-loading" });
@@ -491,8 +491,8 @@ function mcpSurface(projectRoot: string): BenchmarkSurface {
 		},
 		instrumentation,
 		async dispose() {
-			server.disposeSearchService();
-			server.disposeContentStore();
+			server.application.disposeSearchService();
+			server.application.disposeContentStore();
 			instrumentation.restore();
 		},
 	};

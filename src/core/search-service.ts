@@ -201,35 +201,17 @@ export class SearchService {
 		limit?: number,
 	): SearchResult[] {
 		const results: SearchResult[] = [];
-
-		if (allowedTypes.has("task")) {
-			const tasks = this.tasks.filter((entity) => matchesTaskFilters(entity.task));
-			for (const entity of tasks) {
+		const append = (entities: SearchEntity[]) => {
+			for (const entity of entities) {
 				results.push(this.mapEntityToResult(entity));
-				if (limit && results.length >= limit) {
-					return results;
-				}
+				if (limit && results.length >= limit) return true;
 			}
-		}
-
-		if (allowedTypes.has("document")) {
-			for (const entity of this.documents) {
-				results.push(this.mapEntityToResult(entity));
-				if (limit && results.length >= limit) {
-					return results;
-				}
-			}
-		}
-
-		if (allowedTypes.has("decision")) {
-			for (const entity of this.decisions) {
-				results.push(this.mapEntityToResult(entity));
-				if (limit && results.length >= limit) {
-					return results;
-				}
-			}
-		}
-
+			return false;
+		};
+		if (allowedTypes.has("task") && append(this.tasks.filter((entity) => matchesTaskFilters(entity.task))))
+			return results;
+		if (allowedTypes.has("document") && append(this.documents)) return results;
+		if (allowedTypes.has("decision")) append(this.decisions);
 		return results;
 	}
 

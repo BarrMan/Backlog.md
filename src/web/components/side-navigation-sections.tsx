@@ -178,15 +178,33 @@ const ContentNavigationSection = ({
 	</section>
 );
 
-const ContentSectionState = ({ isLoading, error, count, label, children }: { isLoading: boolean; error?: Error | null; count: number; label: string; children: ReactNode }) => {
+const ContentSectionState = ({
+	isLoading,
+	error,
+	count,
+	label,
+	children,
+}: {
+	isLoading: boolean;
+	error?: Error | null;
+	count: number;
+	label: string;
+	children: ReactNode;
+}) => {
 	if (isLoading) return <SideNavigationLoadingPhase className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400" />;
 	if (error) return <p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">{label} unavailable</p>;
-	if (count === 0) return <p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">No {label.toLowerCase()}</p>;
+	if (count === 0)
+		return <p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">No {label.toLowerCase()}</p>;
 	return children;
 };
 
 const CreateDocumentButton = ({ onClick }: { onClick: () => void }) => (
-	<button type="button" onClick={onClick} className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors duration-200" title="Create new document">
+	<button
+		type="button"
+		onClick={onClick}
+		className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors duration-200"
+		title="Create new document"
+	>
 		<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
 			<circle cx="12" cy="12" r="10" />
@@ -224,12 +242,7 @@ export const ContentNavigationSections = memo(function ContentNavigationSections
 				onToggle={onToggleDocs}
 				action={<CreateDocumentButton onClick={onCreateDocument} />}
 			>
-				<ContentSectionState
-					isLoading={isLoading}
-					error={error}
-					count={docs.length}
-					label="Documents"
-				>
+				<ContentSectionState isLoading={isLoading} error={error} count={docs.length} label="Documents">
 					{searchQuery.trim() ? (
 						docs.map((doc) => <SideNavigationDocumentLink key={doc.id} doc={doc} />)
 					) : (
@@ -243,7 +256,9 @@ export const ContentNavigationSections = memo(function ContentNavigationSections
 									onToggleFolder={onToggleFolder}
 								/>
 							))}
-						{ungroupedDocs.map((doc) => <SideNavigationDocumentLink key={doc.id} doc={doc} />)}
+							{ungroupedDocs.map((doc) => (
+								<SideNavigationDocumentLink key={doc.id} doc={doc} />
+							))}
 						</>
 					)}
 				</ContentSectionState>

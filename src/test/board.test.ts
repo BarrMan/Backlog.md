@@ -225,6 +225,48 @@ describe("exportKanbanBoardToFile", () => {
 		await rm(dir, { recursive: true, force: true });
 	});
 
+	it("sorts sibling subtasks by their shared task ID ordering", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "board-export-"));
+		const file = join(dir, "README.md");
+		const tasks: Task[] = [
+			{
+				id: "task-1",
+				title: "Parent",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2025-01-01",
+				labels: [],
+				dependencies: [],
+			},
+			{
+				id: "task-1.10",
+				title: "Tenth child",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2025-01-01",
+				labels: [],
+				dependencies: [],
+				parentTaskId: "task-1",
+			},
+			{
+				id: "task-1.2",
+				title: "Second child",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2025-01-01",
+				labels: [],
+				dependencies: [],
+				parentTaskId: "task-1",
+			},
+		];
+
+		await exportKanbanBoardToFile(tasks, ["To Do"], file, "TestProject");
+		const content = await Bun.file(file).text();
+		expect(content.indexOf("TASK-1.2")).toBeLessThan(content.indexOf("TASK-1.10"));
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
 	it("keeps flat parent/child export output unchanged", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "board-export-"));
 		const file = join(dir, "README.md");

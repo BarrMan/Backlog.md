@@ -66,9 +66,7 @@ const openActionsMenu = async (container: HTMLElement) => {
 };
 
 const findMenuButton = (container: HTMLElement, label: string): HTMLButtonElement => {
-	const button = Array.from(container.querySelectorAll("button")).find((button) =>
-		button.textContent?.includes(label),
-	);
+	const button = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes(label));
 	expect(button).toBeTruthy();
 	return button as HTMLButtonElement;
 };

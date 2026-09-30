@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
 import MDEditor from "@uiw/react-md-editor";
+import { useEffect, useMemo, useRef } from "react";
 import { useTaskIdIndex } from "../contexts/TaskIdIndexContext";
 import { renderMermaidIn } from "../utils/mermaid";
 import { createTaskIdLinkPlugin } from "../utils/task-id-links";
@@ -8,7 +8,7 @@ interface Props {
 	source: string;
 }
 
-const URI_AUTOLINK_PREFIX_REGEX = /^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\u0000-\u0020]*>/;
+const URI_AUTOLINK_PREFIX_REGEX = /^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/;
 const EMAIL_AUTOLINK_PREFIX_REGEX = /^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z0-9-]+>/;
 
 function sanitizeMarkdownSource(source: string): string {
@@ -47,15 +47,11 @@ export default function MermaidMarkdown({ source }: Props) {
 		});
 
 		return () => cancelAnimationFrame(frameId);
-	}, [safeSource]);
+	}, []);
 
 	return (
 		<div ref={ref} className="wmde-markdown">
-			<MDEditor.Markdown
-				source={safeSource}
-				urlTransform={keepHashLinksInCurrentRoute}
-				remarkPlugins={remarkPlugins}
-			/>
+			<MDEditor.Markdown source={safeSource} urlTransform={keepHashLinksInCurrentRoute} remarkPlugins={remarkPlugins} />
 		</div>
 	);
 }

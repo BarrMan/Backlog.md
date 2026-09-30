@@ -13,7 +13,7 @@ import { TaskHandlers } from "./handlers.ts";
 import { taskArchiveSchema, taskCompleteSchema, taskViewSchema } from "./schemas.ts";
 
 export function registerTaskTools(server: McpServer, config: BacklogConfig): void {
-	const handlers = new TaskHandlers(server);
+	const handlers = new TaskHandlers(server.application);
 
 	const taskCreateSchema = generateTaskCreateSchema(config);
 	const taskEditSchema = generateTaskEditSchema(config);

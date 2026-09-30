@@ -22,6 +22,8 @@ interface TaskReconciliation {
 	lastPublishedSignature: string | null;
 }
 
+type TaskReadResult = { kind: "retry" } | { kind: "absent" } | { kind: "candidate"; task: Task; signature: string };
+
 type TaskFileSnapshot = { state: "complete"; taskIds: Set<string> } | { state: "incomplete" };
 
 const TASK_SETTLE_DELAY_MS = 50;
@@ -73,6 +75,113 @@ async function readTaskFileSnapshot(tasksDir: string): Promise<TaskFileSnapshot>
 	}
 }
 
+async function classifyTaskRead(core: Core, taskId: string, tasksDir: string): Promise<TaskReadResult> {
+	let task: Task | null;
+	try {
+		task = await core.filesystem.loadTask(taskId);
+	} catch {
+		return { kind: "retry" };
+	}
+	if (isUsableTask(task, taskId)) return { kind: "candidate", task, signature: taskContentSignature(task) };
+	if (task !== null) return { kind: "retry" };
+	const snapshot = await readTaskFileSnapshot(tasksDir);
+	return snapshot.state === "complete" && !snapshot.taskIds.has(normalizeTaskId(taskId))
+		? { kind: "absent" }
+		: { kind: "retry" };
+}
+
+async function publishTaskRemoval(
+	taskId: string,
+	state: TaskReconciliation,
+	callbacks: TaskWatcherCallbacks,
+): Promise<void> {
+	if (state.hasPublishedState && state.lastPublishedSignature === null) return;
+	try {
+		await callbacks.onTaskRemoved?.(taskId);
+		state.hasPublishedState = true;
+		state.lastPublishedSignature = null;
+	} catch {
+		// Callback failures are bounded by the same finite reconciliation budget.
+	}
+}
+
+async function publishTaskCandidate(
+	task: Task,
+	signature: string,
+	state: TaskReconciliation,
+	callbacks: TaskWatcherCallbacks,
+): Promise<boolean> {
+	if (state.hasPublishedState && state.lastPublishedSignature === signature) return true;
+	try {
+		if (!state.hasPublishedState || state.lastPublishedSignature === null)
+			await callbacks.onTaskAdded?.(normalizeTaskIdentity(task));
+		else await callbacks.onTaskChanged?.(normalizeTaskIdentity(task));
+		state.hasPublishedState = true;
+		state.lastPublishedSignature = signature;
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function reconcileReadResult(
+	result: TaskReadResult,
+	attempt: number,
+	taskId: string,
+	state: TaskReconciliation,
+	callbacks: TaskWatcherCallbacks,
+	previousSignature: string | null | undefined,
+): Promise<{ done: boolean; signature: string | null | undefined }> {
+	if (result.kind === "retry") return { done: false, signature: previousSignature };
+	if (result.kind === "absent") {
+		if (attempt === TASK_READ_ATTEMPTS - 1) await publishTaskRemoval(taskId, state, callbacks);
+		return { done: attempt === TASK_READ_ATTEMPTS - 1, signature: previousSignature };
+	}
+	if (result.signature !== previousSignature) return { done: false, signature: result.signature };
+	return {
+		done: await publishTaskCandidate(result.task, result.signature, state, callbacks),
+		signature: previousSignature,
+	};
+}
+
+async function readDirectoryTasks(
+	core: Core,
+	tasksDir: string,
+): Promise<{ taskFileIds: Set<string>; tasks: Task[] } | null> {
+	const snapshot = await readTaskFileSnapshot(tasksDir);
+	if (snapshot.state === "incomplete") return null;
+	try {
+		return { taskFileIds: snapshot.taskIds, tasks: await core.filesystem.listTasks() };
+	} catch {
+		return null;
+	}
+}
+
+function scheduleVisibleTasks(
+	tasks: Task[],
+	reconciliations: ReadonlyMap<string, TaskReconciliation>,
+	visibleTaskIds: Set<string>,
+	schedule: (taskId: string) => void,
+): void {
+	for (const task of tasks) {
+		if (!isUsableTask(task, task.id)) continue;
+		const taskId = normalizeTaskId(task.id);
+		visibleTaskIds.add(taskId);
+		const state = reconciliations.get(taskId);
+		if (!state?.hasPublishedState || state.lastPublishedSignature !== taskContentSignature(task)) schedule(taskId);
+	}
+}
+
+function scheduleMissingTasks(
+	reconciliations: ReadonlyMap<string, TaskReconciliation>,
+	visibleTaskIds: ReadonlySet<string>,
+	taskFileIds: ReadonlySet<string>,
+	schedule: (taskId: string) => void,
+): void {
+	for (const taskId of reconciliations.keys())
+		if (!visibleTaskIds.has(taskId) && !taskFileIds.has(taskId)) schedule(taskId);
+}
+
 /**
  * Watch the current checkout's backlog/tasks directory and emit incremental updates.
  * A single filesystem event is reconciled until task content is stable or absence is
@@ -97,51 +206,17 @@ export function watchTasks(
 			await delay(attempt === 0 ? TASK_SETTLE_DELAY_MS : TASK_RETRY_DELAY_MS);
 			if (stopped || eventGeneration !== state.generation) return;
 
-			let task: Task | null = null;
-			try {
-				task = await core.filesystem.loadTask(taskId);
-			} catch {
-				continue;
-			}
-
-			if (!isUsableTask(task, taskId)) {
-				previousCandidateSignature = task === null ? null : undefined;
-				if (attempt < TASK_READ_ATTEMPTS - 1) continue;
-
-				const fileSnapshot = await readTaskFileSnapshot(tasksDir);
-				const isConfirmedAbsent =
-					task === null && fileSnapshot.state === "complete" && !fileSnapshot.taskIds.has(normalizeTaskId(taskId));
-				if (isConfirmedAbsent && (!state.hasPublishedState || state.lastPublishedSignature !== null)) {
-					try {
-						await callbacks.onTaskRemoved?.(taskId);
-						state.hasPublishedState = true;
-						state.lastPublishedSignature = null;
-					} catch {
-						// Callback failures are bounded by the same finite reconciliation budget.
-					}
-				}
-				return;
-			}
-
-			const signature = taskContentSignature(task);
-			if (signature !== previousCandidateSignature) {
-				previousCandidateSignature = signature;
-				continue;
-			}
-			if (state.hasPublishedState && state.lastPublishedSignature === signature) return;
-
-			try {
-				if (!state.hasPublishedState || state.lastPublishedSignature === null) {
-					await callbacks.onTaskAdded?.(normalizeTaskIdentity(task));
-				} else {
-					await callbacks.onTaskChanged?.(normalizeTaskIdentity(task));
-				}
-				state.hasPublishedState = true;
-				state.lastPublishedSignature = signature;
-				return;
-			} catch {
-				// Retry callback delivery while this event remains current.
-			}
+			const result = await classifyTaskRead(core, taskId, tasksDir);
+			const resolution = await reconcileReadResult(
+				result,
+				attempt,
+				taskId,
+				state,
+				callbacks,
+				previousCandidateSignature,
+			);
+			previousCandidateSignature = resolution.signature;
+			if (resolution.done) return;
 		}
 	};
 
@@ -169,38 +244,24 @@ export function watchTasks(
 	};
 	const scheduleDirectoryReconciliation = () => {
 		const eventGeneration = ++directoryGeneration;
-		void (async () => {
+		const reconcileDirectory = async () => {
 			const visibleTaskIds = new Set<string>();
 			let taskFileIds: Set<string> | null = null;
 			for (let attempt = 0; attempt < TASK_READ_ATTEMPTS; attempt++) {
 				await delay(attempt === 0 ? TASK_SETTLE_DELAY_MS : TASK_RETRY_DELAY_MS);
 				if (stopped || eventGeneration !== directoryGeneration) return;
 
-				const fileSnapshot = await readTaskFileSnapshot(tasksDir);
-				if (fileSnapshot.state === "incomplete") continue;
-				let tasks: Task[];
-				try {
-					tasks = await core.filesystem.listTasks();
-				} catch {
-					continue;
-				}
-				taskFileIds = fileSnapshot.taskIds;
+				const directoryTasks = await readDirectoryTasks(core, tasksDir);
+				if (!directoryTasks) continue;
+				taskFileIds = directoryTasks.taskFileIds;
 				visibleTaskIds.clear();
-				for (const task of tasks) {
-					if (!isUsableTask(task, task.id)) continue;
-					const taskId = normalizeTaskId(task.id);
-					visibleTaskIds.add(taskId);
-					const state = reconciliations.get(taskId);
-					if (!state?.hasPublishedState || state.lastPublishedSignature !== taskContentSignature(task))
-						schedule(taskId);
-				}
+				scheduleVisibleTasks(directoryTasks.tasks, reconciliations, visibleTaskIds, schedule);
 			}
 
 			if (stopped || eventGeneration !== directoryGeneration || !taskFileIds) return;
-			for (const taskId of reconciliations.keys()) {
-				if (!visibleTaskIds.has(taskId) && !taskFileIds.has(taskId)) schedule(taskId);
-			}
-		})().catch(() => {});
+			scheduleMissingTasks(reconciliations, visibleTaskIds, taskFileIds, schedule);
+		};
+		void reconcileDirectory().catch(() => {});
 	};
 
 	const watcher: FSWatcher = watch(tasksDir, { recursive: false }, (eventType, filename) => {

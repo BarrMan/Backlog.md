@@ -540,7 +540,9 @@ describe("Web board filters", () => {
 			expect(cleanupButton).toBeTruthy();
 			await clickElement(cleanupButton as Element);
 
-			const oneDayButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "1 day");
+			const oneDayButton = Array.from(container.querySelectorAll("button")).find(
+				(button) => button.textContent === "1 day",
+			);
 			expect(oneDayButton).toBeTruthy();
 			await clickElement(oneDayButton as Element);
 

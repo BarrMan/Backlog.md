@@ -27,6 +27,17 @@ function isForegroundTag(name: string): boolean {
 	return name.endsWith("-fg");
 }
 
+function appendClosingTag(output: string, tag: string, stack: TagState[]): string {
+	const openTag = stack.pop();
+	if (!openTag) return output + tag;
+	const closeTag = parseCloseTag(tag);
+	if (closeTag && closeTag !== openTag.name) {
+		stack.push(openTag);
+		return output + tag;
+	}
+	return openTag.strip ? output : output + tag;
+}
+
 export function stripBlessedFgTags(value: string): string {
 	if (!value.includes("{")) {
 		return value;
@@ -43,23 +54,8 @@ export function stripBlessedFgTags(value: string): string {
 		output += value.slice(cursor, start);
 		cursor = start + tag.length;
 
-		const closeTag = parseCloseTag(tag);
-		if (closeTag !== null) {
-			const openTag = stack.pop();
-			if (!openTag) {
-				output += tag;
-				continue;
-			}
-
-			if (closeTag && closeTag !== openTag.name) {
-				stack.push(openTag);
-				output += tag;
-				continue;
-			}
-
-			if (!openTag.strip) {
-				output += tag;
-			}
+		if (parseCloseTag(tag) !== null) {
+			output = appendClosingTag(output, tag, stack);
 			continue;
 		}
 

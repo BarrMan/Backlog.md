@@ -26,20 +26,10 @@ async function parseScalarOptions(
 	context: TaskEditOptionContext,
 ): Promise<ParseResult | TaskEditArgs> {
 	const args: TaskEditArgs = {};
-	if (options.status) {
-		const validStatuses = await context.statuses();
-		const status = await getCanonicalStatus(String(options.status), context.core, validStatuses);
-		if (!status)
-			return { error: `Invalid status: ${options.status}. Valid statuses are: ${formatValidStatuses(validStatuses)}` };
-		args.status = status;
-	}
-	if (options.priority) {
-		const config = await context.core.filesystem.loadConfig();
-		const priority = resolvePriorityValue(String(options.priority), config);
-		if (!priority)
-			return { error: `Invalid priority: ${options.priority}. Valid values are: ${formatValidPriorityValues(config)}` };
-		args.priority = priority;
-	}
+	const statusError = await addStatusOption(args, options, context);
+	if (statusError) return statusError;
+	const priorityError = await addPriorityOption(args, options, context);
+	if (priorityError) return priorityError;
 	if (options.ordinal !== undefined) {
 		const ordinal = Number(options.ordinal);
 		if (Number.isNaN(ordinal) || ordinal < 0)
@@ -50,13 +40,51 @@ async function parseScalarOptions(
 		return { error: "Cannot use --milestone and --clear-milestone together." };
 	if (options.dueDate !== undefined && options.clearDueDate)
 		return { error: "Cannot use --due-date and --clear-due-date together." };
-	if (typeof options.milestone === "string") args.milestone = await context.resolveMilestone(options.milestone);
-	else if (options.clearMilestone) args.milestone = null;
-	if (typeof options.dueDate === "string") args.dueDate = options.dueDate;
-	else if (options.clearDueDate) args.dueDate = null;
+	await addMilestoneOption(args, options, context);
+	addDueDateOption(args, options);
 	if (options.type !== undefined) args.type = String(options.type);
 	if (options.project !== undefined) args.project = String(options.project);
 	return args;
+}
+
+async function addStatusOption(
+	args: TaskEditArgs,
+	options: Record<string, unknown>,
+	context: TaskEditOptionContext,
+): Promise<ParseResult | undefined> {
+	if (!options.status) return undefined;
+	const validStatuses = await context.statuses();
+	const status = await getCanonicalStatus(String(options.status), context.core, validStatuses);
+	if (!status)
+		return { error: `Invalid status: ${options.status}. Valid statuses are: ${formatValidStatuses(validStatuses)}` };
+	args.status = status;
+}
+
+async function addPriorityOption(
+	args: TaskEditArgs,
+	options: Record<string, unknown>,
+	context: TaskEditOptionContext,
+): Promise<ParseResult | undefined> {
+	if (!options.priority) return undefined;
+	const config = await context.core.filesystem.loadConfig();
+	const priority = resolvePriorityValue(String(options.priority), config);
+	if (!priority)
+		return { error: `Invalid priority: ${options.priority}. Valid values are: ${formatValidPriorityValues(config)}` };
+	args.priority = priority;
+}
+
+async function addMilestoneOption(
+	args: TaskEditArgs,
+	options: Record<string, unknown>,
+	context: TaskEditOptionContext,
+): Promise<void> {
+	if (typeof options.milestone === "string") args.milestone = await context.resolveMilestone(options.milestone);
+	else if (options.clearMilestone) args.milestone = null;
+}
+
+function addDueDateOption(args: TaskEditArgs, options: Record<string, unknown>): void {
+	if (typeof options.dueDate === "string") args.dueDate = options.dueDate;
+	else if (options.clearDueDate) args.dueDate = null;
 }
 
 function parseChecklistOptions(options: Record<string, unknown>): ParseResult | TaskEditArgs {
@@ -136,31 +164,40 @@ function parseListOptions(options: Record<string, unknown>): ParseResult | TaskE
 				"Cannot combine --ref with --add-ref or --remove-ref. Use --ref a,b for the final full reference set, or use add/remove flags without --ref.",
 		};
 	const args: TaskEditArgs = {};
-	const labels = parseDelimitedStringList(options.label) ?? [];
-	if (labels.length > 0) args.labels = labels;
-	else if (options.clearLabels) args.labels = [];
-	const addLabels = parseDelimitedStringList(options.addLabel) ?? [];
-	if (addLabels.length > 0) args.addLabels = addLabels;
-	const removeLabels = parseDelimitedStringList(options.removeLabel) ?? [];
-	if (removeLabels.length > 0) args.removeLabels = removeLabels;
-	const assignee = parseClearableStringList(options.assignee);
-	if (assignee) args.assignee = assignee;
-	const dependencies = parseClearableStringList([...toStringArray(options.dependsOn), ...toStringArray(options.dep)]);
-	if (dependencies) args.dependencies = dependencies;
-	else if (options.clearDeps) args.dependencies = [];
-	const references = parseClearableStringList(options.ref);
-	if (references) args.references = references;
-	else if (options.clearRefs) args.references = [];
-	const addReferences = parseDelimitedStringList(options.addRef) ?? [];
-	if (addReferences.length > 0) args.addReferences = addReferences;
-	const removeReferences = parseDelimitedStringList(options.removeRef) ?? [];
-	if (removeReferences.length > 0) args.removeReferences = removeReferences;
-	const documentation = parseClearableStringList(options.doc);
-	if (documentation) args.documentation = documentation;
-	else if (options.clearDocs) args.documentation = [];
+	addListValue(args, "labels", options.label, options.clearLabels);
+	addDelimitedValue(args, "addLabels", options.addLabel);
+	addDelimitedValue(args, "removeLabels", options.removeLabel);
+	addClearableValue(args, "assignee", options.assignee);
+	addClearableValue(
+		args,
+		"dependencies",
+		[...toStringArray(options.dependsOn), ...toStringArray(options.dep)],
+		options.clearDeps,
+	);
+	addClearableValue(args, "references", options.ref, options.clearRefs);
+	addDelimitedValue(args, "addReferences", options.addRef);
+	addDelimitedValue(args, "removeReferences", options.removeRef);
+	addClearableValue(args, "documentation", options.doc, options.clearDocs);
 	const modifiedFiles = parseDelimitedStringList(options.modifiedFile);
 	if (modifiedFiles?.length) args.modifiedFiles = modifiedFiles;
 	return args;
+}
+
+function addDelimitedValue(args: TaskEditArgs, field: keyof TaskEditArgs, value: unknown): void {
+	const values = parseDelimitedStringList(value) ?? [];
+	if (values.length > 0) Object.assign(args, { [field]: values });
+}
+
+function addListValue(args: TaskEditArgs, field: keyof TaskEditArgs, value: unknown, clear: unknown): void {
+	const values = parseDelimitedStringList(value) ?? [];
+	if (values.length > 0) Object.assign(args, { [field]: values });
+	else if (clear) Object.assign(args, { [field]: [] });
+}
+
+function addClearableValue(args: TaskEditArgs, field: keyof TaskEditArgs, value: unknown, clear?: unknown): void {
+	const values = parseClearableStringList(value);
+	if (values) Object.assign(args, { [field]: values });
+	else if (clear) Object.assign(args, { [field]: [] });
 }
 
 function parseContentOptions(options: Record<string, unknown>): TaskEditArgs {

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
+import { getTestCliPath } from "./test-cli.ts";
 import {
 	closeServer,
 	createUniqueTestDir,
@@ -14,7 +14,7 @@ import {
 } from "./test-utils.ts";
 
 // This suite exercises browser assets that are embedded only in the compiled release binary.
-const CLI_PATH = join(process.cwd(), "src", "cli.ts");
+const CLI_PATH = getTestCliPath();
 type BrowserProcess = ChildProcessByStdio<null, Readable, Readable>;
 
 let TEST_DIR: string;

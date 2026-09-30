@@ -114,20 +114,12 @@ export function resolveOrdinalConflicts<T extends { id: string; ordinal?: number
 
 	for (let index = 0; index < tasks.length; index += 1) {
 		const task = tasks[index];
-		if (!task) {
-			continue;
-		}
-		let assigned: number;
-
-		if (forceSequential) {
-			assigned = index === 0 ? startOrdinal : (lastOrdinal ?? startOrdinal) + defaultStep;
-		} else if (task.ordinal === undefined) {
-			assigned = index === 0 ? startOrdinal : (lastOrdinal ?? startOrdinal) + defaultStep;
-		} else if (lastOrdinal !== undefined && task.ordinal <= lastOrdinal) {
-			assigned = lastOrdinal + defaultStep;
-		} else {
-			assigned = task.ordinal;
-		}
+		if (!task) continue;
+		const nextOrdinal = index === 0 ? startOrdinal : (lastOrdinal ?? startOrdinal) + defaultStep;
+		const assigned =
+			forceSequential || task.ordinal === undefined || (lastOrdinal !== undefined && task.ordinal <= lastOrdinal)
+				? nextOrdinal
+				: task.ordinal;
 
 		if (assigned !== task.ordinal) {
 			updates.push({

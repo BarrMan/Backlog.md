@@ -141,7 +141,7 @@ Use the Inspector tooling when you want to exercise the stdio server outside an 
 2. Choose **STDIO** transport.
 3. Fill the connection fields exactly as follows:
    - **Command**: `bun`
-   - **Arguments** (enter each item separately): `--cwd`, `/Users/<you>/Projects/Backlog.md`, `src/cli.ts`, `mcp`, `start`
+   - **Arguments** (enter each item separately): `--cwd`, `/Users/<you>/Projects/Backlog.md`, `src/cli/index.ts`, `mcp`, `start`
    - Remove any proxy token; it is not needed for local stdio.
 4. Connect and use the tools/resources panes to issue MCP requests.
 
@@ -165,10 +165,10 @@ npx @modelcontextprotocol/inspector-cli \
   --cli \
   --transport stdio \
   --method tools/list \
-  -- bun --cwd /Users/<you>/Projects/Backlog.md src/cli.ts mcp start
+  -- bun --cwd /Users/<you>/Projects/Backlog.md src/cli/index.ts mcp start
 ```
 
-The key detail in both flows is to call `src/cli.ts mcp start` directly (or `bun run --silent mcp`) so stdout stays pure JSON for the MCP handshake.
+The key detail in both flows is to call `src/cli/index.ts mcp start` directly (or `bun run --silent mcp`) so stdout stays pure JSON for the MCP handshake.
 
 ### Adding New MCP Agents
 

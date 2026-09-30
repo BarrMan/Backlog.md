@@ -7,7 +7,15 @@
 	},
 	"files": {
 		"ignoreUnknown": false,
-		"includes": ["src/**/*.ts", "scripts/**/*.ts", "scripts/**/*.cjs", "*.json", "**/*.json", "!.claude"]
+		"includes": [
+			"src/**/*.ts",
+			"src/**/*.tsx",
+			"scripts/**/*.ts",
+			"scripts/**/*.cjs",
+			"*.json",
+			"**/*.json",
+			"!.claude"
+		]
 	},
 	"formatter": {
 		"enabled": true,

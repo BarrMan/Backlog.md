@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
+import type { GitIndexEntry } from "../git/operations.ts";
 import type { Task, TaskCreateInput } from "../types/index.ts";
 import { getCreatedTaskBoardOutcome, renderBoardTui, upsertBoardTask } from "../ui/board.ts";
 import { openSingleSelectFilterPopup } from "../ui/components/filter-popup.ts";
@@ -85,6 +87,15 @@ type TestWidget = {
 	setContent?: (value: string) => void;
 };
 
+type SelectedCommitFixture = {
+	restoreIndexEntriesIfMatches: (
+		repoRoot: string,
+		relativePath: string,
+		expectedEntries: readonly GitIndexEntry[],
+		restoreEntries: readonly GitIndexEntry[],
+	) => Promise<boolean>;
+};
+
 function collectWidgets(root: { children?: unknown[] }): TestWidget[] {
 	const widgets: TestWidget[] = [];
 	const visit = (node: TestWidget) => {
@@ -124,6 +135,39 @@ function typeText(widget: TestWidget | undefined, value: string): void {
 async function settleComposerFocus(): Promise<void> {
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function afterNextIdGenerated<T>(
+	core: Core,
+	setup: (id: string) => Promise<void>,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const generateNextId = core.generateNextId.bind(core);
+	let didSetup = false;
+	core.generateNextId = async (type, parent) => {
+		const id = await generateNextId(type, parent);
+		if (!didSetup) {
+			didSetup = true;
+			await setup(id);
+		}
+		return id;
+	};
+
+	try {
+		return await operation();
+	} finally {
+		core.generateNextId = generateNextId;
+	}
+}
+
+type ComposerFocus = { label?: string; content?: string };
+
+function pressComposerFocusSequence(screen: { focused?: TestWidget }, key: string, steps: ComposerFocus[]): void {
+	for (const expected of steps) {
+		pressKey(screen.focused, key, key === "tab" || key === "S-tab" ? "\t" : "");
+		if (expected.label !== undefined) expect(screen.focused?.options?.label).toBe(expected.label);
+		if (expected.content !== undefined) expect(screen.focused?.content).toBe(expected.content);
+	}
 }
 
 describe("TUI task composer model", () => {
@@ -411,28 +455,6 @@ describe("TUI task composer canonical persistence", () => {
 		await rm(testDir, { recursive: true, force: true });
 	});
 
-	async function afterNextIdGenerated<T>(
-		setup: (id: string) => Promise<void>,
-		operation: () => Promise<T>,
-	): Promise<T> {
-		const generateNextId = core.generateNextId.bind(core);
-		let didSetup = false;
-		core.generateNextId = async (type, parent) => {
-			const id = await generateNextId(type, parent);
-			if (!didSetup) {
-				didSetup = true;
-				await setup(id);
-			}
-			return id;
-		};
-
-		try {
-			return await operation();
-		} finally {
-			core.generateNextId = generateNextId;
-		}
-	}
-
 	it("routes normal and explicitly selected Draft values through canonical creation", async () => {
 		const normal = new TaskComposerController(["To Do", "Done"]);
 		normal.values.title = "Normal task";
@@ -596,11 +618,12 @@ describe("TUI task composer canonical persistence", () => {
 
 	it("preserves both file and staged state when same-path index ownership is lost", async () => {
 		await initializeGitRepository(testDir);
-		const originalCommitFiles = core.gitOps.commitFiles.bind(core.gitOps);
+		const originalAddAndCommit = core.gitOps.addAndCommitTaskFile.bind(core.gitOps);
 		let createdContent = "";
-		core.gitOps.commitFiles = async (_message, paths) => {
-			const filePath = paths[0] as string;
+		core.gitOps.addAndCommitTaskFile = async (_taskId, filePath, _action, onStaged) => {
 			createdContent = await readFile(filePath, "utf8");
+			await $`git add ${filePath}`.cwd(testDir).quiet();
+			onStaged?.(await core.gitOps.getIndexEntries(filePath));
 			await writeFile(filePath, `${createdContent}\nConcurrent staged edit must survive.\n`);
 			await $`git add ${filePath}`.cwd(testDir).quiet();
 			await writeFile(filePath, createdContent);
@@ -630,16 +653,18 @@ describe("TUI task composer canonical persistence", () => {
 			const next = await core.createTaskFromInput({ title: "Next task" }, false);
 			expect(next.task.id).toBe("TASK-2");
 		} finally {
-			core.gitOps.commitFiles = originalCommitFiles;
+			core.gitOps.addAndCommitTaskFile = originalAddAndCommit;
 		}
 	});
 
 	it("commits the owned staged blob when the worktree changes before commit", async () => {
 		await initializeGitRepository(testDir);
-		const originalCommitFiles = core.gitOps.commitFiles.bind(core.gitOps);
-		core.gitOps.commitFiles = async (message, paths, repoRoot) => {
-			await appendFile(paths[0] as string, "\nLater worktree edit must not be committed.\n");
-			await originalCommitFiles(message, paths, repoRoot);
+		const originalAddAndCommit = core.gitOps.addAndCommitTaskFile.bind(core.gitOps);
+		core.gitOps.addAndCommitTaskFile = async (taskId, filePath, action, onStaged) => {
+			await originalAddAndCommit(taskId, filePath, action, (entries) => {
+				onStaged?.(entries);
+				appendFileSync(filePath, "\nLater worktree edit must not be committed.\n");
+			});
 		};
 
 		try {
@@ -652,7 +677,7 @@ describe("TUI task composer canonical persistence", () => {
 				relativeCreatedPath,
 			);
 		} finally {
-			core.gitOps.commitFiles = originalCommitFiles;
+			core.gitOps.addAndCommitTaskFile = originalAddAndCommit;
 		}
 	});
 
@@ -870,10 +895,11 @@ describe("TUI task composer canonical persistence", () => {
 	for (const status of ["To Do", "Draft"] as const) {
 		it(`compensates a ${status === "Draft" ? "draft" : "task"} safely when index reconciliation prevents the commit`, async () => {
 			await initializeGitRepository(testDir);
-			const originalRestore = core.gitOps.restoreIndexEntriesIfMatches.bind(core.gitOps);
+			const selectedCommit = (core.gitOps as unknown as { selectedCommit: SelectedCommitFixture }).selectedCommit;
+			const originalRestore = selectedCommit.restoreIndexEntriesIfMatches.bind(selectedCommit);
 			const commitAttempts = status === "Draft" ? 1 : 3;
 			let calls = 0;
-			core.gitOps.restoreIndexEntriesIfMatches = async (...args) => {
+			selectedCommit.restoreIndexEntriesIfMatches = async (...args) => {
 				calls += 1;
 				if (calls <= commitAttempts) throw new Error("simulated index reconciliation failure");
 				return originalRestore(...args);
@@ -888,7 +914,7 @@ describe("TUI task composer canonical persistence", () => {
 				expect(status === "Draft" ? await core.fs.loadDraft("DRAFT-1") : await core.fs.loadTask("TASK-1")).toBeNull();
 				expect((await core.gitOps.getStatus()).trim()).toBe("");
 			} finally {
-				core.gitOps.restoreIndexEntriesIfMatches = originalRestore;
+				selectedCommit.restoreIndexEntriesIfMatches = originalRestore;
 			}
 		});
 	}
@@ -945,6 +971,21 @@ describe("TUI task composer canonical persistence", () => {
 			}
 		});
 	}
+});
+
+describe("TUI task composer persistence recovery", () => {
+	let testDir: string;
+	let core: Core;
+
+	beforeEach(async () => {
+		testDir = await mkdtemp(join(tmpdir(), "backlog-tui-composer-"));
+		core = new Core(testDir);
+		await initializeTestProject(core, "TUI Composer Test");
+	});
+
+	afterEach(async () => {
+		await rm(testDir, { recursive: true, force: true });
+	});
 
 	it("does not inspect Git index ownership when auto-commit is disabled", async () => {
 		let calls = 0;
@@ -970,6 +1011,7 @@ describe("TUI task composer canonical persistence", () => {
 		const preExistingContent = "This is not a parseable task and must be restored.\n";
 
 		await afterNextIdGenerated(
+			core,
 			async (id) => {
 				expect(id).toBe("TASK-1");
 				await writeFile(preExistingPath, preExistingContent);
@@ -992,6 +1034,7 @@ describe("TUI task composer canonical persistence", () => {
 			const stagedContent = "Prior staged user bytes.\n";
 			const worktreeContent = "Prior unstaged user bytes.\n";
 			await afterNextIdGenerated(
+				core,
 				async (id) => {
 					expect(id).toBe(status === "Draft" ? "DRAFT-1" : "TASK-1");
 					await writeFile(targetPath, baselineContent);
@@ -1021,6 +1064,7 @@ describe("TUI task composer canonical persistence", () => {
 			const stagedContent = "Prior staged user bytes.\n";
 			const worktreeContent = "Prior unstaged user bytes.\n";
 			await afterNextIdGenerated(
+				core,
 				async (id) => {
 					expect(id).toBe(status === "Draft" ? "DRAFT-1" : "TASK-1");
 					await writeFile(targetPath, baselineContent);
@@ -1561,55 +1605,42 @@ describe("TUI task composer interaction", () => {
 
 			expect(eventScreen.focused?.options?.label).toBe(" Title ");
 			// Tab walks the whole order forward and wraps back to the title.
-			for (const expected of [
-				" Description ",
-				" Due ",
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				" Title ",
-			]) {
-				pressKey(eventScreen.focused, "tab", "\t");
-				if (expected) expect(eventScreen.focused?.options?.label).toBe(expected);
-			}
+			pressComposerFocusSequence(eventScreen, "tab", [
+				{ label: " Description " },
+				{ label: " Due " },
+				{},
+				{},
+				{},
+				{},
+				{},
+				{ label: " Title " },
+			]);
 			// Tab must not type a tab character into either text field.
 			expect(eventScreen.focused?.getValue?.()).toBe("");
 			// Shift+Tab wraps backwards to the last control and walks back to the title.
-			pressKey(eventScreen.focused, "S-tab", "\t");
-			expect(eventScreen.focused?.content).toBe("Cancel");
-			for (const expected of ["Create task", "Priority: None ▼", "Type: None ▼", "Status: To Do ▼"]) {
-				pressKey(eventScreen.focused, "S-tab", "\t");
-				expect(eventScreen.focused?.content).toBe(expected);
-			}
-			pressKey(eventScreen.focused, "S-tab", "\t");
-			expect(eventScreen.focused?.options?.label).toBe(" Due ");
-			pressKey(eventScreen.focused, "S-tab", "\t");
-			expect(eventScreen.focused?.options?.label).toBe(" Description ");
-			pressKey(eventScreen.focused, "S-tab", "\t");
-			expect(eventScreen.focused?.options?.label).toBe(" Title ");
+			pressComposerFocusSequence(eventScreen, "S-tab", [
+				{ content: "Cancel" },
+				{ content: "Create task" },
+				{ content: "Priority: None ▼" },
+				{ content: "Type: None ▼" },
+				{ content: "Status: To Do ▼" },
+				{ label: " Due " },
+				{ label: " Description " },
+				{ label: " Title " },
+			]);
 			expect(eventScreen.focused?.getValue?.()).toBe("");
 
-			pressKey(eventScreen.focused, "down");
-			expect(eventScreen.focused?.options?.label).toBe(" Description ");
-			pressKey(eventScreen.focused, "down");
-			expect(eventScreen.focused?.options?.label).toBe(" Due ");
-			pressKey(eventScreen.focused, "down");
-			expect(eventScreen.focused?.content).toBe("Status: To Do ▼");
+			pressComposerFocusSequence(eventScreen, "down", [
+				{ label: " Description " },
+				{ label: " Due " },
+				{ content: "Status: To Do ▼" },
+			]);
 			expect(eventScreen.focused?.style).toMatchObject({ inverse: true, bold: true });
-			pressKey(eventScreen.focused, "right");
-			expect(eventScreen.focused?.content).toBe("Status: To Do ▼");
-			pressKey(eventScreen.focused, "down");
-			expect(eventScreen.focused?.content).toBe("Type: None ▼");
-			pressKey(eventScreen.focused, "down");
-			expect(eventScreen.focused?.content).toBe("Create task");
-			pressKey(eventScreen.focused, "right");
-			expect(eventScreen.focused?.content).toBe("Cancel");
-			pressKey(eventScreen.focused, "left");
-			expect(eventScreen.focused?.content).toBe("Create task");
-			pressKey(eventScreen.focused, "tab", "\t");
-			expect(eventScreen.focused?.content).toBe("Cancel");
+			pressComposerFocusSequence(eventScreen, "right", [{ content: "Status: To Do ▼" }]);
+			pressComposerFocusSequence(eventScreen, "down", [{ content: "Type: None ▼" }, { content: "Create task" }]);
+			pressComposerFocusSequence(eventScreen, "right", [{ content: "Cancel" }]);
+			pressComposerFocusSequence(eventScreen, "left", [{ content: "Create task" }]);
+			pressComposerFocusSequence(eventScreen, "tab", [{ content: "Cancel" }]);
 
 			pressKey(eventScreen.focused, "escape", "\x1b");
 			expect(await withTimeout(resultPromise, "Esc from composer action", 1000)).toBeNull();

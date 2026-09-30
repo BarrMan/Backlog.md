@@ -22,7 +22,15 @@ const taskFixtures = (...ids: string[]): Task[] =>
 		dependencies: [],
 	}));
 
-const knownTasks = taskFixtures("TASK-358.8", "BACK-123", "TASK-100", "TASK-200", "TASK-123", "BACK-1", "TASK-PREFIXED");
+const knownTasks = taskFixtures(
+	"TASK-358.8",
+	"BACK-123",
+	"TASK-100",
+	"TASK-200",
+	"TASK-123",
+	"BACK-1",
+	"TASK-PREFIXED",
+);
 
 function renderMarkdown(source: string, tasks: Task[] = knownTasks): string {
 	return renderToString(
@@ -39,8 +47,7 @@ function taskLinks(html: string): string[] {
 
 describe("MermaidMarkdown", () => {
 	it("renders angle-bracket type strings without throwing", () => {
-		const source =
-			"Implemented contracts: getDishesByMenu(String menuId) -> Result<List<MenuItem>>";
+		const source = "Implemented contracts: getDishesByMenu(String menuId) -> Result<List<MenuItem>>";
 
 		expect(() => renderToString(<MermaidMarkdown source={source} />)).not.toThrow();
 
@@ -79,10 +86,7 @@ describe("MermaidMarkdown", () => {
 
 		expect(renderedDocument.querySelector("#first-heading")).toBeTruthy();
 		expect(renderedDocument.querySelector("#second-heading")).toBeTruthy();
-		expect(links).toEqual([
-			"/tasks/BACK-426?view=detail#first-heading",
-			"/tasks/BACK-426?view=detail#second-heading",
-		]);
+		expect(links).toEqual(["/tasks/BACK-426?view=detail#first-heading", "/tasks/BACK-426?view=detail#second-heading"]);
 	});
 
 	it("automatically links task IDs to /tasks/:id", () => {

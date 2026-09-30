@@ -1,7 +1,7 @@
+import type { Core } from "../../../core/backlog.ts";
 import type { Document, DocumentSearchResult } from "../../../types/index.ts";
 import { formatUtcDateForDisplay } from "../../../utils/utc-date-display.ts";
 import { BacklogToolError } from "../../errors/mcp-errors.ts";
-import type { McpServer } from "../../server.ts";
 import type { CallToolResult } from "../../types.ts";
 import { formatDocumentCallResult } from "../../utils/document-response.ts";
 
@@ -36,7 +36,7 @@ export type DocumentSearchArgs = {
 };
 
 export class DocumentHandlers {
-	constructor(private readonly core: McpServer) {}
+	constructor(private readonly core: Core) {}
 
 	private formatDocumentSummaryLine(document: Document): string {
 		const metadata: string[] = [

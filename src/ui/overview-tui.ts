@@ -1,30 +1,13 @@
 import { box } from "neo-neo-bblessed";
 import type { TaskStatistics } from "../core/statistics.ts";
-import { formatPriorityLabel } from "../utils/priority-config.ts";
 import { formatKeymap, keymapKeys } from "./keymap.ts";
-import { getStatusIcon } from "./status-icon.ts";
+import {
+	overviewActivityContent,
+	overviewHealthContent,
+	overviewPriorityContent,
+	overviewStatusContent,
+} from "./overview-content.ts";
 import { createScreen, formatTuiTitle } from "./tui.ts";
-
-const priorityColors: Record<string, string> = {
-	high: "red",
-	medium: "yellow",
-	low: "green",
-	none: "gray",
-};
-
-function getPriorityBreakdownRows(statistics: TaskStatistics): Array<{ label: string; count: number; color: string }> {
-	const rows = Array.from(statistics.priorityCounts)
-		.filter(([, count]) => count > 0)
-		.map(([priority, count]) => ({
-			label: formatPriorityLabel(priority),
-			count,
-			color: priorityColors[priority] ?? "white",
-		}));
-	if (statistics.noPriorityCount > 0) {
-		rows.push({ label: "No Priority", count: statistics.noPriorityCount, color: "gray" });
-	}
-	return rows;
-}
 
 /**
  * Render the project overview in an interactive TUI
@@ -38,6 +21,12 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 
 	return new Promise<void>((resolve) => {
 		const screen = createScreen({ title: formatTuiTitle("Overview", projectName) });
+		const content = {
+			status: overviewStatusContent(statistics, true),
+			priority: overviewPriorityContent(statistics, true),
+			activity: overviewActivityContent(statistics, true),
+			health: overviewHealthContent(statistics, true),
+		};
 
 		// Main container
 		const container = box({
@@ -78,18 +67,7 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 			mouse: true,
 		});
 
-		let statusContent = "";
-		for (const [status, count] of statistics.statusCounts) {
-			const icon = getStatusIcon(status);
-			const percentage = statistics.totalTasks > 0 ? Math.round((count / statistics.totalTasks) * 100) : 0;
-			statusContent += `  ${icon} {bold}${status}:{/bold} ${count} tasks (${percentage}%)\n`;
-		}
-		statusContent += `\n  {cyan-fg}Total Tasks:{/cyan-fg} ${statistics.totalTasks}\n`;
-		statusContent += `  {green-fg}Completion:{/green-fg} ${statistics.completionPercentage}%\n`;
-		if (statistics.draftCount > 0) {
-			statusContent += `  {yellow-fg}Drafts:{/yellow-fg} ${statistics.draftCount}\n`;
-		}
-		statusBox.setContent(statusContent);
+		statusBox.setContent(content.status);
 
 		// Priority Breakdown Section (Top Right)
 		const priorityBox = box({
@@ -111,12 +89,7 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 			mouse: true,
 		});
 
-		let priorityContent = "";
-		for (const { label, count, color } of getPriorityBreakdownRows(statistics)) {
-			const percentage = statistics.totalTasks > 0 ? Math.round((count / statistics.totalTasks) * 100) : 0;
-			priorityContent += `  {${color}-fg}${label}:{/${color}-fg} ${count} tasks (${percentage}%)\n`;
-		}
-		priorityBox.setContent(priorityContent);
+		priorityBox.setContent(content.priority);
 
 		// Recent Activity Section (Bottom Left)
 		const activityBox = box({
@@ -138,24 +111,7 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 			mouse: true,
 		});
 
-		let activityContent = "{bold}Recently Created:{/bold}\n";
-		if (statistics.recentActivity.created.length > 0) {
-			for (const task of statistics.recentActivity.created) {
-				activityContent += `  ${task.id} - ${task.title.substring(0, 40)}${task.title.length > 40 ? "..." : ""}\n`;
-			}
-		} else {
-			activityContent += "  {gray-fg}No tasks created in the last 7 days{/gray-fg}\n";
-		}
-
-		activityContent += "\n{bold}Recently Updated:{/bold}\n";
-		if (statistics.recentActivity.updated.length > 0) {
-			for (const task of statistics.recentActivity.updated) {
-				activityContent += `  ${task.id} - ${task.title.substring(0, 40)}${task.title.length > 40 ? "..." : ""}\n`;
-			}
-		} else {
-			activityContent += "  {gray-fg}No tasks updated in the last 7 days{/gray-fg}\n";
-		}
-		activityBox.setContent(activityContent);
+		activityBox.setContent(content.activity);
 
 		// Project Health Section (Bottom Right)
 		const healthBox = box({
@@ -177,26 +133,7 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
 			mouse: true,
 		});
 
-		let healthContent = `{bold}Average Task Age:{/bold} ${statistics.projectHealth.averageTaskAge} days\n\n`;
-
-		healthContent += "{bold}Stale Tasks:{/bold} {gray-fg}(>30 days without updates){/gray-fg}\n";
-		if (statistics.projectHealth.staleTasks.length > 0) {
-			for (const task of statistics.projectHealth.staleTasks) {
-				healthContent += `  {yellow-fg}${task.id}{/yellow-fg} - ${task.title.substring(0, 35)}${task.title.length > 35 ? "..." : ""}\n`;
-			}
-		} else {
-			healthContent += "  {green-fg}No stale tasks{/green-fg}\n";
-		}
-
-		healthContent += "\n{bold}Blocked Tasks:{/bold} {gray-fg}(waiting on dependencies){/gray-fg}\n";
-		if (statistics.projectHealth.blockedTasks.length > 0) {
-			for (const task of statistics.projectHealth.blockedTasks) {
-				healthContent += `  {red-fg}${task.id}{/red-fg} - ${task.title.substring(0, 35)}${task.title.length > 35 ? "..." : ""}\n`;
-			}
-		} else {
-			healthContent += "  {green-fg}No blocked tasks{/green-fg}\n";
-		}
-		healthBox.setContent(healthContent);
+		healthBox.setContent(content.health);
 
 		// Instructions at bottom
 		box({
@@ -229,63 +166,13 @@ export async function renderOverviewTui(statistics: TaskStatistics, projectName:
  * Render plain text overview for non-TTY environments
  */
 function renderPlainTextOverview(statistics: TaskStatistics, projectName: string): void {
+	const sections = [
+		["Status Overview", overviewStatusContent(statistics, false)],
+		["Priority Breakdown", overviewPriorityContent(statistics, false)],
+		["Recent Activity", overviewActivityContent(statistics, false)],
+		["Project Health", overviewHealthContent(statistics, false)],
+	] as const;
 	console.log(`\n${projectName} - Project Overview\n${"=".repeat(40)}\n`);
-
-	console.log("Status Overview:");
-	for (const [status, count] of statistics.statusCounts) {
-		const percentage = statistics.totalTasks > 0 ? Math.round((count / statistics.totalTasks) * 100) : 0;
-		console.log(`  ${status}: ${count} tasks (${percentage}%)`);
-	}
-	console.log(`\n  Total Tasks: ${statistics.totalTasks}`);
-	console.log(`  Completion: ${statistics.completionPercentage}%`);
-	if (statistics.draftCount > 0) {
-		console.log(`  Drafts: ${statistics.draftCount}`);
-	}
-
-	console.log("\nPriority Breakdown:");
-	for (const { label, count } of getPriorityBreakdownRows(statistics)) {
-		const percentage = statistics.totalTasks > 0 ? Math.round((count / statistics.totalTasks) * 100) : 0;
-		console.log(`  ${label}: ${count} tasks (${percentage}%)`);
-	}
-
-	console.log("\nRecent Activity:");
-	console.log("  Recently Created:");
-	if (statistics.recentActivity.created.length > 0) {
-		for (const task of statistics.recentActivity.created) {
-			console.log(`    ${task.id} - ${task.title}`);
-		}
-	} else {
-		console.log("    No tasks created in the last 7 days");
-	}
-
-	console.log("\n  Recently Updated:");
-	if (statistics.recentActivity.updated.length > 0) {
-		for (const task of statistics.recentActivity.updated) {
-			console.log(`    ${task.id} - ${task.title}`);
-		}
-	} else {
-		console.log("    No tasks updated in the last 7 days");
-	}
-
-	console.log("\nProject Health:");
-	console.log(`  Average Task Age: ${statistics.projectHealth.averageTaskAge} days`);
-
-	console.log("\n  Stale Tasks (>30 days without updates):");
-	if (statistics.projectHealth.staleTasks.length > 0) {
-		for (const task of statistics.projectHealth.staleTasks) {
-			console.log(`    ${task.id} - ${task.title}`);
-		}
-	} else {
-		console.log("    No stale tasks");
-	}
-
-	console.log("\n  Blocked Tasks (waiting on dependencies):");
-	if (statistics.projectHealth.blockedTasks.length > 0) {
-		for (const task of statistics.projectHealth.blockedTasks) {
-			console.log(`    ${task.id} - ${task.title}`);
-		}
-	} else {
-		console.log("    No blocked tasks");
-	}
+	for (const [title, content] of sections) console.log(`${title}:\n${content}\n`);
 	console.log("");
 }

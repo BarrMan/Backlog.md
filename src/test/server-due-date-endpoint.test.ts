@@ -2,23 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { FileSystem } from "../file-system/operations.ts";
-import { BacklogServer } from "../server/index.ts";
 import type { Milestone, Task } from "../types/index.ts";
+import { createServerFixture } from "./server-fixture.ts";
 import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
-
-type DueDateServerHandlers = {
-	handleCreateTask(request: Request): Promise<Response>;
-	handleGetTask(taskId: string): Promise<Response>;
-	handleUpdateTask(request: Request, taskId: string): Promise<Response>;
-	handleCreateMilestone(request: Request): Promise<Response>;
-	handleListMilestones(): Promise<Response>;
-	handleUpdateMilestone(request: Request, milestoneId: string): Promise<Response>;
-};
 
 describe("BacklogServer due date endpoints", () => {
 	let testDir: string;
-	let server: BacklogServer | null;
-	let handlers: DueDateServerHandlers;
+	let fixture: ReturnType<typeof createServerFixture> | null;
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("server-due-date");
@@ -36,13 +26,12 @@ describe("BacklogServer due date endpoints", () => {
 			checkActiveBranches: false,
 			autoCommit: false,
 		});
-		server = new BacklogServer(testDir);
-		handlers = server as unknown as DueDateServerHandlers;
+		fixture = createServerFixture(testDir);
 	});
 
 	afterEach(async () => {
-		await server?.stop();
-		server = null;
+		await fixture?.dispose();
+		fixture = null;
 		await safeCleanup(testDir);
 	});
 
@@ -52,20 +41,22 @@ describe("BacklogServer due date endpoints", () => {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
 		});
+	const request = (path: string, method = "GET", body?: unknown) => {
+		if (!fixture) throw new Error("Server fixture not initialized");
+		return fixture.app.handle(
+			body === undefined ? new Request(`http://localhost${path}`, { method }) : jsonRequest(path, method, body),
+		);
+	};
 
 	it("round-trips task dueDate through create, view, and update", async () => {
-		const invalidCreateType = await handlers.handleCreateTask(
-			jsonRequest("/api/tasks", "POST", { title: "Invalid task due type", dueDate: 123 }),
-		);
+		const invalidCreateType = await request("/api/tasks", "POST", { title: "Invalid task due type", dueDate: 123 });
 		expect(invalidCreateType.status).toBe(400);
 
 		const createdResponse = await withTimeout(
-			handlers.handleCreateTask(
-				jsonRequest("/api/tasks", "POST", {
-					title: "Web due task",
-					dueDate: "2026-08-10",
-				}),
-			),
+			request("/api/tasks", "POST", {
+				title: "Web due task",
+				dueDate: "2026-08-10",
+			}),
 			"server task creation",
 			2_000,
 		);
@@ -73,42 +64,32 @@ describe("BacklogServer due date endpoints", () => {
 		const created = (await createdResponse.json()) as Task;
 		expect(created.dueDate).toBe("2026-08-10");
 
-		const viewed = (await (await handlers.handleGetTask(created.id)).json()) as Task;
+		const viewed = (await (await request(`/api/task/${created.id}`)).json()) as Task;
 		expect(viewed.dueDate).toBe("2026-08-10");
 
-		const clearedResponse = await handlers.handleUpdateTask(
-			jsonRequest(`/api/tasks/${created.id}`, "PUT", { dueDate: null }),
-			created.id,
-		);
+		const clearedResponse = await request(`/api/tasks/${created.id}`, "PUT", { dueDate: null });
 		expect(clearedResponse.status).toBe(200);
 		expect(((await clearedResponse.json()) as Task).dueDate).toBeUndefined();
 
-		const invalidResponse = await handlers.handleUpdateTask(
-			jsonRequest(`/api/tasks/${created.id}`, "PUT", { dueDate: "10/08/2026" }),
-			created.id,
-		);
+		const invalidResponse = await request(`/api/tasks/${created.id}`, "PUT", { dueDate: "10/08/2026" });
 		expect(invalidResponse.status).toBe(400);
 		expect(await invalidResponse.text()).toContain("YYYY-MM-DD");
-		const invalidUpdateType = await handlers.handleUpdateTask(
-			jsonRequest(`/api/tasks/${created.id}`, "PUT", { dueDate: false }),
-			created.id,
-		);
+		const invalidUpdateType = await request(`/api/tasks/${created.id}`, "PUT", { dueDate: false });
 		expect(invalidUpdateType.status).toBe(400);
 	});
 
 	it("round-trips milestone dueDate through create, list, and update", async () => {
-		const invalidCreateType = await handlers.handleCreateMilestone(
-			jsonRequest("/api/milestones", "POST", { title: "Invalid milestone due type", dueDate: [] }),
-		);
+		const invalidCreateType = await request("/api/milestones", "POST", {
+			title: "Invalid milestone due type",
+			dueDate: [],
+		});
 		expect(invalidCreateType.status).toBe(400);
 
 		const createdResponse = await withTimeout(
-			handlers.handleCreateMilestone(
-				jsonRequest("/api/milestones", "POST", {
-					title: "Web release",
-					dueDate: "2026-09-01",
-				}),
-			),
+			request("/api/milestones", "POST", {
+				title: "Web release",
+				dueDate: "2026-09-01",
+			}),
 			"server milestone creation",
 			2_000,
 		);
@@ -116,43 +97,37 @@ describe("BacklogServer due date endpoints", () => {
 		const created = (await createdResponse.json()) as Milestone;
 		expect(created.dueDate).toBe("2026-09-01");
 
-		const listed = (await (await handlers.handleListMilestones()).json()) as Milestone[];
+		const listed = (await (await request("/api/milestones")).json()) as Milestone[];
 		expect(listed[0]?.dueDate).toBe("2026-09-01");
 
-		const updatedResponse = await handlers.handleUpdateMilestone(
-			jsonRequest(`/api/milestones/${created.id}`, "PUT", {
-				title: created.title,
-				dueDate: "2026-09-02",
-			}),
-			created.id,
-		);
+		const updatedResponse = await request(`/api/milestones/${created.id}`, "PUT", {
+			title: created.title,
+			dueDate: "2026-09-02",
+		});
 		expect(updatedResponse.status).toBe(200);
 		const updated = (await updatedResponse.json()) as { milestone?: Milestone };
 		expect(updated.milestone?.dueDate).toBe("2026-09-02");
 
-		const clearedResponse = await handlers.handleUpdateMilestone(
-			jsonRequest(`/api/milestones/${created.id}`, "PUT", {
-				title: created.title,
-				dueDate: null,
-			}),
-			created.id,
-		);
+		const clearedResponse = await request(`/api/milestones/${created.id}`, "PUT", {
+			title: created.title,
+			dueDate: null,
+		});
 		expect(clearedResponse.status).toBe(200);
 		expect(((await clearedResponse.json()) as { milestone?: Milestone }).milestone?.dueDate).toBeUndefined();
-		const invalidUpdateType = await handlers.handleUpdateMilestone(
-			jsonRequest(`/api/milestones/${created.id}`, "PUT", { title: created.title, dueDate: {} }),
-			created.id,
-		);
+		const invalidUpdateType = await request(`/api/milestones/${created.id}`, "PUT", {
+			title: created.title,
+			dueDate: {},
+		});
 		expect(invalidUpdateType.status).toBe(400);
 	});
 
 	it("rejects a numeric title that aliases an existing milestone ID", async () => {
-		const filesystem = (server as unknown as { core: { filesystem: { listMilestones: () => Promise<Milestone[]> } } })
-			.core.filesystem;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const filesystem = fixture.core.filesystem;
 		const listMilestones = filesystem.listMilestones;
 		filesystem.listMilestones = async () => [{ id: "M-01", title: "First release", description: "", rawContent: "" }];
 		try {
-			const duplicate = await handlers.handleCreateMilestone(jsonRequest("/api/milestones", "POST", { title: "1" }));
+			const duplicate = await request("/api/milestones", "POST", { title: "1" });
 			expect(duplicate.status).toBe(400);
 			expect(await duplicate.json()).toEqual({ error: "A milestone with this title or ID already exists" });
 		} finally {
@@ -161,15 +136,8 @@ describe("BacklogServer due date endpoints", () => {
 	});
 
 	it("keeps unexpected milestone creation failures as internal errors", async () => {
-		const filesystem = (
-			server as unknown as {
-				core: {
-					filesystem: {
-						createMilestone: (title: string, description?: string, dueDate?: string) => Promise<Milestone>;
-					};
-				};
-			}
-		).core.filesystem;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const filesystem = fixture.core.filesystem;
 		const createMilestone = filesystem.createMilestone;
 		const consoleError = console.error;
 		filesystem.createMilestone = async () => {
@@ -177,9 +145,7 @@ describe("BacklogServer due date endpoints", () => {
 		};
 		console.error = () => {};
 		try {
-			const response = await handlers.handleCreateMilestone(
-				jsonRequest("/api/milestones", "POST", { title: "Internal failure", dueDate: "2026-09-01" }),
-			);
+			const response = await request("/api/milestones", "POST", { title: "Internal failure", dueDate: "2026-09-01" });
 			expect(response.status).toBe(500);
 			expect(await response.json()).toEqual({ error: "Failed to create milestone" });
 		} finally {

@@ -23,7 +23,10 @@ export default function MetricRow({ icon, label, labelClassName, count, total, b
 					<div className="text-xs text-gray-500 dark:text-gray-400">{Math.round(percentage)}%</div>
 				</div>
 				<div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-circle h-2">
-					<div className={`${barClassName} h-2 rounded-circle transition-all duration-300`} style={{ width: `${percentage}%` }} />
+					<div
+						className={`${barClassName} h-2 rounded-circle transition-all duration-300`}
+						style={{ width: `${percentage}%` }}
+					/>
 				</div>
 			</div>
 		</div>

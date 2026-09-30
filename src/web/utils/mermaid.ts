@@ -1,4 +1,6 @@
 // Type definitions for Mermaid API
+import { renderMermaidBlocks } from "./mermaid-rendering";
+
 interface MermaidAPI {
 	initialize: (config: MermaidConfig) => void;
 	run?: (options?: MermaidRunOptions) => Promise<void>;
@@ -80,58 +82,7 @@ export async function renderMermaidIn(element: HTMLElement): Promise<void> {
 		const m = await ensureMermaid();
 		await initializeMermaid(m.default);
 
-		// Find mermaid code blocks and render each into a generated div
-		for (const codeEl of codeBlocks) {
-			const parent = codeEl.parentElement as HTMLElement;
-			if (!parent) continue;
-			const diagramText = codeEl.textContent || "";
-
-			// Create container for mermaid
-			const wrapper = document.createElement("div");
-			wrapper.className = "mermaid";
-			wrapper.textContent = diagramText;
-
-			// Replace the code block's parent (pre) with our wrapper so it's in the DOM
-			parent.replaceWith(wrapper);
-
-			// Ensure wrapper is attached to document before rendering
-			if (!document.body.contains(wrapper)) {
-				// try to append to the element as a last resort
-				element.appendChild(wrapper);
-			}
-
-			try {
-				if (m?.default?.run) {
-					try {
-						await m.default.run({ nodes: [wrapper] });
-						continue;
-					} catch {
-						// Continue to render fallback if run fails
-					}
-				}
-
-				if (m?.default?.render) {
-					const id = `mermaid-${Math.random().toString(36).slice(2, 9)}`;
-					try {
-						const result = await m.default.render(id, diagramText);
-						wrapper.innerHTML = result.svg;
-
-						// Bind interactive functions if available (for click events, etc.)
-						if (result.bindFunctions) {
-							result.bindFunctions(wrapper);
-						}
-						continue;
-					} catch {
-						// Continue to next fallback if render fails
-					}
-				}
-
-				// If none of the above worked, log warning
-				console.warn("mermaid: no compatible render method found, leaving raw code block");
-			} catch (err) {
-				console.warn("mermaid render failed", err);
-			}
-		}
+		await renderMermaidBlocks(m.default, element, codeBlocks);
 	} catch (err) {
 		console.warn("Failed to load mermaid", err);
 	}

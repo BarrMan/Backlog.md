@@ -14,7 +14,7 @@ let TEST_DIR: string;
 let mcpServer: McpServer;
 
 async function loadConfig(server: McpServer) {
-	const config = await server.filesystem.loadConfig();
+	const config = await server.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load backlog configuration for tests");
 	}
@@ -25,9 +25,9 @@ describe("MCP draft support via task tools", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-drafts");
 		mcpServer = new McpServer(TEST_DIR, "Test instructions");
-		await mcpServer.filesystem.ensureBacklogStructure();
+		await mcpServer.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(mcpServer, "Test Project");
+		await initializeFilesystemTestProject(mcpServer.application, "Test Project");
 
 		const config = await loadConfig(mcpServer);
 		registerTaskTools(mcpServer, config);
@@ -56,7 +56,7 @@ describe("MCP draft support via task tools", () => {
 
 		expect(getText(createResult.content)).toContain("Task DRAFT-1 - Draft task");
 
-		const draft = await mcpServer.filesystem.loadDraft("draft-1");
+		const draft = await mcpServer.application.filesystem.loadDraft("draft-1");
 		expect(draft).not.toBeNull();
 
 		const listDefault = await mcpServer.testInterface.callTool({
@@ -106,10 +106,10 @@ describe("MCP draft support via task tools", () => {
 
 		expect(getText(promoteResult.content)).toContain("Task TASK-1 - Promoted task");
 
-		const promoted = await mcpServer.getTask("task-1");
+		const promoted = await mcpServer.application.getTask("task-1");
 		expect(promoted?.status).toBe("To Do");
 
-		const removedDraft = await mcpServer.filesystem.loadDraft("draft-1");
+		const removedDraft = await mcpServer.application.filesystem.loadDraft("draft-1");
 		expect(removedDraft).toBeNull();
 
 		const demoteResult = await mcpServer.testInterface.callTool({
@@ -128,11 +128,11 @@ describe("MCP draft support via task tools", () => {
 		expect(match).not.toBeNull();
 		const draftId = match?.[1] ?? "";
 
-		const demotedDraft = await mcpServer.filesystem.loadDraft(draftId);
+		const demotedDraft = await mcpServer.application.filesystem.loadDraft(draftId);
 		expect(demotedDraft?.status).toBe("Draft");
 		expect(demotedDraft?.title).toBe("Demoted draft");
 
-		const taskFile = await mcpServer.filesystem.loadTask("task-1");
+		const taskFile = await mcpServer.application.filesystem.loadTask("task-1");
 		expect(taskFile).toBeNull();
 	});
 
@@ -165,13 +165,13 @@ describe("MCP draft support via task tools", () => {
 			},
 		});
 
-		const reference = await mcpServer.filesystem.resolveDraftReference("DRAFT-1");
+		const reference = await mcpServer.application.filesystem.resolveDraftReference("DRAFT-1");
 		if (!reference) throw new Error("expected draft reference");
 
 		let release: () => void = () => {};
 		try {
 			const held = new Promise<void>((resolveHeld) => {
-				void mcpServer.filesystem.withDraftLock(reference, async () => {
+				void mcpServer.application.filesystem.withDraftLock(reference, async () => {
 					resolveHeld();
 					await new Promise<void>((resolveRelease) => {
 						release = resolveRelease;
@@ -193,7 +193,7 @@ describe("MCP draft support via task tools", () => {
 			expect(result.isError).toBe(true);
 			expect(getText(result.content)).toContain("being modified by another process");
 
-			const stillDraft = await mcpServer.filesystem.loadDraft("DRAFT-1");
+			const stillDraft = await mcpServer.application.filesystem.loadDraft("DRAFT-1");
 			expect(stillDraft?.status).toBe("Draft");
 		} finally {
 			release();
@@ -276,7 +276,7 @@ describe("MCP draft support via task tools", () => {
 			params: { name: "task_archive", arguments: { id: "draft-1" } },
 		});
 
-		const archivedDraft = await mcpServer.filesystem.loadDraft("draft-1");
+		const archivedDraft = await mcpServer.application.filesystem.loadDraft("draft-1");
 		expect(archivedDraft).toBeNull();
 
 		const archiveDir = join(TEST_DIR, "backlog", "archive", "drafts");
@@ -285,7 +285,7 @@ describe("MCP draft support via task tools", () => {
 	});
 
 	it("filters tasks and drafts by milestone ID as well as title", async () => {
-		const milestone = await mcpServer.filesystem.createMilestone("Alpha Release");
+		const milestone = await mcpServer.application.filesystem.createMilestone("Alpha Release");
 		const numericId = milestone.id.replace(/^m-/i, "");
 
 		await mcpServer.testInterface.callTool({
@@ -317,10 +317,10 @@ describe("MCP draft support via task tools", () => {
 	});
 
 	it("keeps active and archived milestone IDs distinct when their titles are reused", async () => {
-		const archivedMilestone = await mcpServer.filesystem.createMilestone("Shared Release");
-		await mcpServer.filesystem.createMilestone("Keep allocator advanced");
-		expect((await mcpServer.archiveMilestone(archivedMilestone.id, false)).success).toBe(true);
-		const activeMilestone = await mcpServer.filesystem.createMilestone("Shared Release");
+		const archivedMilestone = await mcpServer.application.filesystem.createMilestone("Shared Release");
+		await mcpServer.application.filesystem.createMilestone("Keep allocator advanced");
+		expect((await mcpServer.application.archiveMilestone(archivedMilestone.id, false)).success).toBe(true);
+		const activeMilestone = await mcpServer.application.filesystem.createMilestone("Shared Release");
 
 		for (const [title, status, milestone] of [
 			["Archived task", undefined, archivedMilestone.id],

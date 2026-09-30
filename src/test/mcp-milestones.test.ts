@@ -15,7 +15,7 @@ let TEST_DIR: string;
 let server: McpServer;
 
 async function loadConfigOrThrow(mcpServer: McpServer) {
-	const config = await mcpServer.filesystem.loadConfig();
+	const config = await mcpServer.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load config");
 	}
@@ -43,7 +43,7 @@ title: "${escapedTitle}"
 
 ${description}
 `;
-	await Bun.write(join(mcpServer.filesystem.milestonesDir, filename), content);
+	await Bun.write(join(mcpServer.application.filesystem.milestonesDir, filename), content);
 }
 
 async function enableGitTestProject(): Promise<void> {
@@ -51,17 +51,17 @@ async function enableGitTestProject(): Promise<void> {
 
 	const config = await loadConfigOrThrow(server);
 	config.filesystemOnly = false;
-	await server.filesystem.saveConfig(config);
-	await server.ensureConfigLoaded();
+	await server.application.filesystem.saveConfig(config);
+	await server.application.ensureConfigLoaded();
 }
 
 describe("MCP milestone tools", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-milestones");
 		server = new McpServer(TEST_DIR, "Test instructions");
-		await server.filesystem.ensureBacklogStructure();
+		await server.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(server, "Test Project");
+		await initializeFilesystemTestProject(server.application, "Test Project");
 
 		const config = await loadConfigOrThrow(server);
 		registerTaskTools(server, config);
@@ -108,7 +108,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 		expect(getText(updated.content)).toContain("Due: 2026-09-02");
-		expect((await server.filesystem.loadMilestone("m-0"))?.dueDate).toBe("2026-09-02");
+		expect((await server.application.filesystem.loadMilestone("m-0"))?.dueDate).toBe("2026-09-02");
 
 		await server.testInterface.callTool({
 			params: {
@@ -116,14 +116,14 @@ describe("MCP milestone tools", () => {
 				arguments: { from: "m-0", to: "Dated release", dueDate: null },
 			},
 		});
-		expect((await server.filesystem.loadMilestone("m-0"))?.dueDate).toBeUndefined();
+		expect((await server.application.filesystem.loadMilestone("m-0"))?.dueDate).toBeUndefined();
 	});
 
 	it("assigns and clears a milestone without blocking the content store", async () => {
 		await server.testInterface.callTool({
 			params: { name: "milestone_add", arguments: { name: "Release 1.0" } },
 		});
-		await server.getContentStore();
+		await server.application.getContentStore();
 
 		await server.testInterface.callTool({
 			params: {
@@ -135,7 +135,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const created = await server.getTask("task-1");
+		const created = await server.application.getTask("task-1");
 		expect(created?.milestone).toBe("m-0");
 
 		await server.testInterface.callTool({
@@ -148,7 +148,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const cleared = await server.getTask("task-1");
+		const cleared = await server.application.getTask("task-1");
 		expect(cleared?.milestone).toBeUndefined();
 	});
 
@@ -170,7 +170,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const created = await server.getTask("task-1");
+		const created = await server.application.getTask("task-1");
 		expect(created?.milestone).toBe("m-0");
 
 		await server.testInterface.callTool({
@@ -183,7 +183,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const updated = await server.getTask("task-1");
+		const updated = await server.application.getTask("task-1");
 		expect(updated?.milestone).toBe("m-1");
 
 		await server.testInterface.callTool({
@@ -196,7 +196,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const updatedById = await server.getTask("task-1");
+		const updatedById = await server.application.getTask("task-1");
 		expect(updatedById?.milestone).toBe("m-0");
 
 		await server.testInterface.callTool({
@@ -208,7 +208,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const createdById = await server.getTask("task-2");
+		const createdById = await server.application.getTask("task-2");
 		expect(createdById?.milestone).toBe("m-1");
 
 		await server.testInterface.callTool({
@@ -220,7 +220,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const createdWithUnconfiguredMilestone = await server.getTask("task-3");
+		const createdWithUnconfiguredMilestone = await server.application.getTask("task-3");
 		expect(createdWithUnconfiguredMilestone?.milestone).toBe("Planned Later");
 	});
 
@@ -241,7 +241,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const created = await server.getTask("task-1");
+		const created = await server.application.getTask("task-1");
 		expect(created?.milestone).toBe("m-1");
 
 		await server.testInterface.callTool({
@@ -253,7 +253,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const edited = await server.getTask("task-1");
+		const edited = await server.application.getTask("task-1");
 		expect(edited?.milestone).toBe("m-0");
 
 		const rename = await server.testInterface.callTool({
@@ -280,7 +280,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const created = await server.getTask("task-1");
+		const created = await server.application.getTask("task-1");
 		expect(created?.milestone).toBe("m-01");
 
 		await server.testInterface.callTool({
@@ -292,7 +292,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const updated = await server.getTask("task-1");
+		const updated = await server.application.getTask("task-1");
 		expect(updated?.milestone).toBe("m-01");
 
 		const renamed = await server.testInterface.callTool({
@@ -307,7 +307,7 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(removed.content)).toContain("(m-01)");
 		expect(getText(removed.content)).toContain("Cleared milestone for 1 local task");
-		const cleared = await server.getTask("task-1");
+		const cleared = await server.application.getTask("task-1");
 		expect(cleared?.milestone).toBeUndefined();
 	});
 
@@ -322,7 +322,7 @@ describe("MCP milestone tools", () => {
 		expect(getText(add.content)).toContain("(m-0)");
 
 		// Check that milestone file was created
-		const milestones = await server.filesystem.listMilestones();
+		const milestones = await server.application.filesystem.listMilestones();
 		expect(milestones.length).toBe(1);
 		expect(milestones[0]?.title).toBe("Release 1.0");
 		expect(milestones[0]?.id).toBe("m-0");
@@ -379,11 +379,11 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_edit", arguments: { id: "task-1", milestone: "Release 1.0" } },
 		});
-		const archivedTitleResolved = await server.getTask("task-1");
+		const archivedTitleResolved = await server.application.getTask("task-1");
 		expect(archivedTitleResolved?.milestone).toBe("m-0");
 
-		const active = await server.filesystem.listMilestones();
-		const archivedList = await server.filesystem.listArchivedMilestones();
+		const active = await server.application.filesystem.listMilestones();
+		const archivedList = await server.application.filesystem.listArchivedMilestones();
 		expect(active.length).toBe(0);
 		expect(archivedList.length).toBe(1);
 
@@ -411,8 +411,8 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(added.content)).toContain("(m-1)");
 
-		const activeMilestones = await server.filesystem.listMilestones();
-		const archivedMilestones = await server.filesystem.listArchivedMilestones();
+		const activeMilestones = await server.application.filesystem.listMilestones();
+		const archivedMilestones = await server.application.filesystem.listArchivedMilestones();
 		expect(activeMilestones[0]?.id).toBe("m-1");
 		expect(archivedMilestones[0]?.id).toBe("m-0");
 	});
@@ -438,16 +438,16 @@ describe("MCP milestone tools", () => {
 		expect(getText(rename.content)).toContain("Updated 2 local tasks");
 		expect(getText(rename.content)).toContain("Renamed milestone file:");
 
-		const task1 = await server.getTask("task-1");
-		const task2 = await server.getTask("task-2");
+		const task1 = await server.application.getTask("task-1");
+		const task2 = await server.application.getTask("task-2");
 		expect(task1?.milestone).toBe("m-0");
 		expect(task2?.milestone).toBe("m-0");
 
-		const milestones = await server.filesystem.listMilestones();
+		const milestones = await server.application.filesystem.listMilestones();
 		expect(milestones[0]?.title).toBe("Release 2.0");
 
 		const milestoneFiles = await Array.fromAsync(
-			new Bun.Glob("m-*.md").scan({ cwd: server.filesystem.milestonesDir, followSymlinks: true }),
+			new Bun.Glob("m-*.md").scan({ cwd: server.application.filesystem.milestonesDir, followSymlinks: true }),
 		);
 		expect(milestoneFiles).toContain("m-0 - release-2.0.md");
 		expect(milestoneFiles).not.toContain("m-0 - release-1.0.md");
@@ -460,8 +460,8 @@ describe("MCP milestone tools", () => {
 		});
 		const config = await loadConfigOrThrow(server);
 		config.autoCommit = true;
-		await server.filesystem.saveConfig(config);
-		await server.ensureConfigLoaded();
+		await server.application.filesystem.saveConfig(config);
+		await server.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
@@ -474,9 +474,9 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(rename.content)).toContain('Renamed milestone "Release 1.0" (m-0) → "Release 2.0" (m-0).');
 
-		const status = await server.git.getStatus();
+		const status = await server.application.git.getStatus();
 		expect(status.trim()).toBe("");
-		const lastCommit = await server.git.getLastCommitMessage();
+		const lastCommit = await server.application.git.getLastCommitMessage();
 		expect(lastCommit).toContain("backlog: Rename milestone m-0");
 	});
 
@@ -487,39 +487,41 @@ describe("MCP milestone tools", () => {
 		});
 		const config = await loadConfigOrThrow(server);
 		config.autoCommit = true;
-		await server.filesystem.saveConfig(config);
-		await server.ensureConfigLoaded();
+		await server.application.filesystem.saveConfig(config);
+		await server.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
 
-		const originalCommitFiles = server.git.commitFiles.bind(server.git);
-		const originalResetPaths = server.git.resetPaths.bind(server.git);
-		const originalRenameMilestone = server.filesystem.renameMilestone.bind(server.filesystem);
+		const originalCommitFiles = server.application.git.commitFiles.bind(server.application.git);
+		const originalResetPaths = server.application.git.resetPaths.bind(server.application.git);
+		const originalRenameMilestone = server.application.filesystem.renameMilestone.bind(server.application.filesystem);
 		const commitError = new Error("simulated commit failure");
 		let renameCalls = 0;
 
-		server.git.commitFiles = (async () => {
+		server.application.git.commitFiles = (async () => {
 			throw commitError;
-		}) as typeof server.git.commitFiles;
-		server.git.resetPaths = (async () => {}) as typeof server.git.resetPaths;
-		server.filesystem.renameMilestone = (async (...args: Parameters<typeof server.filesystem.renameMilestone>) => {
+		}) as typeof server.application.git.commitFiles;
+		server.application.git.resetPaths = (async () => {}) as typeof server.application.git.resetPaths;
+		server.application.filesystem.renameMilestone = (async (
+			...args: Parameters<typeof server.application.filesystem.renameMilestone>
+		) => {
 			renameCalls += 1;
 			if (renameCalls === 1) {
 				return await originalRenameMilestone(...args);
 			}
 			throw new Error("simulated rollback failure");
-		}) as typeof server.filesystem.renameMilestone;
+		}) as typeof server.application.filesystem.renameMilestone;
 
 		try {
-			await expect(server.renameMilestone("Release 1.0", "Release 2.0", true)).rejects.toThrow(
+			await expect(server.application.renameMilestone("Release 1.0", "Release 2.0", true)).rejects.toThrow(
 				"simulated commit failure",
 			);
 			expect(renameCalls).toBe(2);
 		} finally {
-			server.git.commitFiles = originalCommitFiles;
-			server.git.resetPaths = originalResetPaths;
-			server.filesystem.renameMilestone = originalRenameMilestone;
+			server.application.git.commitFiles = originalCommitFiles;
+			server.application.git.resetPaths = originalResetPaths;
+			server.application.filesystem.renameMilestone = originalRenameMilestone;
 		}
 	});
 
@@ -529,10 +531,10 @@ describe("MCP milestone tools", () => {
 		});
 
 		const milestoneFilesBefore = await Array.fromAsync(
-			new Bun.Glob("m-*.md").scan({ cwd: server.filesystem.milestonesDir, followSymlinks: true }),
+			new Bun.Glob("m-*.md").scan({ cwd: server.application.filesystem.milestonesDir, followSymlinks: true }),
 		);
 		expect(milestoneFilesBefore).toHaveLength(1);
-		const sourcePath = join(server.filesystem.milestonesDir, milestoneFilesBefore[0] as string);
+		const sourcePath = join(server.application.filesystem.milestonesDir, milestoneFilesBefore[0] as string);
 		const originalContent = await Bun.file(sourcePath).text();
 		const notesLine = "Keep reference Milestone: Release 1.0 in notes";
 		await Bun.write(sourcePath, `${originalContent.trimEnd()}\n\n## Notes\n\n${notesLine}\n`);
@@ -545,7 +547,7 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(rename.content)).toContain('Renamed milestone "Release 1.0" (m-0) → "Release 2.0" (m-0).');
 
-		const renamedPath = join(server.filesystem.milestonesDir, "m-0 - release-2.0.md");
+		const renamedPath = join(server.application.filesystem.milestonesDir, "m-0 - release-2.0.md");
 		const updatedContent = await Bun.file(renamedPath).text();
 		expect(updatedContent).toContain("## Description\n\nMilestone: Release 2.0");
 		expect(updatedContent).toContain(`## Notes\n\n${notesLine}`);
@@ -559,8 +561,8 @@ describe("MCP milestone tools", () => {
 		});
 		const config = await loadConfigOrThrow(server);
 		config.autoCommit = true;
-		await server.filesystem.saveConfig(config);
-		await server.ensureConfigLoaded();
+		await server.application.filesystem.saveConfig(config);
+		await server.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
@@ -573,9 +575,9 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(rename.content)).toContain("No changes made");
 
-		const status = await server.git.getStatus();
+		const status = await server.application.git.getStatus();
 		expect(status.trim()).toBe("");
-		const lastCommit = await server.git.getLastCommitMessage();
+		const lastCommit = await server.application.git.getLastCommitMessage();
 		expect(lastCommit).toBe("baseline");
 	});
 
@@ -586,8 +588,8 @@ describe("MCP milestone tools", () => {
 		});
 		const config = await loadConfigOrThrow(server);
 		config.autoCommit = true;
-		await server.filesystem.saveConfig(config);
-		await server.ensureConfigLoaded();
+		await server.application.filesystem.saveConfig(config);
+		await server.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
@@ -603,13 +605,13 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(rename.content)).toContain('Renamed milestone "Release 1.0" (m-0) → "Release 2.0" (m-0).');
 
-		const lastCommit = await server.git.getLastCommitMessage();
+		const lastCommit = await server.application.git.getLastCommitMessage();
 		expect(lastCommit).toContain("backlog: Rename milestone m-0");
 
 		const { stdout: committedFilesRaw } = await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).quiet();
 		const committedFiles = committedFilesRaw.toString();
 		expect(committedFiles).not.toContain("UNRELATED.txt");
-		const status = await server.git.getStatus();
+		const status = await server.application.git.getStatus();
 		expect(status).toContain("A  UNRELATED.txt");
 	});
 
@@ -620,8 +622,8 @@ describe("MCP milestone tools", () => {
 		});
 		const config = await loadConfigOrThrow(server);
 		config.autoCommit = true;
-		await server.filesystem.saveConfig(config);
-		await server.ensureConfigLoaded();
+		await server.application.filesystem.saveConfig(config);
+		await server.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
@@ -634,13 +636,13 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(archived.content)).toContain('Archived milestone "Release 1.0"');
 
-		const lastCommit = await server.git.getLastCommitMessage();
+		const lastCommit = await server.application.git.getLastCommitMessage();
 		expect(lastCommit).toContain("backlog: Archive milestone m-0");
 
 		const { stdout: committedFilesRaw } = await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).quiet();
 		const committedFiles = committedFilesRaw.toString();
 		expect(committedFiles).not.toContain("UNRELATED.txt");
-		const status = await server.git.getStatus();
+		const status = await server.application.git.getStatus();
 		expect(status).toContain("A  UNRELATED.txt");
 	});
 
@@ -662,7 +664,7 @@ describe("MCP milestone tools", () => {
 			},
 		});
 
-		const task = await server.getTask("task-1");
+		const task = await server.application.getTask("task-1");
 		expect(task?.milestone).toBe("m-1");
 	});
 
@@ -673,7 +675,7 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Legacy task", milestone: "Release 1.0" } },
 		});
-		await server.editTask("task-1", { milestone: "Release 1.0" });
+		await server.application.editTask("task-1", { milestone: "Release 1.0" });
 
 		const rename = await server.testInterface.callTool({
 			params: {
@@ -683,10 +685,10 @@ describe("MCP milestone tools", () => {
 		});
 		expect(getText(rename.content)).toContain("Skipped updating tasks (updateTasks=false).");
 
-		const task = await server.getTask("task-1");
+		const task = await server.application.getTask("task-1");
 		expect(task?.milestone).toBe("Release 1.0");
 
-		const milestones = await server.filesystem.listMilestones();
+		const milestones = await server.application.filesystem.listMilestones();
 		expect(milestones[0]?.title).toBe("Release 2.0");
 	});
 
@@ -744,7 +746,7 @@ describe("MCP milestone tools", () => {
 		expect(getText(renamed.content)).toContain('Renamed milestone "Release A" (m-0) → "Release A Prime" (m-0).');
 		expect(getText(renamed.content)).toContain("Updated 1 local task");
 
-		const afterRename = await server.getTask("task-1");
+		const afterRename = await server.application.getTask("task-1");
 		expect(afterRename?.milestone).toBe("m-0");
 
 		const removed = await server.testInterface.callTool({
@@ -753,11 +755,11 @@ describe("MCP milestone tools", () => {
 		expect(getText(removed.content)).toContain('Removed milestone "Release B" (m-1).');
 		expect(getText(removed.content)).toContain("Cleared milestone for 1 local task");
 
-		const afterRemove = await server.getTask("task-2");
+		const afterRemove = await server.application.getTask("task-2");
 		expect(afterRemove?.milestone).toBeUndefined();
 
-		const activeMilestones = await server.filesystem.listMilestones();
-		const archivedMilestones = await server.filesystem.listArchivedMilestones();
+		const activeMilestones = await server.application.filesystem.listMilestones();
+		const archivedMilestones = await server.application.filesystem.listArchivedMilestones();
 		expect(activeMilestones.map((milestone) => milestone.id)).toEqual(["m-0"]);
 		expect(archivedMilestones.map((milestone) => milestone.id)).toContain("m-1");
 	});
@@ -769,13 +771,13 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Task A", milestone: "Release A" } },
 		});
-		await server.editTask("task-1", { milestone: "Release A" });
+		await server.application.editTask("task-1", { milestone: "Release A" });
 
 		await server.testInterface.callTool({
 			params: { name: "milestone_rename", arguments: { from: "m-0", to: "Release A Prime" } },
 		});
 
-		const updatedTask = await server.getTask("task-1");
+		const updatedTask = await server.application.getTask("task-1");
 		expect(updatedTask?.milestone).toBe("m-0");
 	});
 
@@ -786,13 +788,13 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Task A", milestone: "Release A" } },
 		});
-		await server.editTask("task-1", { milestone: "0" });
+		await server.application.editTask("task-1", { milestone: "0" });
 
 		await server.testInterface.callTool({
 			params: { name: "milestone_rename", arguments: { from: "Release A", to: "Release A Prime" } },
 		});
 
-		const updatedTask = await server.getTask("task-1");
+		const updatedTask = await server.application.getTask("task-1");
 		expect(updatedTask?.milestone).toBe("m-0");
 	});
 
@@ -806,7 +808,7 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Old task", milestone: "Shared" } },
 		});
-		await server.editTask("task-1", { milestone: "Shared" });
+		await server.application.editTask("task-1", { milestone: "Shared" });
 		await server.testInterface.callTool({
 			params: { name: "milestone_archive", arguments: { name: "Shared" } },
 		});
@@ -823,8 +825,8 @@ describe("MCP milestone tools", () => {
 		expect(getText(removeById.content)).toContain('Removed milestone "Shared" (m-2).');
 		expect(getText(removeById.content)).toContain("Cleared milestone for 1 local task");
 
-		const oldTask = await server.getTask("task-1");
-		const newTask = await server.getTask("task-2");
+		const oldTask = await server.application.getTask("task-1");
+		const newTask = await server.application.getTask("task-2");
 		expect(oldTask?.milestone).toBe("Shared");
 		expect(newTask?.milestone).toBeUndefined();
 	});
@@ -848,15 +850,15 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Active title task", milestone: "m-2" } },
 		});
-		await server.editTask("task-1", { milestone: "0" });
+		await server.application.editTask("task-1", { milestone: "0" });
 
 		const removeByTitle = await server.testInterface.callTool({
 			params: { name: "milestone_remove", arguments: { name: "m-0" } },
 		});
 		expect(getText(removeByTitle.content)).toContain("Cleared milestone for 1 local task");
 
-		const archivedTask = await server.getTask("task-1");
-		const activeTask = await server.getTask("task-2");
+		const archivedTask = await server.application.getTask("task-1");
+		const activeTask = await server.application.getTask("task-2");
 		expect(archivedTask?.milestone).toBe("0");
 		expect(activeTask?.milestone).toBeUndefined();
 	});
@@ -880,15 +882,15 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Active title task", milestone: "m-2" } },
 		});
-		await server.editTask("task-1", { milestone: "0" });
+		await server.application.editTask("task-1", { milestone: "0" });
 
 		const renameByTitle = await server.testInterface.callTool({
 			params: { name: "milestone_rename", arguments: { from: "m-0", to: "ID-like title renamed" } },
 		});
 		expect(getText(renameByTitle.content)).toContain("Updated 1 local task");
 
-		const archivedTask = await server.getTask("task-1");
-		const activeTask = await server.getTask("task-2");
+		const archivedTask = await server.application.getTask("task-1");
+		const activeTask = await server.application.getTask("task-2");
 		expect(archivedTask?.milestone).toBe("0");
 		expect(activeTask?.milestone).toBe("m-2");
 	});
@@ -906,7 +908,7 @@ describe("MCP milestone tools", () => {
 				},
 			},
 		});
-		const created = await server.getTask("task-1");
+		const created = await server.application.getTask("task-1");
 		expect(created?.milestone).toBe("m-1");
 
 		const renamed = await server.testInterface.callTool({
@@ -935,7 +937,7 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "task_edit", arguments: { id: "task-1", milestone: "m-0" } },
 		});
-		const updated = await server.getTask("task-1");
+		const updated = await server.application.getTask("task-1");
 		expect(updated?.milestone).toBe("m-0");
 	});
 
@@ -955,7 +957,7 @@ describe("MCP milestone tools", () => {
 		await server.testInterface.callTool({
 			params: { name: "milestone_add", arguments: { name: "m-0" } },
 		});
-		await server.editTask("task-1", { milestone: "m-0" });
+		await server.application.editTask("task-1", { milestone: "m-0" });
 
 		const listed = await server.testInterface.callTool({
 			params: { name: "milestone_list", arguments: {} },
@@ -982,7 +984,7 @@ describe("MCP milestone tools", () => {
 
 	it("allocates new milestone IDs from milestone frontmatter IDs before filename IDs", async () => {
 		await Bun.write(
-			join(server.filesystem.milestonesDir, "m-0 - mismatched-frontmatter-id.md"),
+			join(server.application.filesystem.milestonesDir, "m-0 - mismatched-frontmatter-id.md"),
 			`---
 id: m-7
 title: "Legacy frontmatter ID"
@@ -1020,15 +1022,15 @@ Milestone: Legacy frontmatter ID
 		await server.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Active task", milestone: "Shared" } },
 		});
-		const activeTaskBeforeRemove = await server.getTask("task-2");
+		const activeTaskBeforeRemove = await server.application.getTask("task-2");
 		expect(activeTaskBeforeRemove?.milestone).toBe("m-2");
 
 		await server.testInterface.callTool({
 			params: { name: "milestone_remove", arguments: { name: "Shared" } },
 		});
 
-		const archivedTask = await server.getTask("task-1");
-		const activeTask = await server.getTask("task-2");
+		const archivedTask = await server.application.getTask("task-1");
+		const activeTask = await server.application.getTask("task-2");
 		expect(archivedTask?.milestone).toBe("m-0");
 		expect(activeTask?.milestone).toBeUndefined();
 	});
@@ -1053,7 +1055,7 @@ Milestone: Legacy frontmatter ID
 		expect(getText(reassign.content)).toContain('Removed milestone "Release A" (m-0).');
 		expect(getText(reassign.content)).toContain("Reassigned 1 local task");
 
-		const task1 = await server.getTask("task-1");
+		const task1 = await server.application.getTask("task-1");
 		expect(task1?.milestone).toBe("m-1");
 
 		// Now test clear behavior
@@ -1067,7 +1069,7 @@ Milestone: Legacy frontmatter ID
 		expect(getText(clear.content)).toContain('Removed milestone "Release B" (m-1).');
 		expect(getText(clear.content)).toContain("Cleared milestone for 1 local task");
 
-		const cleared = await server.getTask("task-1");
+		const cleared = await server.application.getTask("task-1");
 		expect(cleared?.milestone).toBeUndefined();
 	});
 
@@ -1085,11 +1087,11 @@ Milestone: Legacy frontmatter ID
 		expect(getText(removeKeep.content)).toContain('Removed milestone "Keep Value" (m-0).');
 		expect(getText(removeKeep.content)).toContain("Kept task milestone values unchanged (taskHandling=keep).");
 
-		const task = await server.getTask("task-1");
+		const task = await server.application.getTask("task-1");
 		expect(task?.milestone).toBe("m-0");
 
-		const activeMilestones = await server.filesystem.listMilestones();
-		const archivedMilestones = await server.filesystem.listArchivedMilestones();
+		const activeMilestones = await server.application.filesystem.listMilestones();
+		const archivedMilestones = await server.application.filesystem.listArchivedMilestones();
 		expect(activeMilestones).toHaveLength(0);
 		expect(archivedMilestones).toHaveLength(1);
 

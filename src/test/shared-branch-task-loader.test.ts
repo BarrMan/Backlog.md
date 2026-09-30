@@ -597,21 +597,18 @@ describe("shared immutable branch task loading", () => {
 			};
 		});
 		const internals = core as unknown as {
-			refreshRemoteRefsForTaskRead: (
-				loadedConfig: BacklogConfig,
-				git?: GitOperations,
-				options?: { force?: boolean },
-			) => Promise<void>;
+			session: {
+				refreshRemoteRefsForTaskRead: (loadedConfig: BacklogConfig, options?: { force?: boolean }) => Promise<void>;
+			};
 		};
 		const loadedConfig = { ...config, checkActiveBranches: true, remoteOperations: true };
-		const oldGit = core.git;
 
-		const readRefresh = internals.refreshRemoteRefsForTaskRead(loadedConfig);
+		const readRefresh = internals.session.refreshRemoteRefsForTaskRead(loadedConfig);
 		await oldFetchStarted;
 
 		// Runs synchronously into its wait on the in-flight fetch, so the root moves
 		// while the forced refresh is parked there.
-		const forcedRefresh = internals.refreshRemoteRefsForTaskRead(loadedConfig, oldGit, { force: true });
+		const forcedRefresh = internals.session.refreshRemoteRefsForTaskRead(loadedConfig, { force: true });
 		core.reinitializeProjectRoot("/tmp/forced-refresh-new-root");
 		releaseOldFetch();
 		await Promise.all([readRefresh, forcedRefresh]);
@@ -815,13 +812,16 @@ describe("shared immutable branch task loading", () => {
 		expect(internals.activeBranchFingerprint).toBe("snapshot-b");
 	});
 
-	it("returns the current content store when the project is reinitialized during initialization", async () => {
+	it("does not resurrect a disposed store when reinitialization wins a deferred initialization race", async () => {
 		const core = new Core("/tmp/content-store-root-a");
 		const oldInitializationStarted = deferred();
 		const releaseOldInitialization = deferred();
 		type Store = Awaited<ReturnType<Core["getContentStore"]>>;
+		let oldDisposals = 0;
 		const oldStore = {
-			dispose() {},
+			dispose() {
+				oldDisposals += 1;
+			},
 			ensureInitialized: async () => {
 				oldInitializationStarted.resolve();
 				await releaseOldInitialization.promise;
@@ -834,7 +834,8 @@ describe("shared immutable branch task loading", () => {
 				newInitializations += 1;
 			},
 		} as unknown as Store;
-		const internals = core as unknown as { contentStore?: Store };
+		const internals = core as unknown as { contentStore?: Store; session: { contentStore?: Store } };
+		const oldSession = internals.session;
 		internals.contentStore = oldStore;
 
 		const loading = core.getContentStore();
@@ -845,6 +846,8 @@ describe("shared immutable branch task loading", () => {
 
 		expect(await loading).toBe(newStore);
 		expect(newInitializations).toBe(1);
+		expect(oldDisposals).toBe(1);
+		expect(oldSession.contentStore).toBeUndefined();
 	});
 
 	it("uses hidden local completed tasks to suppress older active branch state", async () => {
@@ -979,6 +982,59 @@ describe("shared immutable branch task loading", () => {
 					core.disposeContentStore();
 				}
 			}
+		} finally {
+			await safeCleanup(rootA);
+			await safeCleanup(rootB);
+		}
+	});
+
+	it("retries allocation against the new root when the old prefix load is deferred", async () => {
+		const rootA = createUniqueTestDir("allocation-root-a");
+		const rootB = createUniqueTestDir("allocation-root-b");
+		try {
+			for (const [root, prefix] of [
+				[rootA, "old"],
+				[rootB, "new"],
+			] as const) {
+				const setup = new Core(root);
+				await initializeFilesystemTestProject(setup, `${prefix} allocation root`);
+				const savedConfig = await setup.fs.loadConfig();
+				if (!savedConfig) throw new Error("Expected test config");
+				await setup.fs.saveConfig({
+					...savedConfig,
+					prefixes: { task: prefix },
+					checkActiveBranches: false,
+					remoteOperations: false,
+				});
+			}
+			const setupB = new Core(rootB);
+			await setupB.fs.saveTask({
+				id: "NEW-7",
+				title: "New root reservation",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2026-08-10",
+				labels: [],
+				dependencies: [],
+			});
+
+			const core = new Core(rootA);
+			const oldFilesystem = core.fs;
+			const loadOldConfig = oldFilesystem.loadConfig.bind(oldFilesystem);
+			const configStarted = deferred();
+			const releaseConfig = deferred();
+			oldFilesystem.loadConfig = async () => {
+				configStarted.resolve();
+				await releaseConfig.promise;
+				return await loadOldConfig();
+			};
+
+			const allocation = core.generateNextId();
+			await configStarted.promise;
+			core.reinitializeProjectRoot(rootB);
+			releaseConfig.resolve();
+
+			expect(await allocation).toBe("NEW-8");
 		} finally {
 			await safeCleanup(rootA);
 			await safeCleanup(rootB);

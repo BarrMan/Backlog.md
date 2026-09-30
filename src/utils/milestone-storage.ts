@@ -36,6 +36,38 @@ function findUniqueTitleMatch(input: string, milestones: MilestoneRef[]): Milest
 	return titleMatches.length === 1 ? (titleMatches[0] ?? null) : null;
 }
 
+function resolveMilestoneInCollection(
+	normalized: string,
+	aliasKeys: Set<string>,
+	looksLikeMilestoneId: boolean,
+	milestones: MilestoneRef[],
+): string | null {
+	const idMatch = findIdMatch(normalized, milestones, aliasKeys);
+	if (looksLikeMilestoneId) return idMatch?.id ?? null;
+	return findUniqueTitleMatch(normalized, milestones)?.id ?? idMatch?.id ?? null;
+}
+
+function activeTitleIsAmbiguous(input: string, milestones: MilestoneRef[]): boolean {
+	const inputKey = milestoneKey(input);
+	return milestones.filter((item) => milestoneKey(item.title) === inputKey).length > 1;
+}
+
+function resolveNumericMilestone(
+	normalized: string,
+	aliasKeys: Set<string>,
+	activeMilestones: MilestoneRef[],
+	archivedMilestones: MilestoneRef[],
+): string {
+	const activeIdMatch = findIdMatch(normalized, activeMilestones, aliasKeys);
+	if (activeIdMatch) return activeIdMatch.id;
+	const archivedIdMatch = findIdMatch(normalized, archivedMilestones, aliasKeys);
+	if (archivedIdMatch) return archivedIdMatch.id;
+	const activeTitleMatch = findUniqueTitleMatch(normalized, activeMilestones);
+	if (activeTitleMatch) return activeTitleMatch.id;
+	if (activeTitleIsAmbiguous(normalized, activeMilestones)) return normalized;
+	return findUniqueTitleMatch(normalized, archivedMilestones)?.id ?? normalized;
+}
+
 export function resolveMilestoneInputForStorage(
 	milestone: string,
 	activeMilestones: MilestoneRef[],
@@ -48,38 +80,10 @@ export function resolveMilestoneInputForStorage(
 
 	const aliasKeys = collectMilestoneAliasKeys(normalized);
 	const looksLikeMilestoneId = /^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized);
-	const resolveByAlias = (milestones: MilestoneRef[]): string | null => {
-		const idMatch = findIdMatch(normalized, milestones, aliasKeys);
-		const titleMatch = findUniqueTitleMatch(normalized, milestones);
-		if (looksLikeMilestoneId) {
-			return idMatch?.id ?? null;
-		}
-		return titleMatch?.id ?? idMatch?.id ?? null;
-	};
+	const hasAmbiguousActiveTitle = activeTitleIsAmbiguous(normalized, activeMilestones);
+	if (looksLikeMilestoneId) return resolveNumericMilestone(normalized, aliasKeys, activeMilestones, archivedMilestones);
 
-	const inputKey = milestoneKey(normalized);
-	const activeTitleMatches = activeMilestones.filter((item) => milestoneKey(item.title) === inputKey);
-	const hasAmbiguousActiveTitle = activeTitleMatches.length > 1;
-	if (looksLikeMilestoneId) {
-		const activeIdMatch = findIdMatch(normalized, activeMilestones, aliasKeys);
-		if (activeIdMatch) {
-			return activeIdMatch.id;
-		}
-		const archivedIdMatch = findIdMatch(normalized, archivedMilestones, aliasKeys);
-		if (archivedIdMatch) {
-			return archivedIdMatch.id;
-		}
-		if (activeTitleMatches.length === 1) {
-			return activeTitleMatches[0]?.id ?? normalized;
-		}
-		if (hasAmbiguousActiveTitle) {
-			return normalized;
-		}
-		const archivedTitleMatch = findUniqueTitleMatch(normalized, archivedMilestones);
-		return archivedTitleMatch?.id ?? normalized;
-	}
-
-	const activeMatch = resolveByAlias(activeMilestones);
+	const activeMatch = resolveMilestoneInCollection(normalized, aliasKeys, false, activeMilestones);
 	if (activeMatch) {
 		return activeMatch;
 	}
@@ -87,7 +91,7 @@ export function resolveMilestoneInputForStorage(
 		return normalized;
 	}
 
-	return resolveByAlias(archivedMilestones) ?? normalized;
+	return resolveMilestoneInCollection(normalized, aliasKeys, false, archivedMilestones) ?? normalized;
 }
 
 type MilestoneStorageFilesystem = {

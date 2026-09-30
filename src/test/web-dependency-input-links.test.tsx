@@ -86,7 +86,11 @@ describe("DependencyInput dependency chips", () => {
 				<MemoryRouter
 					initialEntries={[
 						"/board?lane=milestone",
-						{ pathname: "/board/BACK-20", search: "?lane=milestone", state: { taskModalFrom: "/board?lane=milestone" } },
+						{
+							pathname: "/board/BACK-20",
+							search: "?lane=milestone",
+							state: { taskModalFrom: "/board?lane=milestone" },
+						},
 					]}
 					initialIndex={1}
 				>

@@ -1,6 +1,3 @@
-import { stat } from "node:fs/promises";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -11,7 +8,6 @@ import {
 	ListPromptsRequestSchema,
 	ListResourcesRequestSchema,
 	ListResourceTemplatesRequestSchema,
-	ListRootsResultSchema,
 	ListToolsRequestSchema,
 	McpError,
 	ReadResourceRequestSchema,
@@ -22,10 +18,10 @@ import {
 import { Core } from "../core/backlog.ts";
 import type { BacklogConfig } from "../types/index.ts";
 import { getPackageName } from "../utils/app-info.ts";
-import { resolveBacklogDirectory } from "../utils/backlog-directory.ts";
 import { getVersion } from "../utils/version.ts";
 import { registerInitRequiredResource } from "./resources/init-required/index.ts";
 import { registerWorkflowResources } from "./resources/workflow/index.ts";
+import { McpRootActivation } from "./root-activation.ts";
 import { registerDefinitionOfDoneTools } from "./tools/definition-of-done/index.ts";
 import { registerDocumentTools } from "./tools/documents/index.ts";
 import { registerMilestoneTools } from "./tools/milestones/index.ts";
@@ -62,7 +58,8 @@ type ServerInitOptions = {
 
 type ServerRequestExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
-export class McpServer extends Core {
+export class McpServer {
+	public readonly application: Core;
 	private readonly server: Server;
 	private transport?: StdioServerTransport;
 	private stopping = false;
@@ -70,20 +67,7 @@ export class McpServer extends Core {
 	/** Debug log lines collected during roots discovery (exposed to init-required resource). */
 	public readonly debugLog: string[] = [];
 
-	/** Whether roots discovery is enabled (and options for re-runs on roots change). */
-	private rootsDiscoveryEnabled = false;
-	private rootsDiscoveryOptions: { debug?: boolean } = {};
-	private rootsResolutionDirty = false;
-	private rootsResolutionInFlight?: Promise<void>;
-
-	/** The projectRoot passed to createMcpServer, used to revert on downgrade. */
-	private readonly initialProjectRoot: string;
-
-	/** True when the server has been upgraded from fallback to a real project. */
-	private upgraded = false;
-
-	/** True when the launch directory was itself an initialized project (vs fallback). */
-	private startupHasProject = false;
+	private readonly rootActivation: McpRootActivation;
 
 	private readonly tools = new Map<string, McpToolHandler>();
 	private readonly resources = new Map<string, McpResourceHandler>();
@@ -98,8 +82,7 @@ export class McpServer extends Core {
 	>();
 
 	constructor(projectRoot: string, instructions: string, version = "0.0.0") {
-		super(projectRoot, { enableWatchers: true });
-		this.initialProjectRoot = projectRoot;
+		this.application = new Core(projectRoot, { enableWatchers: true });
 
 		this.server = new Server(
 			{
@@ -117,6 +100,12 @@ export class McpServer extends Core {
 			},
 		);
 
+		this.rootActivation = new McpRootActivation(
+			this.application,
+			projectRoot,
+			(config, root) => this.setCapabilities(config, root),
+			(message, options) => this.log(message, options),
+		);
 		this.setupHandlers();
 	}
 
@@ -127,15 +116,12 @@ export class McpServer extends Core {
 	 * returns to the launch-directory project instead of init-required.
 	 *
 	 * The first request-scoped handler invocation can query MCP roots to look
-	 * for a valid backlog project. If found, the server reinitializes the Core,
+	 * for a valid backlog project. If found, the activation owner reinitializes the Core,
 	 * registers the full toolset, and notifies the client. Subsequent requests
 	 * reuse the cached resolution until the client reports roots changes.
 	 */
-	enableRootsDiscovery(options?: { debug?: boolean; startupHasProject?: boolean }): void {
-		this.rootsDiscoveryEnabled = true;
-		this.rootsDiscoveryOptions = { debug: options?.debug };
-		this.startupHasProject = options?.startupHasProject ?? false;
-		this.rootsResolutionDirty = true;
+	enableRootsDiscovery(options: { debug?: boolean; startupConfig: BacklogConfig | null }): void {
+		this.rootActivation.enable(options);
 	}
 
 	private log(message: string, options?: { debug?: boolean }): void {
@@ -148,161 +134,47 @@ export class McpServer extends Core {
 	}
 
 	private async ensureRootsResolved(extra?: ServerRequestExtra): Promise<void> {
-		if (!this.rootsDiscoveryEnabled || !this.rootsResolutionDirty || !extra) {
-			return;
-		}
-
-		if (!this.rootsResolutionInFlight) {
-			const resolutionPromise = this.resolveFromRoots(extra, this.rootsDiscoveryOptions).finally(() => {
-				if (this.rootsResolutionInFlight === resolutionPromise) {
-					this.rootsResolutionInFlight = undefined;
-				}
-			});
-			this.rootsResolutionInFlight = resolutionPromise;
-		}
-
-		await this.rootsResolutionInFlight;
-	}
-
-	private async resolveFromRoots(extra: ServerRequestExtra, options?: { debug?: boolean }): Promise<void> {
-		this.rootsResolutionDirty = false;
-		const caps = this.server.getClientCapabilities();
-		if (!caps?.roots) {
-			this.log("Client does not support MCP roots capability, staying in fallback mode.", options);
-			return;
-		}
-
-		try {
-			const { roots } = await extra.sendRequest({ method: "roots/list" }, ListRootsResultSchema);
-			this.log(`Received ${roots.length} root(s) from client.`, options);
-			const checkedPaths = await this.upgradeFromRoots(roots, options);
-			if (checkedPaths === null) return;
-			await this.restoreRootFallback(options);
-			this.log(`No valid backlog project found in MCP roots: ${this.formatCheckedRoots(checkedPaths)}`, options);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.log(`Roots discovery failed: ${message}`, options);
-		}
-	}
-
-	private async upgradeFromRoots(
-		roots: Array<{ uri: string }>,
-		options?: { debug?: boolean },
-	): Promise<Set<string> | null> {
-		const checkedPaths = new Set<string>();
-		for (const root of roots) {
-			const rootPath = await this.resolveRootSearchPath(root.uri);
-			if (!rootPath) continue;
-			checkedPaths.add(rootPath);
-			if (resolveBacklogDirectory(rootPath).configPath && (await this.upgradeToProject(rootPath, options))) return null;
-		}
-		return checkedPaths;
-	}
-
-	private async restoreRootFallback(options?: { debug?: boolean }): Promise<void> {
-		if (this.startupHasProject) {
-			await this.upgradeToProject(this.initialProjectRoot, options);
-			return;
-		}
-		if (this.upgraded) await this.downgradeToFallback(options);
-	}
-
-	private formatCheckedRoots(checkedPaths: Set<string>): string {
-		return checkedPaths.size ? [...checkedPaths].map((path) => `\`${path}\``).join(", ") : "no usable file roots";
-	}
-
-	private async resolveRootSearchPath(rootUri: string): Promise<string | null> {
-		if (!rootUri.startsWith("file://")) {
-			return null;
-		}
-
-		try {
-			const rootPath = fileURLToPath(rootUri);
-			const rootStat = await stat(rootPath);
-			if (rootStat.isDirectory()) {
-				return rootPath;
-			}
-			if (rootStat.isFile()) {
-				return dirname(rootPath);
-			}
-		} catch {
-			return null;
-		}
-
-		return null;
+		await this.rootActivation.ensure(extra, Boolean(this.server.getClientCapabilities()?.roots));
 	}
 
 	/**
 	 * Reinitialize Core with a discovered project root and register the full
 	 * toolset, replacing fallback-mode registrations.
 	 */
-	private async upgradeToProject(projectRoot: string, options?: { debug?: boolean }): Promise<boolean> {
-		if (this.filesystem.rootDir === projectRoot && (this.upgraded || this.startupHasProject)) {
-			this.log(`MCP roots still resolve to current project: ${projectRoot}`, options);
-			return true;
-		}
+	private async setCapabilities(config: BacklogConfig | null, projectRoot: string): Promise<void> {
+		if (config) this.registerProjectCapabilities(config);
+		else this.registerFallbackCapabilities(projectRoot);
+		await this.notifyRegistrationChanged();
+	}
 
-		const previousProjectRoot = this.filesystem.rootDir;
-		this.reinitializeProjectRoot(projectRoot);
-		let config: BacklogConfig | null;
-		try {
-			await this.ensureConfigLoaded();
-			config = await this.filesystem.loadConfig();
-		} catch (error) {
-			// A root whose config Backlog refuses to read is unusable like one with no config at all:
-			// restore the previous root and keep examining the remaining roots instead of aborting.
-			this.reinitializeProjectRoot(previousProjectRoot);
-			this.log(`Skipping root ${projectRoot}: ${error instanceof Error ? error.message : String(error)}`, options);
-			return false;
-		}
+	public registerFallbackCapabilities(projectRoot: string): void {
+		this.replaceRegistries(() => registerInitRequiredResource(this, projectRoot));
+	}
 
-		if (!config) {
-			this.reinitializeProjectRoot(previousProjectRoot);
-			this.log(`Skipping root ${projectRoot} (no valid config).`, options);
-			return false;
-		}
+	public registerProjectCapabilities(config: BacklogConfig): void {
+		this.replaceRegistries(() => this.addProjectCapabilities(config));
+	}
 
-		// Replace fallback registrations with the full toolset
-		this.tools.clear();
-		this.resources.clear();
-		this.prompts.clear();
-
+	private addProjectCapabilities(config: BacklogConfig): void {
 		registerWorkflowResources(this);
 		registerWorkflowTools(this);
 		registerTaskTools(this, config);
 		registerMilestoneTools(this);
 		registerDefinitionOfDoneTools(this);
 		registerDocumentTools(this, config);
-
-		// Notify client that available tools/resources/prompts changed
-		await this.server.sendToolListChanged();
-		await this.server.sendResourceListChanged();
-		await this.server.sendPromptListChanged();
-
-		this.upgraded = true;
-		this.log(`MCP server upgraded to project: ${projectRoot}`, options);
-		return true;
 	}
 
-	/**
-	 * Revert from an upgraded project back to fallback mode.
-	 * Called when roots change and no valid project is found in the new roots.
-	 */
-	private async downgradeToFallback(options?: { debug?: boolean }): Promise<void> {
-		this.reinitializeProjectRoot(this.initialProjectRoot);
-		this.upgraded = false;
-
+	private replaceRegistries(register: () => void): void {
 		this.tools.clear();
 		this.resources.clear();
 		this.prompts.clear();
+		register();
+	}
 
-		registerInitRequiredResource(this, this.initialProjectRoot);
-
+	private async notifyRegistrationChanged(): Promise<void> {
 		await this.server.sendToolListChanged();
 		await this.server.sendResourceListChanged();
 		await this.server.sendPromptListChanged();
-
-		this.log("MCP server reverted to fallback mode (workspace no longer has a backlog project).", options);
 	}
 
 	private setupHandlers(): void {
@@ -320,9 +192,7 @@ export class McpServer extends Core {
 
 		// Mark cached roots resolution dirty when client workspace changes.
 		this.server.setNotificationHandler(RootsListChangedNotificationSchema, () => {
-			if (this.rootsDiscoveryEnabled) {
-				this.rootsResolutionDirty = true;
-			}
+			this.rootActivation.markDirty();
 		});
 	}
 
@@ -375,8 +245,8 @@ export class McpServer extends Core {
 			await this.server.close();
 		} finally {
 			this.transport = undefined;
-			this.disposeSearchService();
-			this.disposeContentStore();
+			this.application.disposeSearchService();
+			this.application.disposeContentStore();
 		}
 	}
 
@@ -513,21 +383,19 @@ export class McpServer extends Core {
  * handler can then query client roots to find the correct project.
  */
 export async function createMcpServer(projectRoot: string, options: ServerInitOptions = {}): Promise<McpServer> {
-	// We need to check config first to determine which instructions to use
-	const tempCore = new Core(projectRoot);
-	await tempCore.ensureConfigLoaded();
-	const [config, version] = await Promise.all([tempCore.filesystem.loadConfig(), getVersion()]);
-
+	const version = await getVersion();
 	const server = new McpServer(projectRoot, INSTRUCTIONS, version);
+	await server.application.ensureConfigLoaded();
+	const config = await server.application.filesystem.loadConfig();
 
 	// Graceful fallback: if config doesn't exist, provide init-required resource
 	// and enable roots discovery so the server can find the project via MCP roots
 	if (!config) {
-		registerInitRequiredResource(server, projectRoot);
+		server.registerFallbackCapabilities(projectRoot);
 		if (!options.pinned) {
 			server.enableRootsDiscovery({
 				debug: options.debug,
-				startupHasProject: false,
+				startupConfig: null,
 			});
 		}
 
@@ -539,19 +407,14 @@ export async function createMcpServer(projectRoot: string, options: ServerInitOp
 	}
 
 	// Normal mode: full tools and resources
-	registerWorkflowResources(server);
-	registerWorkflowTools(server);
-	registerTaskTools(server, config);
-	registerMilestoneTools(server);
-	registerDefinitionOfDoneTools(server);
-	registerDocumentTools(server, config);
+	server.registerProjectCapabilities(config);
 
 	// Follow the client workspace roots so a server launched in the main checkout
 	// (or a shared/user-scope server) targets the active project, not a frozen one.
 	if (!options.pinned) {
 		server.enableRootsDiscovery({
 			debug: options.debug,
-			startupHasProject: true,
+			startupConfig: config,
 		});
 	}
 

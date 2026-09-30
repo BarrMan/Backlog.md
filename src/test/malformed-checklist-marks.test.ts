@@ -6,7 +6,7 @@ import { Core } from "../core/backlog.ts";
 import { AcceptanceCriteriaManager, DefinitionOfDoneManager } from "../markdown/structured-sections.ts";
 import { McpServer } from "../mcp/server.ts";
 import { TaskHandlers } from "../mcp/tools/tasks/handlers.ts";
-import { BacklogServer } from "../server/index.ts";
+import { createServerFixture } from "./server-fixture.ts";
 import { getTestCliPath } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
@@ -168,7 +168,7 @@ describe("malformed checklist edits preserve task bytes", () => {
 			await Bun.write(taskPath, original);
 			const server = new McpServer(testDir, "Test instructions");
 			try {
-				const handlers = new TaskHandlers(server);
+				const handlers = new TaskHandlers(server.application);
 				await expect(
 					handlers.editTask({
 						id: "TASK-1",
@@ -183,10 +183,7 @@ describe("malformed checklist edits preserve task bytes", () => {
 	}
 
 	it("browser AC replacement and DoD indexed payloads reject malformed rows", async () => {
-		const server = new BacklogServer(testDir);
-		const handler = server as unknown as {
-			handleUpdateTask(request: Request, taskId: string): Promise<Response>;
-		};
+		const fixture = createServerFixture(testDir);
 		try {
 			for (const family of families) {
 				const original = taskMarkdown(checklist(family, mixedRows));
@@ -200,20 +197,19 @@ describe("malformed checklist edits preserve task bytes", () => {
 								],
 							}
 						: { definitionOfDoneCheck: [2] };
-				const result = await handler.handleUpdateTask(
+				const result = await fixture.app.handle(
 					new Request("http://localhost/api/tasks/TASK-1", {
 						method: "PUT",
 						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify(payload),
 					}),
-					"TASK-1",
 				);
 				expect(result.ok).toBe(false);
 				expect((await result.json()).error).toContain(`Invalid ${family.title} checkbox mark`);
 				await expectUnchanged(original);
 			}
 		} finally {
-			await server.stop();
+			await fixture.dispose();
 		}
 	});
 

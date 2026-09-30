@@ -1,17 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BacklogServer } from "../server/index.ts";
+import { ServerHost } from "../server/server-host.ts";
 import { resolveBrowserLaunchCommand } from "../utils/browser-launch.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
-type BrowserLauncher = {
-	openBrowser(url: string): Promise<void>;
-};
-
-describe("BacklogServer browser launch", () => {
+describe("ServerHost browser launch", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("server-browser-open");
 		await mkdir(TEST_DIR, { recursive: true });
@@ -35,7 +31,7 @@ describe("BacklogServer browser launch", () => {
 		process.env.BACKLOG_BROWSER_CAPTURE = capturePath;
 
 		try {
-			const server = new BacklogServer(TEST_DIR) as unknown as BrowserLauncher;
+			const server = new ServerHost();
 			const url = "http://localhost:6420/?filter=To%20Do&label=a;b";
 			await server.openBrowser(url);
 
@@ -90,7 +86,7 @@ describe("BacklogServer browser launch", () => {
 		const log = spyOn(console, "log").mockImplementation(() => {});
 
 		try {
-			const server = new BacklogServer(TEST_DIR) as unknown as BrowserLauncher;
+			const server = new ServerHost();
 			await expect(server.openBrowser("http://localhost:6420")).resolves.toBeUndefined();
 
 			expect(warn).toHaveBeenCalledTimes(1);

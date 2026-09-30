@@ -82,25 +82,30 @@ function formatDependencyGraphBlock(task: TaskDetail): string[] {
 	return ["", "Dependency Graph:", "-".repeat(50), ...graphLines];
 }
 
-function pushTaskMetadata(lines: string[], task: TaskDetail): void {
+function taskMetadataLines(task: TaskDetail): Array<string | null> {
 	const priorityLabel = formatPriority(task.priority);
-	if (priorityLabel) lines.push(`Priority: ${priorityLabel}`);
-	if (task.type) lines.push(`Type: ${task.type}`);
-	if (task.project) lines.push(`Project: ${task.project}`);
-	if (task.ordinal !== undefined) lines.push(`Ordinal: ${task.ordinal}`);
 	const assigneeText = formatAssignees(task.assignee);
-	if (assigneeText) lines.push(`Assignee: ${assigneeText}`);
-	if (task.reporter) lines.push(`Reporter: ${task.reporter.startsWith("@") ? task.reporter : `@${task.reporter}`}`);
-	lines.push(`Created: ${formatDateForDisplay(task.createdDate, plainDateDisplayOptions)}`);
-	if (task.updatedDate) lines.push(`Updated: ${formatDateForDisplay(task.updatedDate, plainDateDisplayOptions)}`);
-	if (task.dueDate) lines.push(`Due: ${formatDateForDisplay(task.dueDate)}`);
-	if (task.labels?.length) lines.push(`Labels: ${task.labels.join(", ")}`);
-	if (task.milestone) lines.push(`Milestone: ${task.milestone}`);
-	if (task.parentTaskId) {
+	return [
+		priorityLabel && `Priority: ${priorityLabel}`,
+		task.type ? `Type: ${task.type}` : null,
+		task.project ? `Project: ${task.project}` : null,
+		task.ordinal !== undefined ? `Ordinal: ${task.ordinal}` : null,
+		assigneeText && `Assignee: ${assigneeText}`,
+		task.reporter ? `Reporter: ${task.reporter.startsWith("@") ? task.reporter : `@${task.reporter}`}` : null,
+		`Created: ${formatDateForDisplay(task.createdDate, plainDateDisplayOptions)}`,
+		task.updatedDate ? `Updated: ${formatDateForDisplay(task.updatedDate, plainDateDisplayOptions)}` : null,
+		task.dueDate ? `Due: ${formatDateForDisplay(task.dueDate)}` : null,
+		task.labels?.length ? `Labels: ${task.labels.join(", ")}` : null,
+		task.milestone ? `Milestone: ${task.milestone}` : null,
+	];
+}
+
+function taskRelationshipLines(task: TaskDetail): string[] {
+	const lines: string[] = [];
+	if (task.parentTaskId)
 		lines.push(
 			`Parent: ${task.parentTaskTitle ? `${task.parentTaskId} - ${task.parentTaskTitle}` : task.parentTaskId}`,
 		);
-	}
 	const summaries = task.subtaskSummaries ?? [];
 	const subtaskCount = summaries.length > 0 ? summaries.length : (task.subtasks?.length ?? 0);
 	if (subtaskCount > 0) {
@@ -110,6 +115,14 @@ function pushTaskMetadata(lines: string[], task: TaskDetail): void {
 	}
 	if (task.references?.length) lines.push(`References: ${task.references.join(", ")}`);
 	if (task.documentation?.length) lines.push(`Documentation: ${task.documentation.join(", ")}`);
+	return lines;
+}
+
+function pushTaskMetadata(lines: string[], task: TaskDetail): void {
+	lines.push(
+		...taskMetadataLines(task).filter((line): line is string => line !== null),
+		...taskRelationshipLines(task),
+	);
 }
 
 function pushSection(lines: string[], title: string, content: string, trailingBlank = true): void {

@@ -6,12 +6,8 @@ import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
-type InitHandler = {
-	handleInit(req: Request): Promise<Response>;
-};
-
-function initRequest(body: Record<string, unknown>): Request {
-	return new Request("http://127.0.0.1/api/init", {
+function initRequest(port: number, body: Record<string, unknown>): Request {
+	return new Request(`http://127.0.0.1:${port}/api/init`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({
@@ -23,17 +19,25 @@ function initRequest(body: Record<string, unknown>): Request {
 }
 
 describe("BacklogServer init endpoint", () => {
+	let server: BacklogServer | null = null;
 	beforeEach(() => {
 		TEST_DIR = createUniqueTestDir("server-init");
 	});
 
 	afterEach(async () => {
+		await server?.stop();
+		server = null;
 		await safeCleanup(TEST_DIR);
 	});
 
+	const initialize = async (body: Record<string, unknown>): Promise<Response> => {
+		server = new BacklogServer(TEST_DIR);
+		await server.start(0, false);
+		return fetch(initRequest(server.getPort() ?? 0, body));
+	};
+
 	it("parses string false filesystemOnly without enabling filesystem-only mode", async () => {
-		const server = new BacklogServer(TEST_DIR) as unknown as InitHandler;
-		const response = await server.handleInit(initRequest({ filesystemOnly: "false" }));
+		const response = await initialize({ filesystemOnly: "false" });
 
 		expect(response.status).toBe(200);
 
@@ -44,12 +48,9 @@ describe("BacklogServer init endpoint", () => {
 	});
 
 	it("rejects reserved task prefixes before writing config", async () => {
-		const server = new BacklogServer(TEST_DIR) as unknown as InitHandler;
-		const response = await server.handleInit(
-			initRequest({
-				advancedConfig: { taskPrefix: "draft" },
-			}),
-		);
+		const response = await initialize({
+			advancedConfig: { taskPrefix: "draft" },
+		});
 		const body = (await response.json()) as { error?: string };
 
 		expect(response.status).toBe(400);
@@ -58,8 +59,7 @@ describe("BacklogServer init endpoint", () => {
 	});
 
 	it("accepts string true filesystemOnly for loose init callers", async () => {
-		const server = new BacklogServer(TEST_DIR) as unknown as InitHandler;
-		const response = await server.handleInit(initRequest({ filesystemOnly: "true" }));
+		const response = await initialize({ filesystemOnly: "true" });
 
 		expect(response.status).toBe(200);
 

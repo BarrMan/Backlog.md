@@ -60,6 +60,12 @@ const ALL_FILTER_ITEMS: FilterItem[] = [
 	{ id: "labels", labelText: "Labels:", labelWidth: 8, minWidth: 18, flexGrow: false },
 ];
 
+function formatSelectedFilterValues(values: string[]): string {
+	if (values.length === 0) return "All";
+	if (values.length === 1) return values[0] ?? "All";
+	return `${values.length} selected`;
+}
+
 const PADDING = 1; // Left padding inside header box
 const GAP = 2; // Gap between filter items
 
@@ -620,31 +626,17 @@ export class FilterHeader {
 	}
 
 	private getPopupButtonContent(field: Exclude<FilterControlId, "search">): string {
-		switch (field) {
-			case "status":
-				if (this.state.status.length === 0) return "All ▼";
-				if (this.state.status.length === 1) return `${this.state.status[0]} ▼`;
-				return `${this.state.status.length} selected ▼`;
-			case "type":
-				if (this.state.taskTypes.length === 0) return "All ▼";
-				if (this.state.taskTypes.length === 1) return `${this.state.taskTypes[0]} ▼`;
-				return `${this.state.taskTypes.length} selected ▼`;
-			case "project":
-				if (this.state.projects.length === 0) return "All ▼";
-				if (this.state.projects.length === 1) return `${this.state.projects[0]} ▼`;
-				return `${this.state.projects.length} selected ▼`;
-			case "priority":
-				return this.state.priority ? `${this.state.priority} ▼` : "All ▼";
-			case "milestone":
-				if (!this.state.milestone) {
-					return "All ▼";
-				}
-				return `${this.state.milestone === NO_MILESTONE_FILTER_VALUE ? NO_MILESTONE_FILTER_LABEL : this.state.milestone} ▼`;
-			case "labels": {
-				const summary = formatLabelSummary(this.state.labels).replace(/^Labels:\s*/, "");
-				return `${summary} ▼`;
-			}
-		}
+		const selectedByField: Partial<Record<Exclude<FilterControlId, "search">, string[]>> = {
+			status: this.state.status,
+			type: this.state.taskTypes,
+			project: this.state.projects,
+		};
+		const selected = selectedByField[field] ?? [];
+		if (selected.length > 0) return `${formatSelectedFilterValues(selected)} ▼`;
+		if (field === "labels") return `${formatLabelSummary(this.state.labels).replace(/^Labels:\s*/, "")} ▼`;
+		if (field === "priority") return this.state.priority ? `${this.state.priority} ▼` : "All ▼";
+		const milestone = this.state.milestone;
+		return milestone ? `${milestone === NO_MILESTONE_FILTER_VALUE ? NO_MILESTONE_FILTER_LABEL : milestone} ▼` : "All ▼";
 	}
 
 	private updateStatusButton(): void {

@@ -1,21 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { Core } from "../core/backlog.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import { BacklogServer } from "../server/index.ts";
+import { ServerHost } from "../server/server-host.ts";
 import { closeServer, createUniqueTestDir, listenOnEphemeralPort, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let server: BacklogServer | null = null;
 
-type ServerInternals = {
-	server: { hostname?: string } | null;
-	openBrowser: (url: string) => Promise<void>;
-	core: {
-		getContentStore: () => Promise<unknown>;
-	};
-};
+class TestServerHost extends ServerHost {
+	hostname: string | undefined;
 
-function internals(instance: BacklogServer): ServerInternals {
-	return instance as unknown as ServerInternals;
+	override start(...args: Parameters<ServerHost["start"]>): void {
+		super.start(...args);
+		this.hostname = args[0].server?.hostname;
+	}
 }
 
 async function unusedLoopbackPort(): Promise<number> {
@@ -56,17 +55,19 @@ describe("BacklogServer loopback binding", () => {
 			logs.push(args.join(" "));
 		});
 
+		const host = new TestServerHost();
+		const openBrowser = spyOn(host, "openBrowser").mockImplementation(async (url) => {
+			openedUrl = url;
+		});
 		try {
-			server = new BacklogServer(TEST_DIR);
-			internals(server).openBrowser = async (url) => {
-				openedUrl = url;
-			};
+			server = new BacklogServer(TEST_DIR, { host });
 			await server.start(port, true);
 
-			expect(internals(server).server?.hostname).toBe("127.0.0.1");
+			expect(host.hostname).toBe("127.0.0.1");
 			expect(logs).toContain(`🚀 Backlog.md browser interface running at http://127.0.0.1:${port}`);
 			expect(openedUrl).toBe(`http://127.0.0.1:${port}`);
 		} finally {
+			openBrowser.mockRestore();
 			logSpy.mockRestore();
 		}
 	});
@@ -79,11 +80,12 @@ describe("BacklogServer loopback binding", () => {
 			logs.push(args.join(" "));
 		});
 
+		const host = new TestServerHost();
+		const openBrowser = spyOn(host, "openBrowser").mockImplementation(async () => {
+			opened = true;
+		});
 		try {
-			server = new BacklogServer(TEST_DIR);
-			internals(server).openBrowser = async () => {
-				opened = true;
-			};
+			server = new BacklogServer(TEST_DIR, { host });
 			await server.start(port, false);
 
 			expect(opened).toBe(false);
@@ -91,6 +93,7 @@ describe("BacklogServer loopback binding", () => {
 			expect(logs).toContain("💡 Open your browser and navigate to the URL above");
 			expect(logs).not.toContain("🌐 Opening browser...");
 		} finally {
+			openBrowser.mockRestore();
 			logSpy.mockRestore();
 		}
 	});
@@ -106,13 +109,14 @@ describe("BacklogServer loopback binding", () => {
 			markLoadStarted = resolve;
 		});
 
-		server = new BacklogServer(TEST_DIR);
-		const originalGetContentStore = internals(server).core.getContentStore.bind(internals(server).core);
-		internals(server).core.getContentStore = async () => {
+		const core = new Core(TEST_DIR, { enableWatchers: true });
+		const originalGetContentStore = core.getContentStore.bind(core);
+		core.getContentStore = async () => {
 			markLoadStarted();
 			await heldLoad;
 			return await originalGetContentStore();
 		};
+		server = new BacklogServer(TEST_DIR, { createCore: () => core });
 
 		await server.start(port, false);
 		const searchResponse = fetch(`http://127.0.0.1:${port}/api/search`);

@@ -45,6 +45,7 @@ const baseTasks: Task[] = [
 ];
 
 let activeRoot: Root | null = null;
+const originalCreateMilestone = apiClient.createMilestone.bind(apiClient);
 const originalUpdateMilestone = apiClient.updateMilestone.bind(apiClient);
 const originalRemoveMilestone = apiClient.removeMilestone.bind(apiClient);
 
@@ -157,6 +158,7 @@ afterEach(() => {
 		});
 		activeRoot = null;
 	}
+	apiClient.createMilestone = originalCreateMilestone;
 	apiClient.updateMilestone = originalUpdateMilestone;
 	apiClient.removeMilestone = originalRemoveMilestone;
 });
@@ -281,6 +283,62 @@ describe("Web milestones page search", () => {
 		expect(input?.value).toBe("Release 1");
 	});
 
+	it("keeps the add modal open while saving and closes it only after a successful refresh", async () => {
+		let resolveCreate: (() => void) | undefined;
+		const milestone = milestoneEntities[0];
+		if (!milestone) throw new Error("Expected milestone fixture");
+		apiClient.createMilestone = () =>
+			new Promise((resolve) => {
+				resolveCreate = () => resolve(milestone);
+			});
+		const container = renderPage();
+		const addButton = Array.from(container.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("Add milestone"),
+		);
+		clickElement(addButton as HTMLButtonElement);
+
+		const input = container.querySelector("#new-milestone-name") as HTMLInputElement;
+		setInputValue(input, "Release 3");
+		act(() => {
+			input.closest("form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+		});
+
+		expect(container.textContent).toContain("Add milestone");
+		expect(
+			Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Cancel")?.disabled,
+		).toBe(true);
+
+		await act(async () => {
+			resolveCreate?.();
+			await Promise.resolve();
+		});
+		expect(container.querySelector("#new-milestone-name")).toBeNull();
+	});
+
+	it("retains the add modal and its input when creation fails, then permits closing it", async () => {
+		apiClient.createMilestone = async () => {
+			throw new Error("Creation failed");
+		};
+		const container = renderPage();
+		const addButton = Array.from(container.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("Add milestone"),
+		);
+		clickElement(addButton as HTMLButtonElement);
+
+		const input = container.querySelector("#new-milestone-name") as HTMLInputElement;
+		setInputValue(input, "Release 3");
+		await submitForm(input.closest("form") as HTMLFormElement);
+
+		expect(input.value).toBe("Release 3");
+		expect(container.textContent).toContain("Creation failed");
+		const cancelButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent === "Cancel",
+		);
+		expect(cancelButton?.disabled).toBe(false);
+		clickElement(cancelButton as HTMLButtonElement);
+		expect(container.textContent).not.toContain("Creation failed");
+	});
+
 	it("opens a remove confirmation with clear and reassign choices", () => {
 		const container = renderPage();
 		const removeButtons = Array.from(container.querySelectorAll("button")).filter((button) =>
@@ -303,9 +361,11 @@ describe("Web milestones page search", () => {
 	it("submits milestone edits through the API and refreshes data", async () => {
 		let updateArgs: [string, string, string | null | undefined] | undefined;
 		let refreshCount = 0;
+		const milestone = milestoneEntities[0];
+		if (!milestone) throw new Error("Expected milestone fixture");
 		apiClient.updateMilestone = async (id: string, title: string, dueDate?: string | null) => {
 			updateArgs = [id, title, dueDate];
-			return { success: true, milestone: { ...milestoneEntities[0]!, title } };
+			return { success: true, milestone: { ...milestone, title } };
 		};
 
 		const container = renderPage(baseTasks, {
@@ -321,7 +381,7 @@ describe("Web milestones page search", () => {
 		const input = container.querySelector("#edit-milestone-name") as HTMLInputElement | null;
 		expect(input).toBeTruthy();
 		setInputValue(input as HTMLInputElement, "Release 1.1");
-		const dueDateInput = container.querySelector("#edit-milestone-due-date") as HTMLInputElement | null;
+		const dueDateInput = container.querySelector("#edit-milestone-name-due-date") as HTMLInputElement | null;
 		expect(dueDateInput?.type).toBe("date");
 		expect(dueDateInput?.value).toBe("2026-09-01");
 		setInputValue(dueDateInput as HTMLInputElement, "2026-09-02");
@@ -334,10 +394,9 @@ describe("Web milestones page search", () => {
 	});
 
 	it("submits milestone removal with reassign options through the API", async () => {
-		let removeArgs: [
-			string,
-			{ taskHandling?: "clear" | "keep" | "reassign"; reassignTo?: string } | undefined,
-		] | undefined;
+		let removeArgs:
+			| [string, { taskHandling?: "clear" | "keep" | "reassign"; reassignTo?: string } | undefined]
+			| undefined;
 		let refreshCount = 0;
 		apiClient.removeMilestone = async (id, options) => {
 			removeArgs = [id, options];
@@ -354,7 +413,7 @@ describe("Web milestones page search", () => {
 		);
 		clickElement(removeButtons[0] as HTMLButtonElement);
 
-		const reassignRadio = container.querySelector("input[value='reassign']") as HTMLInputElement | null;
+		const reassignRadio = container.querySelectorAll("input[type='radio']")[1] as HTMLInputElement | undefined;
 		expect(reassignRadio).toBeTruthy();
 		clickElement(reassignRadio as HTMLInputElement);
 		const select = container.querySelector("select") as HTMLSelectElement | null;

@@ -16,8 +16,8 @@ export function BoardLoadingSkeleton({ message, columnCount }: BoardLoadingSkele
 		<div className="relative" role="status" aria-label="Loading tasks">
 			<div className="overflow-x-auto pb-2" aria-hidden="true">
 				<div className="flex flex-row flex-nowrap gap-4 w-full">
-					{Array.from({ length: columns }, (_, column) => (
-						<div key={column} className="flex-1 min-w-[16rem]">
+					{Array.from({ length: columns }, (_, column) => `skeleton-column-${column}`).map((columnId) => (
+						<div key={columnId} className="flex-1 min-w-[16rem]">
 							{/* min-h-24 is the floor every real column has (TaskColumn), so the board
 							    only ever grows from here - it never contracts, even on empty projects. */}
 							<div className="rounded-lg p-4 min-h-24 bg-white border border-gray-200 shadow-sm dark:bg-gray-800 dark:border-gray-700 transition-colors duration-200">

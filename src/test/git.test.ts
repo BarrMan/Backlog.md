@@ -483,6 +483,23 @@ wait "$child_pid"
 	});
 
 	describe("getBranchLastModifiedMap", () => {
+		it("uses raw NUL-delimited records so numeric filenames are not mistaken for timestamps", async () => {
+			const git = new GitOperations(process.cwd());
+			const internals = git as unknown as {
+				isRepository: () => Promise<boolean>;
+				execGit: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
+			};
+			internals.isRepository = async () => true;
+			internals.execGit = async () => ({
+				stdout: "1700000000\0:100644 100644 old new M\0" + "123\0",
+				stderr: "",
+			});
+
+			expect(await git.getBranchLastModifiedMap("abc123", "backlog")).toEqual(
+				new Map([["123", new Date(1_700_000_000 * 1_000)]]),
+			);
+		});
+
 		it("passes an absolute cache cutoff to Git", async () => {
 			const git = new GitOperations(process.cwd());
 			let capturedArgs: string[] = [];
@@ -498,6 +515,7 @@ wait "$child_pid"
 			const cutoff = new Date("2026-07-11T00:00:00Z");
 
 			expect(await git.getBranchLastModifiedMap("abc123", "backlog", cutoff)).toEqual(new Map());
+			expect(capturedArgs).toContain("--raw");
 			expect(capturedArgs).toContain(`--since=@${Math.floor(cutoff.getTime() / 1000)}`);
 		});
 

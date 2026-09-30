@@ -18,7 +18,7 @@ if (outputDirectory !== ".") {
 }
 
 const result = await Bun.build({
-	entrypoints: ["src/cli.ts"],
+	entrypoints: ["src/cli/index.ts"],
 	target: "bun",
 	minify: true,
 	define: {

@@ -13,7 +13,7 @@ let TEST_DIR: string;
 let mcpServer: McpServer;
 
 async function loadConfig(server: McpServer) {
-	const config = await server.filesystem.loadConfig();
+	const config = await server.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load backlog configuration for tests");
 	}
@@ -24,9 +24,9 @@ describe("MCP task references and documentation", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-refs-docs");
 		mcpServer = new McpServer(TEST_DIR, "Test instructions");
-		await mcpServer.filesystem.ensureBacklogStructure();
+		await mcpServer.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(mcpServer, "Test Project");
+		await initializeFilesystemTestProject(mcpServer.application, "Test Project");
 
 		const config = await loadConfig(mcpServer);
 		registerTaskTools(mcpServer, config);
@@ -79,7 +79,7 @@ describe("MCP task references and documentation", () => {
 		expect(text).toContain("References: https://github.com/issue/123, src/api.ts");
 		expect(text).toContain("Documentation: https://design-docs.example.com, docs/spec.md");
 
-		const task = await mcpServer.getTask("task-1");
+		const task = await mcpServer.application.getTask("task-1");
 		expect(task?.references).toEqual(["https://github.com/issue/123", "src/api.ts"]);
 		expect(task?.documentation).toEqual(["https://design-docs.example.com", "docs/spec.md"]);
 	});
@@ -112,7 +112,7 @@ describe("MCP task references and documentation", () => {
 			},
 		});
 
-		const task = await mcpServer.getTask("task-1");
+		const task = await mcpServer.application.getTask("task-1");
 		expect(task?.references).toEqual(["ref-1.ts", "ref-3.ts"]);
 		expect(task?.documentation).toEqual(["doc-1.md", "doc-3.md"]);
 	});
@@ -142,7 +142,7 @@ describe("MCP task references and documentation", () => {
 
 		expect(getText(blankEdit.content)).toContain("References: ref-1.ts");
 		expect(getText(blankEdit.content)).toContain("Documentation: doc-1.md");
-		let task = await mcpServer.getTask("task-1");
+		let task = await mcpServer.application.getTask("task-1");
 		expect(task?.references).toEqual(["ref-1.ts"]);
 		expect(task?.documentation).toEqual(["doc-1.md"]);
 
@@ -159,7 +159,7 @@ describe("MCP task references and documentation", () => {
 
 		expect(getText(clearEdit.content)).not.toContain("References:");
 		expect(getText(clearEdit.content)).not.toContain("Documentation:");
-		task = await mcpServer.getTask("task-1");
+		task = await mcpServer.application.getTask("task-1");
 		expect(task?.references).toEqual([]);
 		expect(task?.documentation).toEqual([]);
 	});

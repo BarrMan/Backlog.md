@@ -90,7 +90,9 @@ async function pressKey(key: string, options: KeyboardEventInit = {}): Promise<v
 }
 
 function buttonWithText(container: HTMLElement, text: string): HTMLButtonElement {
-	const button = Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.includes(text));
+	const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
+		candidate.textContent?.includes(text),
+	);
 	expect(button).toBeTruthy();
 	return button as HTMLButtonElement;
 }
@@ -125,10 +127,10 @@ describe("DuplicateIdWarning", () => {
 		let requestBody = "";
 		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
 			requestBody = String(init?.body ?? "");
-			return new Response(
-				JSON.stringify({ repairedFiles: 1, changes: [], references: [], remainingGroups: [] }),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
-			);
+			return new Response(JSON.stringify({ repairedFiles: 1, changes: [], references: [], remainingGroups: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
 		}) as typeof fetch;
 		const container = renderWarning(makePlan(), async () => {
 			repairedCalls += 1;
@@ -187,7 +189,9 @@ describe("DuplicateIdWarning", () => {
 		await click(buttonWithText(container, "Review repair"));
 		expect(container.textContent).toContain("Automatic repair is blocked");
 		expect(container.textContent).toContain("Target path already exists.");
-		expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Continue")).toBe(false);
+		expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Continue")).toBe(
+			false,
+		);
 	});
 
 	it("explains an incomplete reference scan without claiming zero references", async () => {

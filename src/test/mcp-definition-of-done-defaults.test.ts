@@ -13,7 +13,7 @@ let testDir: string;
 let server: McpServer;
 
 async function loadConfigOrThrow(mcpServer: McpServer) {
-	const config = await mcpServer.filesystem.loadConfig();
+	const config = await mcpServer.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load config");
 	}
@@ -24,9 +24,9 @@ describe("MCP Definition of Done default tools", () => {
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("mcp-dod-defaults");
 		server = new McpServer(testDir, "Test instructions");
-		await server.filesystem.ensureBacklogStructure();
+		await server.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(server, "Test Project");
+		await initializeFilesystemTestProject(server.application, "Test Project");
 
 		const config = await loadConfigOrThrow(server);
 		registerTaskTools(server, config);
@@ -173,7 +173,7 @@ describe("MCP Definition of Done default tools", () => {
 		expect(reloaded.definitionOfDone).toEqual([injectedKeyPayload]);
 		expect(reloaded.onStatusChange).toBeUndefined();
 
-		const configText = await Bun.file(server.filesystem.configFilePath).text();
+		const configText = await Bun.file(server.application.filesystem.configFilePath).text();
 		expect(configText).toContain(String.raw`Validate \"dark mode\"\nonStatusChange: \"echo pwned\"`);
 		expect(configText).not.toContain('\nonStatusChange: "echo pwned"');
 	});

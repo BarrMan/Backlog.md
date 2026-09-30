@@ -6,15 +6,10 @@ import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
 import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
 
-type ProjectServerHandlers = {
-	handleCreateTask(request: Request): Promise<Response>;
-	handleUpdateTask(request: Request, taskId: string): Promise<Response>;
-};
-
 describe("BacklogServer task project field", () => {
 	let testDir: string;
 	let server: BacklogServer | null;
-	let handlers: ProjectServerHandlers;
+	let baseUrl: string;
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("server-task-project");
@@ -34,7 +29,8 @@ describe("BacklogServer task project field", () => {
 			projects: ["web", "api"],
 		});
 		server = new BacklogServer(testDir);
-		handlers = server as unknown as ProjectServerHandlers;
+		await server.start(0, false);
+		baseUrl = `http://127.0.0.1:${server.getPort()}`;
 	});
 
 	afterEach(async () => {
@@ -44,7 +40,7 @@ describe("BacklogServer task project field", () => {
 	});
 
 	const jsonRequest = (path: string, method: string, body: unknown) =>
-		new Request(`http://localhost${path}`, {
+		new Request(`${baseUrl}${path}`, {
 			method,
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
@@ -52,7 +48,7 @@ describe("BacklogServer task project field", () => {
 
 	it("persists project selected via the create endpoint", async () => {
 		const createdResponse = await withTimeout(
-			handlers.handleCreateTask(jsonRequest("/api/tasks", "POST", { title: "Web task", project: "web" })),
+			fetch(jsonRequest("/api/tasks", "POST", { title: "Web task", project: "web" })),
 			"server task creation",
 			2_000,
 		);
@@ -62,23 +58,15 @@ describe("BacklogServer task project field", () => {
 	});
 
 	it("persists and clears project through the update endpoint", async () => {
-		const createdResponse = await handlers.handleCreateTask(
-			jsonRequest("/api/tasks", "POST", { title: "Untagged task" }),
-		);
+		const createdResponse = await fetch(jsonRequest("/api/tasks", "POST", { title: "Untagged task" }));
 		const created = (await createdResponse.json()) as Task;
 		expect(created.project).toBeUndefined();
 
-		const updatedResponse = await handlers.handleUpdateTask(
-			jsonRequest(`/api/tasks/${created.id}`, "PUT", { project: "api" }),
-			created.id,
-		);
+		const updatedResponse = await fetch(jsonRequest(`/api/tasks/${created.id}`, "PUT", { project: "api" }));
 		expect(updatedResponse.status).toBe(200);
 		expect(((await updatedResponse.json()) as Task).project).toBe("api");
 
-		const clearedResponse = await handlers.handleUpdateTask(
-			jsonRequest(`/api/tasks/${created.id}`, "PUT", { project: null }),
-			created.id,
-		);
+		const clearedResponse = await fetch(jsonRequest(`/api/tasks/${created.id}`, "PUT", { project: null }));
 		expect(clearedResponse.status).toBe(200);
 		expect(((await clearedResponse.json()) as Task).project).toBeUndefined();
 	});

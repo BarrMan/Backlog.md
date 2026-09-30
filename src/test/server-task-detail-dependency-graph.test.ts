@@ -9,16 +9,11 @@ import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
 import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
 
-type DetailServerHandlers = {
-	handleGetTask(taskId: string): Promise<Response>;
-	handleListTasks(request: Request): Promise<Response>;
-};
-
 describe("BacklogServer task detail dependency graph", () => {
 	let testDir: string;
 	let server: BacklogServer | null;
-	let handlers: DetailServerHandlers;
 	let core: Core;
+	let baseUrl: string;
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("server-task-detail-graph");
@@ -38,7 +33,8 @@ describe("BacklogServer task detail dependency graph", () => {
 		});
 		core = new Core(testDir);
 		server = new BacklogServer(testDir);
-		handlers = server as unknown as DetailServerHandlers;
+		await server.start(0, false);
+		baseUrl = `http://127.0.0.1:${server.getPort()}`;
 	});
 
 	afterEach(async () => {
@@ -55,7 +51,7 @@ describe("BacklogServer task detail dependency graph", () => {
 	};
 
 	const detailFor = async (taskId: string): Promise<TaskDetail> => {
-		const response = await withTimeout(handlers.handleGetTask(taskId), "task detail", 5_000);
+		const response = await withTimeout(fetch(`${baseUrl}/api/tasks/${taskId}`), "task detail", 5_000);
 		expect(response.status).toBe(200);
 		return (await response.json()) as TaskDetail;
 	};
@@ -78,18 +74,14 @@ describe("BacklogServer task detail dependency graph", () => {
 
 	it("does not serve a standalone dependency-graph surface any more", async () => {
 		// The graph belongs to the detail read; a second endpoint would be a second way to get it.
-		expect((server as unknown as Record<string, unknown>).handleGetTaskDependencyGraph).toBeUndefined();
+		expect((await fetch(`${baseUrl}/api/tasks/task-1/dependency-graph`)).status).toBe(404);
 	});
 
 	it("keeps the compact list free of the graph", async () => {
 		await addTask("task-1", "Foundation");
 		await addTask("task-2", "Selected", ["task-1"]);
 
-		const response = await withTimeout(
-			handlers.handleListTasks(new Request("http://localhost/api/tasks")),
-			"task list",
-			5_000,
-		);
+		const response = await withTimeout(fetch(`${baseUrl}/api/tasks`), "task list", 5_000);
 		const tasks = (await response.json()) as Task[];
 		expect(tasks.length).toBeGreaterThan(0);
 		for (const task of tasks) {
@@ -116,8 +108,8 @@ describe("BacklogServer task detail dependency graph", () => {
 		const original = join(testDir, "backlog", "tasks", "task-1 - Contested.md");
 		await writeFile(join(testDir, "backlog", "tasks", "task-01 - Contested-copy.md"), await readFile(original));
 
-		expect((await withTimeout(handlers.handleGetTask("task-1"), "ambiguous", 5_000)).status).toBe(409);
-		expect((await withTimeout(handlers.handleGetTask("nope!"), "invalid", 5_000)).status).toBe(400);
-		expect((await withTimeout(handlers.handleGetTask("task-777"), "missing", 5_000)).status).toBe(404);
+		expect((await withTimeout(fetch(`${baseUrl}/api/tasks/task-1`), "ambiguous", 5_000)).status).toBe(409);
+		expect((await withTimeout(fetch(`${baseUrl}/api/tasks/nope!`), "invalid", 5_000)).status).toBe(400);
+		expect((await withTimeout(fetch(`${baseUrl}/api/tasks/task-777`), "missing", 5_000)).status).toBe(404);
 	});
 });

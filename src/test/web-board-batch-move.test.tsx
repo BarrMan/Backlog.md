@@ -126,7 +126,7 @@ const getCard = (container: HTMLElement, taskId: string): HTMLElement => {
 };
 
 const selectedCardIds = (container: HTMLElement): string[] =>
-	Array.from(container.querySelectorAll('[aria-selected="true"]')).map(
+	Array.from(container.querySelectorAll('[aria-pressed="true"]')).map(
 		(element) => element.querySelector(".font-mono")?.textContent ?? "",
 	);
 
@@ -635,10 +635,7 @@ describe("Web board batch move", () => {
 
 	it("feeds a completed batch move through the board store rather than reloading the board", async () => {
 		const originalMoveTasks = apiClient.moveTasks.bind(apiClient);
-		const moved: Task[] = [
-			{ ...TASKS[0], status: "Done" } as Task,
-			{ ...TASKS[1], status: "Done" } as Task,
-		];
+		const moved: Task[] = [{ ...TASKS[0], status: "Done" } as Task, { ...TASKS[1], status: "Done" } as Task];
 		apiClient.moveTasks = async () => ({ success: true, tasks: moved, changedTasks: moved, failures: [] });
 		const updates: Array<{ tasks: Task[]; requestTask: Task }> = [];
 		let refreshes = 0;
@@ -777,7 +774,9 @@ describe("Web board batch move", () => {
 		const dragImages = await dispatchDragStart(getCard(container, "TASK-3"), { metaKey: true });
 
 		expect(dragImages).toHaveLength(1);
-		expect((dragImages[0]?.element as HTMLElement).lastElementChild?.textContent).toBe("3");
+		const ghost = dragImages[0]?.element as HTMLElement | undefined;
+		if (!ghost) throw new Error("Expected a drag image");
+		expect(ghost.lastElementChild?.textContent).toBe("3");
 		expect(selectedCardIds(container).sort()).toEqual(["TASK-1", "TASK-2", "TASK-3"]);
 	});
 

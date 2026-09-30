@@ -23,6 +23,70 @@ function hasBlockingDependency(task: Task, tasksById: Map<string, Task>): boolea
 	);
 }
 
+type StatisticsAccumulator = {
+	completedTasks: number;
+	noPriorityCount: number;
+	totalAge: number;
+	taskCount: number;
+	recentlyCreated: Task[];
+	recentlyUpdated: Task[];
+	staleTasks: Task[];
+	blockedTasks: Task[];
+};
+
+function createStatisticsAccumulator(): StatisticsAccumulator {
+	return {
+		completedTasks: 0,
+		noPriorityCount: 0,
+		totalAge: 0,
+		taskCount: 0,
+		recentlyCreated: [],
+		recentlyUpdated: [],
+		staleTasks: [],
+		blockedTasks: [],
+	};
+}
+
+function countTask(
+	task: Task,
+	statusCounts: Map<string, number>,
+	priorityCounts: Map<string, number>,
+	state: StatisticsAccumulator,
+): void {
+	statusCounts.set(task.status ?? "", (statusCounts.get(task.status ?? "") ?? 0) + 1);
+	if (task.status === DEFAULT_DONE_STATUS) state.completedTasks++;
+	const priority = normalizePriorityValue(task.priority);
+	if (priority) priorityCounts.set(priority, (priorityCounts.get(priority) ?? 0) + 1);
+	else state.noPriorityCount++;
+}
+
+function collectTaskAge(task: Task, now: Date, state: StatisticsAccumulator): void {
+	const ageInDays = taskAgeInDays(task, now);
+	if (ageInDays === null) return;
+	state.totalAge += ageInDays;
+	state.taskCount++;
+}
+
+function collectRecentTaskActivity(task: Task, cutoff: Date, state: StatisticsAccumulator): void {
+	if (task.createdDate && new Date(task.createdDate) >= cutoff) state.recentlyCreated.push(task);
+	if (task.updatedDate && new Date(task.updatedDate) >= cutoff) state.recentlyUpdated.push(task);
+}
+
+function collectStaleTask(task: Task, cutoff: Date, state: StatisticsAccumulator): void {
+	const lastDate = task.updatedDate || task.createdDate;
+	if (task.status !== DEFAULT_DONE_STATUS && lastDate && new Date(lastDate) < cutoff) state.staleTasks.push(task);
+}
+
+function collectBlockedTask(task: Task, tasksById: Map<string, Task>, state: StatisticsAccumulator): void {
+	if (task.status !== DEFAULT_DONE_STATUS && task.dependencies?.length && hasBlockingDependency(task, tasksById)) {
+		state.blockedTasks.push(task);
+	}
+}
+
+function sortNewest(tasks: Task[], date: (task: Task) => string | undefined): Task[] {
+	return tasks.sort((left, right) => new Date(date(right) || 0).getTime() - new Date(date(left) || 0).getTime());
+}
+
 export interface TaskStatistics {
 	statusCounts: Map<string, number>;
 	priorityCounts: Map<string, number>;
@@ -64,18 +128,11 @@ export function getTaskStatistics(
 		priorityCounts.set(priority, 0);
 	}
 
-	let completedTasks = 0;
-	let noPriorityCount = 0;
 	const now = new Date();
 	const recentActivityCutoff = new Date(now.getTime() - RECENT_ACTIVITY_DAYS * MILLISECONDS_PER_DAY);
 	const staleTaskCutoff = new Date(now.getTime() - STALE_TASK_DAYS * MILLISECONDS_PER_DAY);
 
-	const recentlyCreated: Task[] = [];
-	const recentlyUpdated: Task[] = [];
-	const staleTasks: Task[] = [];
-	const blockedTasks: Task[] = [];
-	let totalAge = 0;
-	let taskCount = 0;
+	const state = createStatisticsAccumulator();
 	const tasksById = new Map(tasks.map((task) => [task.id, task]));
 
 	// Process each task
@@ -85,98 +142,37 @@ export function getTaskStatistics(
 			continue;
 		}
 
-		// Count by status
-		const currentCount = statusCounts.get(task.status) || 0;
-		statusCounts.set(task.status, currentCount + 1);
-
-		// Count completed tasks
-		if (task.status === DEFAULT_DONE_STATUS) {
-			completedTasks++;
-		}
-
-		// Count by priority
-		const priority = normalizePriorityValue(task.priority);
-		if (priority) {
-			const priorityCount = priorityCounts.get(priority) || 0;
-			priorityCounts.set(priority, priorityCount + 1);
-		} else {
-			noPriorityCount++;
-		}
-
-		// Track recent activity
-		if (task.createdDate) {
-			if (new Date(task.createdDate) >= recentActivityCutoff) {
-				recentlyCreated.push(task);
-			}
-			const ageInDays = taskAgeInDays(task, now);
-			if (ageInDays !== null) {
-				totalAge += ageInDays;
-				taskCount++;
-			}
-		}
-
-		if (task.updatedDate) {
-			const updatedDate = new Date(task.updatedDate);
-			if (updatedDate >= recentActivityCutoff) {
-				recentlyUpdated.push(task);
-			}
-		}
-
-		// Identify stale tasks (not updated in 30 days and not done)
-		if (task.status !== DEFAULT_DONE_STATUS) {
-			const lastDate = task.updatedDate || task.createdDate;
-			if (lastDate) {
-				const date = new Date(lastDate);
-				if (date < staleTaskCutoff) {
-					staleTasks.push(task);
-				}
-			}
-		}
-
-		// Identify blocked tasks (has dependencies that are not done)
-		if (task.dependencies?.length && task.status !== DEFAULT_DONE_STATUS) {
-			if (hasBlockingDependency(task, tasksById)) {
-				blockedTasks.push(task);
-			}
-		}
+		countTask(task, statusCounts, priorityCounts, state);
+		collectTaskAge(task, now, state);
+		collectRecentTaskActivity(task, recentActivityCutoff, state);
+		collectStaleTask(task, staleTaskCutoff, state);
+		collectBlockedTask(task, tasksById, state);
 	}
 
-	// Sort recent activity by date
-	recentlyCreated.sort((a, b) => {
-		const dateA = new Date(a.createdDate || 0);
-		const dateB = new Date(b.createdDate || 0);
-		return dateB.getTime() - dateA.getTime();
-	});
-
-	recentlyUpdated.sort((a, b) => {
-		const dateA = new Date(a.updatedDate || 0);
-		const dateB = new Date(b.updatedDate || 0);
-		return dateB.getTime() - dateA.getTime();
-	});
-
-	// Calculate average task age
-	const averageTaskAge = taskCount > 0 ? Math.round(totalAge / taskCount) : 0;
+	sortNewest(state.recentlyCreated, (task) => task.createdDate);
+	sortNewest(state.recentlyUpdated, (task) => task.updatedDate);
+	const averageTaskAge = state.taskCount > 0 ? Math.round(state.totalAge / state.taskCount) : 0;
 
 	// Calculate completion percentage (only count tasks with valid status)
 	const totalTasks = Array.from(statusCounts.values()).reduce((sum, count) => sum + count, 0);
-	const completionPercentage = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+	const completionPercentage = totalTasks > 0 ? Math.round((state.completedTasks / totalTasks) * 100) : 0;
 
 	return {
 		statusCounts,
 		priorityCounts,
-		noPriorityCount,
+		noPriorityCount: state.noPriorityCount,
 		totalTasks,
-		completedTasks,
+		completedTasks: state.completedTasks,
 		completionPercentage,
 		draftCount: drafts.length,
 		recentActivity: {
-			created: recentlyCreated.slice(0, HEALTH_TASK_LIMIT),
-			updated: recentlyUpdated.slice(0, HEALTH_TASK_LIMIT),
+			created: state.recentlyCreated.slice(0, HEALTH_TASK_LIMIT),
+			updated: state.recentlyUpdated.slice(0, HEALTH_TASK_LIMIT),
 		},
 		projectHealth: {
 			averageTaskAge,
-			staleTasks: staleTasks.slice(0, HEALTH_TASK_LIMIT),
-			blockedTasks: blockedTasks.slice(0, HEALTH_TASK_LIMIT),
+			staleTasks: state.staleTasks.slice(0, HEALTH_TASK_LIMIT),
+			blockedTasks: state.blockedTasks.slice(0, HEALTH_TASK_LIMIT),
 		},
 	};
 }

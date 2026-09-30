@@ -18,13 +18,13 @@ describe("MCP task project filtering adapter", () => {
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("mcp-task-project-filtering");
 		server = new McpServer(testDir, "Test instructions");
-		await server.filesystem.ensureBacklogStructure();
-		await initializeFilesystemTestProject(server, "MCP Project Filter Project");
+		await server.application.filesystem.ensureBacklogStructure();
+		await initializeFilesystemTestProject(server.application, "MCP Project Filter Project");
 
-		const config = await server.filesystem.loadConfig();
+		const config = await server.application.filesystem.loadConfig();
 		if (!config) throw new Error("Expected test config");
 		config.projects = [" Web ", "API", "web", ""];
-		await server.filesystem.saveConfig(config);
+		await server.application.filesystem.saveConfig(config);
 		registerTaskTools(server, config);
 
 		for (const args of [

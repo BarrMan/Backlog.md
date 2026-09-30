@@ -164,21 +164,28 @@ export function useTaskDetailsModalActions({
 		setError(null);
 		try {
 			const payload = buildSavePayload();
-			if (isCreateMode && onSubmit) {
-				await onSubmit({ ...payload, dueDate: payload.dueDate ?? undefined } as Partial<Task>);
-				if (isCurrent(requestEpoch)) onClose();
-			} else if (task) {
-				await apiClient.updateTask(task.id, payload);
-				if (!isCurrent(requestEpoch)) return;
-				setMode("preview");
-				await onSaved?.();
-				if (isCurrent(requestEpoch)) setCommentsChanged(false);
-			}
+			if (isCreateMode) await saveCreatedTask(payload, requestEpoch);
+			else await saveExistingTask(payload, requestEpoch);
 		} catch (error) {
 			if (isCurrent(requestEpoch)) setError(errorMessage(error, "Failed to save task"));
 		} finally {
 			if (isCurrent(requestEpoch)) setSaving(false);
 		}
+	};
+
+	const saveCreatedTask = async (payload: TaskUpdatePayload, requestEpoch: number) => {
+		if (!onSubmit) return;
+		await onSubmit({ ...payload, dueDate: payload.dueDate ?? undefined } as Partial<Task>);
+		if (isCurrent(requestEpoch)) onClose();
+	};
+
+	const saveExistingTask = async (payload: TaskUpdatePayload, requestEpoch: number) => {
+		if (!task) return;
+		await apiClient.updateTask(task.id, payload);
+		if (!isCurrent(requestEpoch)) return;
+		setMode("preview");
+		await onSaved?.();
+		if (isCurrent(requestEpoch)) setCommentsChanged(false);
 	};
 
 	const addComment = async () => {

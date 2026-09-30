@@ -5,9 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import type { Task } from "../types/index.ts";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
-import { apiClient } from "../web/lib/api";
 import { TaskIdIndexProvider } from "../web/contexts/TaskIdIndexContext.tsx";
 import { ThemeProvider } from "../web/contexts/ThemeContext";
+import { apiClient } from "../web/lib/api";
 import { setNativeInputValue } from "./react-dom-input.ts";
 
 let activeRoot: Root | null = null;

@@ -1,4 +1,20 @@
+import { basename } from "node:path";
 import type { Core } from "../index.ts";
+
+function numericIdBody(value: string, prefix: string): string | null {
+	const prefixWithSeparator = `${prefix}-`;
+	if (!value.toLowerCase().startsWith(prefixWithSeparator.toLowerCase())) return null;
+	const body = value.substring(prefixWithSeparator.length);
+	return /^\d+$/.test(body) ? body : null;
+}
+
+function numericIdFromFilename(file: string, prefix: string): string | null {
+	const filename = basename(file);
+	if (!filename.endsWith(".md")) return null;
+	const stem = filename.substring(0, filename.length - ".md".length);
+	const separator = stem.indexOf(" - ");
+	return numericIdBody(separator === -1 ? stem : stem.substring(0, separator), prefix);
+}
 
 async function collectBranchIds(
 	core: Core,
@@ -22,8 +38,8 @@ async function collectBranchIds(
 			branches.map(async (branch) => {
 				const files = await core.gitOps.listFilesInTree(branch, `${backlogDir}/${directory}`);
 				return files
-					.map((file) => file.match(new RegExp(`${prefix}-(\\d+)`))?.[1])
-					.filter((id): id is string => id !== undefined)
+					.map((file) => numericIdFromFilename(file, prefix))
+					.filter((id): id is string => id !== null)
 					.map((id) => `${prefix}-${id}`);
 			}),
 		);
@@ -38,10 +54,9 @@ async function collectBranchIds(
 
 function nextId(ids: readonly string[], prefix: string, padding: unknown): string {
 	let max = 0;
-	const pattern = new RegExp(`^${prefix}-(\\d+)$`);
 	for (const id of ids) {
-		const match = id.match(pattern);
-		if (match) max = Math.max(max, Number.parseInt(match[1] || "0", 10));
+		const body = numericIdBody(id, prefix);
+		if (body !== null) max = Math.max(max, Number.parseInt(body, 10));
 	}
 	const next = max + 1;
 	return `${prefix}-${typeof padding === "number" && padding > 0 ? String(next).padStart(padding, "0") : next}`;

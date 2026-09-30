@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode'
 created_date: '2026-09-28 14:05'
-updated_date: '2026-09-29 04:10'
+updated_date: '2026-09-29 15:35'
 labels: []
 dependencies: []
 parent_task_id: BACK-707
@@ -42,6 +42,8 @@ Add task status tree, details editing, live preview/input, full-screen attach, h
 8. Restore Workspace N to shared task creation; Enter on a task starts missing session then attaches fullscreen or attaches current session. Preserve group Enter expansion and Tab inline input; update shortcut guidance and verify widget-dispatched lifecycle regression.
 
 9. Correct fullscreen session terminal ownership using leave-before-pause and unconditional resume, full re-entry/redraw, and suppress Workspace activity while external session owns terminal. Verify alternate buffer and mouse state before/after real tmux attach/detach, repeated cycles, input, and focused regressions.
+
+10. Reassess session ownership: keep durable state in SessionStore, replace service forwarding wrappers with direct store use, and isolate launch and handoff transitions through existing process/worktree ports. Simplify Workspace lifecycle state and unsafe widget access without changing serialization or terminal key ownership. 11. Run focused unit/type/lint checks; separately attempt the real-provider terminal acceptance within the requested time bounds.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -80,4 +82,6 @@ Restored Workspace N to shared task composer including group and empty-workspace
 Fixed fullscreen return lifecycle: leave before pause, unconditional resume, enter with full cache allocation/redraw and mouse restoration. Suspend Workspace render/poll/input while external terminal owns TTY; restore preview resizing afterward. Verified23 tests/73 assertions across navigation/switching/board lifecycle, TypeScript and repository Biome pass. Direct native tmux audit with controlled service and REAL child tmux attach completed two Enter/Ctrl+B D cycles: inner client confirmed attached, Workspace alternate_on=1 mouse_any_flag=1 before and after, full header/details/preview/footer redrawn. Arrow input and wheel reports followed by q worked; clean exit sentinel and alternate_on=0 mouse_any_flag=0. No Workspace layout in normal history. Earlier full-CLI fixture audits failed due environment/stale short-lived fixture sessions; successful audit isolates TTY handoff rather than provider startup.
 
 User reports terminal issues remain unresolved; task remains In Progress.
+
+Reassessed requested workspace paths only. SessionStore now rejects malformed nested durable session/handoff payloads while retaining state.json v1, atomic writes, lock timing, and recovery semantics. AgentSessionService calls SessionStore directly, removing private forwarding wrappers; launch remains orchestrated through the existing SessionProcess and worktree ports. Workspace uses named Blessed capability adapters for layout, scroll, editable inputs, and selection, preserving N, Tab, Ctrl+Q, raw inline input, and serialized input queue behavior. Verified focused SessionStore/model/navigation tests: 11 pass, 47 assertions; scoped Biome clean; opt-in PTY configuration test: 1 pass, 3 assertions. Full tsc remains blocked by unrelated existing CLI/MCP/server errors; filtered workspace paths emit no TypeScript errors. opencode 1.18.33 is installed, but the PTY test uses a synthetic command, so no real-provider launch/attach/handoff acceptance is claimed and the task remains In Progress.
 <!-- SECTION:NOTES:END -->

@@ -1,4 +1,5 @@
 import type { Core } from "../core/backlog.ts";
+import type { FileSystem } from "../file-system/operations.ts";
 import type { AcceptanceCriterion, Task } from "../types/index.ts";
 import { buildDependencyGraph, findCycleThroughRoot } from "./dependency-graph.ts";
 import { AmbiguousIdError } from "./entity-id.ts";
@@ -66,7 +67,7 @@ function resolveUniqueDependency(dependency: string, matches: Task[]): string | 
  */
 export async function validateDependencies(
 	dependencies: string[],
-	core: Core,
+	filesystem: FileSystem,
 	target?: Task,
 ): Promise<{ valid: string[]; invalid: string[] }> {
 	const valid: string[] = [];
@@ -74,33 +75,10 @@ export async function validateDependencies(
 	if (dependencies.length === 0) {
 		return { valid, invalid };
 	}
-	const corpus = await loadDependencyCorpus(core);
+	const corpus = await loadDependencyCorpus(filesystem);
 	const known = [...corpus.tasks, ...corpus.drafts, ...corpus.completed, ...corpus.archived];
 	for (const dependency of dependencies) {
-		const resolved = resolveUniqueDependency(
-			dependency,
-			known.filter((candidate) => taskIdsEqual(dependency, candidate.id)),
-		);
-		if (resolved === null) {
-			// The corpus cannot resolve a reference to the target's freshly allocated ID, so the raw
-			// input is checked against the target before the reference is reported as missing.
-			if (target && taskIdsEqual(dependency, target.id)) {
-				throw new Error(`Task ${target.id} cannot depend on itself ("${dependency.trim()}" names this task).`);
-			}
-			invalid.push(dependency);
-			continue;
-		}
-		if (target && taskIdsEqual(resolved, target.id)) {
-			throw new Error(`Task ${target.id} cannot depend on itself ("${dependency.trim()}" names this task).`);
-		}
-		// Called for its ambiguity check: it raises AmbiguousTaskIdError when several working-copy
-		// files (active or completed) claim this ID. Drafts and archived tasks resolve to null here
-		// and rely on the corpus check above.
-		await core.loadTaskById(resolved, { includeCrossBranch: false });
-		// Equivalent spellings of one task (1 and BACK-1) must not persist twice.
-		if (!valid.some((existing) => taskIdsEqual(existing, resolved))) {
-			valid.push(resolved);
-		}
+		await validateDependencyInput(dependency, known, filesystem, target, valid, invalid);
 	}
 	// Every new cycle must run through the target, because the edges being added all leave it. The
 	// graph is built once with the validated dependencies as the target's edges, so cycle detection
@@ -133,6 +111,32 @@ export async function validateDependencies(
 	return { valid, invalid };
 }
 
+async function validateDependencyInput(
+	dependency: string,
+	known: Task[],
+	filesystem: FileSystem,
+	target: Task | undefined,
+	valid: string[],
+	invalid: string[],
+): Promise<void> {
+	const resolved = resolveUniqueDependency(
+		dependency,
+		known.filter((candidate) => taskIdsEqual(dependency, candidate.id)),
+	);
+	if (resolved === null) {
+		if (target && taskIdsEqual(dependency, target.id)) throwSelfDependency(target, dependency);
+		invalid.push(dependency);
+		return;
+	}
+	if (target && taskIdsEqual(resolved, target.id)) throwSelfDependency(target, dependency);
+	await filesystem.loadTask(resolved);
+	if (!valid.some((existing) => taskIdsEqual(existing, resolved))) valid.push(resolved);
+}
+
+function throwSelfDependency(target: Task, dependency: string): never {
+	throw new Error(`Task ${target.id} cannot depend on itself ("${dependency.trim()}" names this task).`);
+}
+
 /** The records dependency validation and `backlog doctor` resolve dependencies against. */
 interface DependencyCorpus {
 	tasks: Task[];
@@ -141,12 +145,12 @@ interface DependencyCorpus {
 	archived: Task[];
 }
 
-async function loadDependencyCorpus(core: Core): Promise<DependencyCorpus> {
+async function loadDependencyCorpus(filesystem: FileSystem): Promise<DependencyCorpus> {
 	const [tasks, drafts, completed, archived] = await Promise.all([
-		core.queryTasks({ includeCrossBranch: false }),
-		core.filesystem.listDrafts(),
-		core.filesystem.listCompletedTasks(),
-		core.filesystem.listArchivedTasks(),
+		filesystem.listTasks(),
+		filesystem.listDrafts(),
+		filesystem.listCompletedTasks(),
+		filesystem.listArchivedTasks(),
 	]);
 	return { tasks, drafts, completed, archived };
 }
@@ -174,34 +178,38 @@ export interface DependencyDefects {
  * one finding while distinct cycles sharing a task are all reported.
  */
 export async function findDependencyDefects(core: Core): Promise<DependencyDefects> {
-	const corpus = await loadDependencyCorpus(core);
+	const corpus = await loadDependencyCorpus(core.fs);
 	const graphCorpus = dependencyGraphCorpus(corpus);
 	const selfDependencies: DependencyDefects["selfDependencies"] = [];
 	const cycles: string[][] = [];
 	const seen = new Set<string>();
 	for (const task of [...corpus.tasks, ...corpus.drafts, ...corpus.completed]) {
-		const dependencies = task.dependencies ?? [];
-		for (const dependency of dependencies) {
-			if (taskIdsEqual(dependency, task.id)) {
-				selfDependencies.push({ taskId: task.id, dependency });
-			}
-		}
-		if (dependencies.length === 0) continue;
-		const cycle = findCycleThroughRoot(buildDependencyGraph(task, graphCorpus));
-		if (!cycle) continue;
-		// One cycle read from different roots is the same member sequence rotated; keying on the
-		// rotation that starts at the smallest canonical member collapses them.
-		const members = cycle.slice(0, -1).map((id) => canonicalTaskId(id));
-		let start = 0;
-		for (let index = 1; index < members.length; index++) {
-			if ((members[index] as string) < (members[start] as string)) start = index;
-		}
-		const key = [...members.slice(start), ...members.slice(0, start)].join(" ");
-		if (seen.has(key)) continue;
-		seen.add(key);
-		cycles.push(cycle);
+		collectDependencyDefects(task, graphCorpus, selfDependencies, cycles, seen);
 	}
 	return { selfDependencies, cycles };
+}
+
+function collectDependencyDefects(
+	task: Task,
+	graphCorpus: { tasks: Task[]; completedTasks: Task[] },
+	selfDependencies: DependencyDefects["selfDependencies"],
+	cycles: string[][],
+	seen: Set<string>,
+): void {
+	const dependencies = task.dependencies ?? [];
+	for (const dependency of dependencies)
+		if (taskIdsEqual(dependency, task.id)) selfDependencies.push({ taskId: task.id, dependency });
+	if (dependencies.length === 0) return;
+	const cycle = findCycleThroughRoot(buildDependencyGraph(task, graphCorpus));
+	if (!cycle || seen.has(cycleIdentity(cycle))) return;
+	seen.add(cycleIdentity(cycle));
+	cycles.push(cycle);
+}
+
+function cycleIdentity(cycle: string[]): string {
+	const members = cycle.slice(0, -1).map((id) => canonicalTaskId(id));
+	const start = members.reduce((lowest, member, index) => (member < (members[lowest] as string) ? index : lowest), 0);
+	return [...members.slice(start), ...members.slice(0, start)].join("\0");
 }
 
 /**

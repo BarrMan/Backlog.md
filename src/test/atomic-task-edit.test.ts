@@ -116,11 +116,11 @@ describe("atomic task editing", () => {
 		const demoter = new Core(testDir);
 		const editor = new Core(testDir);
 		const demoteReachedCreateLock = createDeferred<void>();
-		const originalWithCreateLock = demoter.withCreateLock.bind(demoter);
-		demoter.withCreateLock = (async <T>(fn: () => Promise<T>): Promise<T> => {
+		const originalWithCreateLock = demoter.fs.withCreateLock.bind(demoter.fs);
+		demoter.fs.withCreateLock = (async <T>(fn: () => Promise<T>): Promise<T> => {
 			demoteReachedCreateLock.resolve();
 			return await originalWithCreateLock(fn);
-		}) as typeof demoter.withCreateLock;
+		}) as typeof demoter.fs.withCreateLock;
 
 		try {
 			const demotion = demoter.updateTaskFromInput(CONTENDED_ID, { status: "Draft" }, false);
@@ -147,6 +147,7 @@ describe("atomic task editing", () => {
 			}
 		} finally {
 			releaseCreateLock.resolve();
+			await heldCreateLock;
 			demoter.disposeContentStore();
 			editor.disposeContentStore();
 		}
@@ -352,7 +353,7 @@ describe("atomic task editing", () => {
 	it("reports an MCP operation error on contention", async () => {
 		const task = await createContendedTask();
 		const mcpServer = new McpServer(testDir, "Test instructions");
-		const handlers = new TaskHandlers(mcpServer);
+		const handlers = new TaskHandlers(mcpServer.application);
 
 		const lockEntered = createDeferred<void>();
 		const releaseLock = createDeferred<void>();

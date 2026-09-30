@@ -10,8 +10,9 @@ export async function spawnSessionWorker(
 	action: SessionWorkerAction,
 	taskId: string,
 	projectRoot: string,
+	spawnProcess: typeof spawn = spawn,
 ): Promise<void> {
-	const source = join(dirname(fileURLToPath(import.meta.url)), "..", "cli.ts");
+	const source = join(dirname(fileURLToPath(import.meta.url)), "..", "cli", "index.ts");
 	const args = [
 		...(existsSync(source) && !source.includes("$bunfs") ? [source] : []),
 		"agent-session",
@@ -20,7 +21,7 @@ export async function spawnSessionWorker(
 		"--worker",
 	];
 	await new Promise<void>((resolve, reject) => {
-		const child = spawn(process.execPath, args, {
+		const child = spawnProcess(process.execPath, args, {
 			cwd: projectRoot,
 			detached: true,
 			stdio: "ignore",

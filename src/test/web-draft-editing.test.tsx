@@ -88,20 +88,20 @@ afterEach(() => {
 
 describe("Web drafts list", () => {
 	it("opens the clicked draft for editing", async () => {
-		serveDrafts(() => [draft("DRAFT-1", "First draft"), draft("DRAFT-2", "Second draft")]);
+		serveDrafts(() => [draft("DRAFT-2", "Second draft"), draft("DRAFT-10", "Tenth draft")]);
 		const edited: Task[] = [];
 		const container = await renderDrafts((task) => edited.push(task));
 
 		const headings = Array.from(container.querySelectorAll("h3"));
-		const target = headings.find((heading) => heading.textContent === "Second draft");
-		expect(target).toBeTruthy();
+		expect(headings.map((heading) => heading.textContent)).toEqual(["Tenth draft", "Second draft"]);
+		const target = headings[0];
 
 		await act(async () => {
 			target?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 			await Promise.resolve();
 		});
 
-		expect(edited.map((task) => task.id)).toEqual(["DRAFT-2"]);
+		expect(edited.map((task) => task.id)).toEqual(["DRAFT-10"]);
 	});
 
 	// App.refreshData fires this event after every save, so a draft edit shows up without a reload.

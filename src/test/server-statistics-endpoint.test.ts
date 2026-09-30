@@ -1,17 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { $ } from "bun";
-import type { Core } from "../core/backlog.ts";
-import type { ContentStore } from "../core/content-store.ts";
 import { FileSystem } from "../file-system/operations.ts";
-import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
+import { createServerFixture } from "./server-fixture.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let filesystem: FileSystem;
-let server: BacklogServer | null = null;
-let serverPort = 0;
+let fixture: ReturnType<typeof createServerFixture> | null = null;
 let auxiliaryWorktreeDir: string | null = null;
 
 const createTask = (partial: Partial<Task>): Task => ({
@@ -50,21 +47,19 @@ type StatisticsResponse = {
 };
 
 async function requestStatistics(): Promise<StatisticsResponse> {
-	const response = await fetch(`http://127.0.0.1:${serverPort}/api/statistics`);
+	if (!fixture) throw new Error("Server fixture not initialized");
+	const response = await fixture.app.handle(new Request("http://localhost/api/statistics"));
 	expect(response.status).toBe(200);
 	return (await response.json()) as StatisticsResponse;
 }
 
 async function startStatisticsServer(): Promise<void> {
-	server = new BacklogServer(testDir);
-	await server.start(0, false);
-	serverPort = server.getPort() ?? 0;
-	expect(serverPort).toBeGreaterThan(0);
+	fixture = createServerFixture(testDir);
 }
 
 async function restartWithStatisticsBranch(branchTask: Task): Promise<void> {
-	await server?.stop();
-	server = null;
+	await fixture?.dispose();
+	fixture = null;
 	const config = await filesystem.loadConfig();
 	if (!config) throw new Error("Expected statistics test config");
 	await filesystem.saveConfig({ ...config, checkActiveBranches: true });
@@ -120,8 +115,8 @@ describe("BacklogServer statistics endpoint", () => {
 	});
 
 	afterEach(async () => {
-		await server?.stop();
-		server = null;
+		await fixture?.dispose();
+		fixture = null;
 		if (auxiliaryWorktreeDir) {
 			await $`git worktree remove --force ${auxiliaryWorktreeDir}`.cwd(testDir).quiet().nothrow();
 			await safeCleanup(auxiliaryWorktreeDir);
@@ -131,8 +126,8 @@ describe("BacklogServer statistics endpoint", () => {
 	});
 
 	it("reuses branch state while reconciling cached working-copy tasks across statistics requests", async () => {
-		if (!server) throw new Error("Server not started");
-		const core = (server as unknown as { core: Core }).core;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const core = fixture.core;
 		const originalListTasks = core.filesystem.listTasks.bind(core.filesystem);
 		const originalListCompletedTasks = core.filesystem.listCompletedTasks.bind(core.filesystem);
 		const originalStatisticsLoader = core.loadAllTasksForStatistics;
@@ -180,14 +175,10 @@ describe("BacklogServer statistics endpoint", () => {
 	});
 
 	it("uses fresh priorities without rebuilding the task corpus", async () => {
-		if (!server) throw new Error("Server not started");
+		if (!fixture) throw new Error("Server fixture not initialized");
 		await requestStatistics();
-		const serverInternals = server as unknown as {
-			core: Core;
-			getContentStoreInstance: () => Promise<ContentStore>;
-		};
-		const core = serverInternals.core;
-		const store = await serverInternals.getContentStoreInstance();
+		const core = fixture.core;
+		const store = await fixture.services.store();
 		const config = await core.filesystem.loadConfig();
 		if (!config) throw new Error("Expected statistics test config");
 		const originalEnsureConfigWatcher = store.ensureConfigWatcher.bind(store);
@@ -213,7 +204,7 @@ describe("BacklogServer statistics endpoint", () => {
 	});
 
 	it("reconciles a selected backlog root before reading its statistics", async () => {
-		if (!server) throw new Error("Server not started");
+		if (!fixture) throw new Error("Server fixture not initialized");
 		await requestStatistics();
 
 		const rootB = new FileSystem(testDir);
@@ -226,7 +217,7 @@ describe("BacklogServer statistics endpoint", () => {
 		await rootB.saveDraft(createTask({ id: "DRAFT-10", title: "Root B draft", status: "Draft" }));
 		await rootB.saveDraft(createTask({ id: "DRAFT-11", title: "Root B draft too", status: "Draft" }));
 
-		const core = (server as unknown as { core: Core }).core;
+		const core = fixture.core;
 		await Bun.write(join(testDir, "backlog.config.yml"), rootConfig("Root B", "root-b"));
 		core.filesystem.invalidateConfigCache();
 		expect(core.filesystem.backlogDirName).toBe("root-b");
@@ -261,16 +252,13 @@ describe("BacklogServer statistics endpoint", () => {
 	});
 
 	it("keeps task and config generations coherent during a same-root config change", async () => {
-		if (!server) throw new Error("Server not started");
+		if (!fixture) throw new Error("Server fixture not initialized");
 		await requestStatistics();
-		const serverInternals = server as unknown as {
-			core: Core;
-			getContentStoreInstance: () => Promise<ContentStore>;
-		};
-		const store = await serverInternals.getContentStoreInstance();
-		const oldConfig = await serverInternals.core.filesystem.loadConfig();
+		const core = fixture.core;
+		const store = await fixture.services.store();
+		const oldConfig = await core.filesystem.loadConfig();
 		if (!oldConfig) throw new Error("Expected statistics test config");
-		const originalRefreshTasksForTaskRead = serverInternals.core.refreshTasksForTaskRead.bind(serverInternals.core);
+		const originalRefreshTasksForTaskRead = core.refreshTasksForTaskRead.bind(core);
 		let releaseRefresh: () => void = () => {};
 		let markRefreshStarted: () => void = () => {};
 		const refreshStarted = new Promise<void>((resolve) => {
@@ -279,7 +267,7 @@ describe("BacklogServer statistics endpoint", () => {
 		const refreshGate = new Promise<void>((resolve) => {
 			releaseRefresh = resolve;
 		});
-		serverInternals.core.refreshTasksForTaskRead = async () => {
+		core.refreshTasksForTaskRead = async () => {
 			markRefreshStarted();
 			await refreshGate;
 			return false;
@@ -289,7 +277,7 @@ describe("BacklogServer statistics endpoint", () => {
 			const pendingStatistics = requestStatistics();
 			await refreshStarted;
 			(store as unknown as { stopConfigWatcher: () => void }).stopConfigWatcher();
-			await serverInternals.core.filesystem.saveConfig({
+			await core.filesystem.saveConfig({
 				...oldConfig,
 				statuses: ["Queued", "Done"],
 				priorities: ["Critical"],
@@ -302,7 +290,7 @@ describe("BacklogServer statistics endpoint", () => {
 			expect(inFlight.priorityCounts).not.toHaveProperty("critical");
 		} finally {
 			releaseRefresh();
-			serverInternals.core.refreshTasksForTaskRead = originalRefreshTasksForTaskRead;
+			core.refreshTasksForTaskRead = originalRefreshTasksForTaskRead;
 		}
 
 		const refreshed = await requestStatistics();

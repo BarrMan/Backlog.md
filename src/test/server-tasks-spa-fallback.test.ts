@@ -2,19 +2,22 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { rename } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { $ } from "bun";
-import type { ContentStore } from "../core/content-store.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import { serializeTask } from "../markdown/serializer.ts";
-import { BacklogServer } from "../server/index.ts";
 import type { BacklogConfig, Task } from "../types/index.ts";
+import { createServerFixture } from "./server-fixture.ts";
 import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let filesystem: FileSystem;
-let server: BacklogServer | null = null;
-let serverPort = 0;
+let fixture: ReturnType<typeof createServerFixture> | null = null;
 let auxiliaryWorktreeDir: string | null = null;
 let remoteRepoDir: string | null = null;
+
+function activeFixture(): ReturnType<typeof createServerFixture> {
+	if (!fixture) throw new Error("Server fixture not initialized");
+	return fixture;
+}
 
 const routedTask: Task = {
 	id: "BACK-001.02",
@@ -30,7 +33,8 @@ async function request(path: string, init: RequestInit = {}, timeoutMs = 5000): 
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		return await fetch(`http://127.0.0.1:${serverPort}${path}`, { ...init, signal: controller.signal });
+		if (!fixture) throw new Error("Server fixture not initialized");
+		return await fixture.app.handle(new Request(`http://localhost${path}`, { ...init, signal: controller.signal }));
 	} finally {
 		clearTimeout(timeout);
 	}
@@ -50,11 +54,7 @@ async function replaceWatchedConfigFile(configPath: string, content: string): Pr
 }
 
 async function startServer(): Promise<void> {
-	server = new BacklogServer(TEST_DIR);
-	await server.start(0, false);
-	const port = server.getPort();
-	expect(port).not.toBeNull();
-	serverPort = port ?? 0;
+	fixture = createServerFixture(TEST_DIR);
 
 	await retry(
 		async () => {
@@ -72,8 +72,8 @@ async function restartWithActiveBranchCollision(
 	includeBranchOnlyTask = false,
 	useSamePath = branchTaskId === "BACK-1",
 ): Promise<void> {
-	await server?.stop();
-	server = null;
+	await fixture?.dispose();
+	fixture = null;
 
 	const config = await filesystem.loadConfig();
 	if (!config) {
@@ -113,8 +113,8 @@ async function restartWithActiveBranchCollision(
 }
 
 async function restartWithActiveRemoteCollision(useSamePath = false): Promise<void> {
-	await server?.stop();
-	server = null;
+	await fixture?.dispose();
+	fixture = null;
 
 	const config = await filesystem.loadConfig();
 	if (!config) {
@@ -155,8 +155,8 @@ async function restartWithActiveRemoteCollision(useSamePath = false): Promise<vo
 }
 
 async function restartWithActiveLegacyCollision(): Promise<void> {
-	await server?.stop();
-	server = null;
+	await fixture?.dispose();
+	fixture = null;
 
 	const config = await filesystem.loadConfig();
 	if (!config) {
@@ -233,9 +233,9 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	afterEach(async () => {
-		if (server) {
-			await server.stop();
-			server = null;
+		if (fixture) {
+			await fixture.dispose();
+			fixture = null;
 		}
 		if (auxiliaryWorktreeDir) {
 			await $`git worktree remove --force ${auxiliaryWorktreeDir}`.cwd(TEST_DIR).quiet().nothrow();
@@ -253,7 +253,7 @@ describe("BacklogServer task SPA fallback", () => {
 		// Compile the HTML bundle once before exercising the bounded route requests.
 		// The test runner's existing timeout bounds this first-build readiness check;
 		// aborting it early can leave Bun's development bundler with a stale socket.
-		const shellResponse = await fetch(`http://127.0.0.1:${serverPort}/`);
+		const shellResponse = await request("/");
 		expect(shellResponse.status).toBe(200);
 		expect(shellResponse.headers.get("content-type")).toContain("text/html");
 		expect(await shellResponse.text()).toContain('<div id="root"></div>');
@@ -301,8 +301,8 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	it("routes browser task reads and mutations through Core without direct task-corpus filesystem calls", async () => {
-		const serverInternals = server as unknown as { core: { filesystem: FileSystem } };
-		const taskFilesystem = serverInternals.core.filesystem;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const taskFilesystem = fixture.core.filesystem;
 		const directCalls: string[] = [];
 		const originals = {
 			listTasks: taskFilesystem.listTasks.bind(taskFilesystem),
@@ -394,9 +394,8 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	it("prefers the freshly read current-worktree task over stale store content", async () => {
-		const contentStore = await (
-			server as unknown as { getContentStoreInstance: () => Promise<ContentStore> }
-		).getContentStoreInstance();
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const contentStore = await fixture.services.store();
 		const originalGetTasks = contentStore.getTasks.bind(contentStore);
 		const liveTask = { ...routedTask, title: "Live current-worktree title" };
 		await filesystem.saveTask(liveTask);
@@ -506,9 +505,8 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	it("fails closed when a visible cross-branch task collides with a local padded ID", async () => {
-		const contentStore = await (
-			server as unknown as { getContentStoreInstance: () => Promise<ContentStore> }
-		).getContentStoreInstance();
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const contentStore = await fixture.services.store();
 		const refreshTasks = contentStore.refreshTasks.bind(contentStore);
 		contentStore.refreshTasks = async () => {};
 		try {
@@ -535,15 +533,8 @@ describe("BacklogServer task SPA fallback", () => {
 
 	it("takes exactly two branch-tip snapshots for a cold cross-branch task list", async () => {
 		await restartWithActiveBranchCollision("BACK-1", true);
-		const coreGit = (
-			server as unknown as {
-				core: {
-					git: {
-						listRecentBranchTips: (days: number) => Promise<Array<{ name: string; commit: string }>>;
-					};
-				};
-			}
-		).core.git;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const coreGit = fixture.core.git;
 		const originalListRecentBranchTips = coreGit.listRecentBranchTips.bind(coreGit);
 		let tipSnapshotCount = 0;
 		coreGit.listRecentBranchTips = async (days) => {
@@ -565,15 +556,8 @@ describe("BacklogServer task SPA fallback", () => {
 		await restartWithActiveBranchCollision("BACK-1");
 		expect((await request("/api/tasks?crossBranch=true", {}, 10000)).status).toBe(200);
 
-		const coreGit = (
-			server as unknown as {
-				core: {
-					git: {
-						listRecentBranchTips: (days: number) => Promise<Array<{ name: string; commit: string }>>;
-					};
-				};
-			}
-		).core.git;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const coreGit = fixture.core.git;
 		const originalListRecentBranchTips = coreGit.listRecentBranchTips.bind(coreGit);
 		let tipSnapshotCount = 0;
 		coreGit.listRecentBranchTips = async (days) => {
@@ -612,17 +596,10 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	it("coalesces concurrent ref fingerprints and skips full reloads while refs are unchanged", async () => {
-		const serverInternals = server as unknown as {
-			core: {
-				git: {
-					listRecentBranchTips: (days: number) => Promise<Array<{ name: string; commit: string }>>;
-				};
-			};
-			getContentStoreInstance: () => Promise<ContentStore>;
-		};
-		const contentStore = await serverInternals.getContentStoreInstance();
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const contentStore = await fixture.services.store();
 		const originalRefreshTasks = contentStore.refreshTasks.bind(contentStore);
-		const originalListRecentBranchTips = serverInternals.core.git.listRecentBranchTips.bind(serverInternals.core.git);
+		const originalListRecentBranchTips = fixture.core.git.listRecentBranchTips.bind(fixture.core.git);
 		let refreshCount = 0;
 		let fingerprintCount = 0;
 		let releaseFingerprint: () => void = () => {};
@@ -637,7 +614,7 @@ describe("BacklogServer task SPA fallback", () => {
 			refreshCount += 1;
 			await originalRefreshTasks();
 		};
-		serverInternals.core.git.listRecentBranchTips = async (days) => {
+		fixture.core.git.listRecentBranchTips = async (days) => {
 			fingerprintCount += 1;
 			resolveFingerprintStarted();
 			await fingerprintGate;
@@ -659,15 +636,14 @@ describe("BacklogServer task SPA fallback", () => {
 		} finally {
 			releaseFingerprint();
 			contentStore.refreshTasks = originalRefreshTasks;
-			serverInternals.core.git.listRecentBranchTips = originalListRecentBranchTips;
+			fixture.core.git.listRecentBranchTips = originalListRecentBranchTips;
 		}
 	});
 
 	it("coalesces one full reload when concurrent reads observe a changed ref snapshot", async () => {
 		await restartWithActiveBranchCollision("BACK-001");
-		const contentStore = await (
-			server as unknown as { getContentStoreInstance: () => Promise<ContentStore> }
-		).getContentStoreInstance();
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const contentStore = await fixture.services.store();
 		const originalRefreshTasks = contentStore.refreshTasks.bind(contentStore);
 		let refreshCount = 0;
 		let releaseRefresh: () => void = () => {};
@@ -758,7 +734,8 @@ describe("BacklogServer task SPA fallback", () => {
 		// Warm the store so the counted requests measure steady-state list serving.
 		expect((await request("/api/tasks")).status).toBe(200);
 
-		const serverFilesystem = (server as unknown as { core: { filesystem: FileSystem } }).core.filesystem;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const serverFilesystem = fixture.core.filesystem;
 		const originalListTasks = serverFilesystem.listTasks.bind(serverFilesystem);
 		let workingCopyScans = 0;
 		serverFilesystem.listTasks = async (...args) => {
@@ -873,8 +850,8 @@ describe("BacklogServer task SPA fallback", () => {
 	});
 
 	it("keeps config and duplicate-task reads fail-closed while a watched config is unusable", async () => {
-		await server?.stop();
-		server = null;
+		await fixture?.dispose();
+		fixture = null;
 		const cachedConfig = await filesystem.loadConfig();
 		if (!cachedConfig) throw new Error("Expected cached test config");
 		const customStatuses = ["Queued", "Working", "Complete"];
@@ -883,13 +860,9 @@ describe("BacklogServer task SPA fallback", () => {
 		expect((await request("/api/task/BACK-1")).status).toBe(409);
 		expect((await request("/api/tasks?crossBranch=true")).status).toBe(200);
 
-		const activeServer = server as unknown as {
-			core: { filesystem: FileSystem };
-			contentStore: ContentStore | null;
-		};
-		const serverFilesystem = activeServer.core.filesystem;
-		const contentStore = activeServer.contentStore;
-		if (!contentStore) throw new Error("Expected active content store");
+		const currentFixture = activeFixture();
+		const serverFilesystem = currentFixture.core.filesystem;
+		const contentStore = await currentFixture.services.store();
 		const canonicalContent = await Bun.file(serverFilesystem.configFilePath).text();
 		const disabledContent = canonicalContent.replace("check_active_branches: true", "check_active_branches: false");
 		const unusableContents = [
@@ -1061,15 +1034,8 @@ describe("BacklogServer task SPA fallback", () => {
 		// intentionally reused, so the movement trigger must run while a new SHA is indexed.
 		await replaceCollisionBranchTask("BACK-001", "Uncached collision generation");
 		const collisionCommit = (await $`git rev-parse collision-shadow`.cwd(TEST_DIR).quiet()).text().trim();
-		const coreGit = (
-			server as unknown as {
-				core: {
-					git: {
-						listFilesInTree: (ref: string, path: string) => Promise<string[]>;
-					};
-				};
-			}
-		).core.git;
+		if (!fixture) throw new Error("Server fixture not initialized");
+		const coreGit = fixture.core.git;
 		const originalListFilesInTree = coreGit.listFilesInTree.bind(coreGit);
 		let movedDuringScan = false;
 		coreGit.listFilesInTree = async (ref, path) => {

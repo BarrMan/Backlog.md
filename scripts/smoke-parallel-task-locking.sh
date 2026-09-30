@@ -5,7 +5,7 @@ shopt -s nullglob
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CLI_PATH="${BACKLOG_SMOKE_CLI:-${REPO_ROOT}/src/cli.ts}"
+CLI_PATH="${BACKLOG_SMOKE_CLI:-${REPO_ROOT}/src/cli/index.ts}"
 BUN_BIN="${BUN_BIN:-bun}"
 JOB_COUNT="${JOB_COUNT:-8}"
 KEEP_TEMP="${KEEP_TEMP:-0}"
@@ -27,7 +27,7 @@ Runs real parallel smoke tests against the local Backlog.md CLI:
 
 Environment overrides:
   BUN_BIN            Bun executable to use (default: bun)
-  BACKLOG_SMOKE_CLI  Path to local CLI entrypoint (default: <repo>/src/cli.ts)
+  BACKLOG_SMOKE_CLI  Path to local CLI entrypoint (default: <repo>/src/cli/index.ts)
   JOB_COUNT          Number of concurrent creates for scenario 1 (default: 8)
   KEEP_TEMP          Keep temp repos after success (default: 0)
 EOF

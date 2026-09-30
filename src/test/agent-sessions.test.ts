@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
 import { type AgentSessionRunner, AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
+import { getTestCliPath } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 const itRealTmux = process.env.RUN_INTERACTIVE_TUI_TESTS === "1" && Bun.which("tmux") ? it : it.skip;
@@ -181,7 +182,7 @@ describe("AgentSessionService", () => {
 	itRealTmux("delivers an H handoff to a real tmux agent without replacing its prompt", async () => {
 		const agent = join(root, "fake-agent.sh");
 		const handoffFile = join(root, "agent-handoff.md");
-		const cli = process.env.BACKLOG_TEST_CLI_BUNDLE?.trim() || join(process.cwd(), "src", "cli.ts");
+		const cli = getTestCliPath();
 		const runtime = process.env.BACKLOG_TEST_CLI_BUNDLE?.trim() ? "" : "bun ";
 		await Bun.write(
 			agent,

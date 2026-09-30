@@ -2,9 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { JSDOM } from "jsdom";
 import { renderToString } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
+import { toTaskDetail } from "../core/task-detail.ts";
 import type { Task } from "../types/index.ts";
 import { buildDependencyGraph, type DependencyGraph } from "../utils/dependency-graph.ts";
-import { toTaskDetail } from "../core/task-detail.ts";
 import { DependencyGraphSection } from "../web/components/DependencyGraphSection";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
 import { ThemeProvider } from "../web/contexts/ThemeContext";
@@ -94,10 +94,7 @@ describe("Web dependency graph section", () => {
 	});
 
 	it("marks a cycle and a repeated node instead of drawing them again", () => {
-		const cyclic = [
-			makeTask("TASK-1", "Selected", ["TASK-2"]),
-			makeTask("TASK-2", "Second", ["TASK-1"]),
-		];
+		const cyclic = [makeTask("TASK-1", "Selected", ["TASK-2"]), makeTask("TASK-2", "Second", ["TASK-1"])];
 		expect(render(payloadFor("TASK-1", cyclic))).toContain("Cycle");
 
 		const diamond = [

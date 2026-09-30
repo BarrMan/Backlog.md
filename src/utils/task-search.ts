@@ -119,6 +119,40 @@ function toLowerList(value: string | string[] | undefined): string[] {
 	return toList(value).map((item) => item.toLowerCase());
 }
 
+function addSetCheck(
+	checks: Array<(task: Task) => boolean>,
+	values: Set<string>,
+	matches: (task: Task) => boolean,
+): void {
+	if (values.size > 0) checks.push(matches);
+}
+
+function addMilestoneCheck(checks: Array<(task: Task) => boolean>, options: TaskFilterOptions, corpus: Task[]): void {
+	const milestone = options.milestone?.trim().toLowerCase();
+	if (!milestone) return;
+	if (milestone === NO_MILESTONE_FILTER_VALUE) {
+		checks.push((task) => !task.milestone?.trim());
+		return;
+	}
+	const resolveLabel = options.resolveMilestoneLabel;
+	if (!resolveLabel || "resolveExactId" in resolveLabel) {
+		const matchesMilestone = createMilestoneFilterMatcher(
+			options.milestone as string,
+			corpus.map((task) => task.milestone ?? ""),
+			(resolveLabel as MilestoneFilterValueResolver | undefined) ?? createMilestoneFilterValueResolver([]),
+		);
+		checks.push((task) => matchesMilestone(task.milestone ?? ""));
+		return;
+	}
+	checks.push(
+		(task) =>
+			Boolean(task.milestone) &&
+			resolveLabel(task.milestone as string)
+				.trim()
+				.toLowerCase() === milestone,
+	);
+}
+
 /**
  * Build the shared task predicate. `corpus` is the full task list the milestone matcher compares
  * against, so a milestone filter resolves the same way no matter which tasks survive other filters.
@@ -127,14 +161,10 @@ export function createTaskFilterMatcher(options: TaskFilterOptions, corpus: Task
 	const checks: Array<(task: Task) => boolean> = [];
 
 	const wantedStatuses = normalizeStatusSet(options.status);
-	if (wantedStatuses.size > 0) {
-		checks.push((task) => statusMatchesSet(wantedStatuses, task.status));
-	}
+	addSetCheck(checks, wantedStatuses, (task) => statusMatchesSet(wantedStatuses, task.status));
 
 	const excludedStatuses = normalizeStatusSet(options.excludeStatus);
-	if (excludedStatuses.size > 0) {
-		checks.push((task) => !statusMatchesSet(excludedStatuses, task.status));
-	}
+	addSetCheck(checks, excludedStatuses, (task) => !statusMatchesSet(excludedStatuses, task.status));
 
 	if (options.type) {
 		const types = options.type;
@@ -151,17 +181,15 @@ export function createTaskFilterMatcher(options: TaskFilterOptions, corpus: Task
 			.map((priority) => normalizePriorityValue(priority))
 			.filter((priority): priority is string => Boolean(priority)),
 	);
-	if (priorities.size > 0) {
-		checks.push((task) => {
-			const priority = normalizePriorityValue(task.priority);
-			return Boolean(priority) && priorities.has(priority as string);
-		});
-	}
+	addSetCheck(checks, priorities, (task) => {
+		const priority = normalizePriorityValue(task.priority);
+		return Boolean(priority) && priorities.has(priority as string);
+	});
 
 	const assignees = new Set(toLowerList(options.assignee));
-	if (assignees.size > 0) {
-		checks.push((task) => (task.assignee ?? []).some((value) => assignees.has(value.trim().toLowerCase())));
-	}
+	addSetCheck(checks, assignees, (task) =>
+		(task.assignee ?? []).some((value) => assignees.has(value.trim().toLowerCase())),
+	);
 
 	if (options.unassigned) {
 		checks.push((task) => !(task.assignee ?? []).some((value) => value.trim().length > 0));
@@ -189,30 +217,7 @@ export function createTaskFilterMatcher(options: TaskFilterOptions, corpus: Task
 		checks.push((task) => Boolean(task.parentTaskId) && taskIdsEqual(parentFilter, task.parentTaskId as string));
 	}
 
-	const milestone = options.milestone?.trim().toLowerCase();
-	if (milestone) {
-		const resolveLabel = options.resolveMilestoneLabel;
-		if (milestone === NO_MILESTONE_FILTER_VALUE) {
-			checks.push((task) => !task.milestone?.trim());
-		} else if (!resolveLabel || "resolveExactId" in resolveLabel) {
-			// A full resolver knows the configured milestones, so it can match ids and closest titles.
-			const matchesMilestone = createMilestoneFilterMatcher(
-				options.milestone as string,
-				corpus.map((task) => task.milestone ?? ""),
-				(resolveLabel as MilestoneFilterValueResolver | undefined) ?? createMilestoneFilterValueResolver([]),
-			);
-			checks.push((task) => matchesMilestone(task.milestone ?? ""));
-		} else {
-			// A plain label lookup only supports exact, case-insensitive title comparison.
-			checks.push(
-				(task) =>
-					Boolean(task.milestone) &&
-					resolveLabel(task.milestone as string)
-						.trim()
-						.toLowerCase() === milestone,
-			);
-		}
-	}
+	addMilestoneCheck(checks, options, corpus);
 
 	return (task) => checks.every((check) => check(task));
 }

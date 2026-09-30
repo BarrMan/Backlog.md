@@ -48,6 +48,7 @@ export interface DependencyGraph {
 }
 
 type GraphEntry = { key: string; node: DependencyGraphNode };
+type GraphTraversalState = { key: string; depth: number };
 
 /** The hop distance from the root in one direction, or null when the node is not reachable that way. */
 export function depthInDirection(node: DependencyGraphNode, direction: DependencyDirection): number | null {
@@ -164,7 +165,7 @@ export function buildDependencyGraph(
 		direction: DependencyDirection,
 		neighbours: (key: string) => Array<{ key: string; reference: string }>,
 	) => {
-		const queue: Array<{ key: string; depth: number }> = [{ key: rootKey, depth: 0 }];
+		const queue: GraphTraversalState[] = [{ key: rootKey, depth: 0 }];
 		for (let cursor = 0; cursor < queue.length; cursor++) {
 			const current = queue[cursor];
 			if (!current) break;
@@ -173,14 +174,7 @@ export function buildDependencyGraph(
 			if (entry?.node.state !== "resolved") continue;
 
 			for (const neighbour of neighbours(current.key)) {
-				const next = ensureEntry(neighbour.key, neighbour.reference);
-				if (direction === "dependencies") addEdge(current.key, neighbour.key);
-				else addEdge(neighbour.key, current.key);
-
-				if (depthInDirection(next.node, direction) !== null) continue;
-				if (direction === "dependencies") next.node.dependencyDepth = current.depth + 1;
-				else next.node.dependentDepth = current.depth + 1;
-				queue.push({ key: neighbour.key, depth: current.depth + 1 });
+				addTraversalNeighbour(direction, current, neighbour, queue, ensureEntry, addEdge);
 			}
 		}
 	};
@@ -208,6 +202,23 @@ export function buildDependencyGraph(
 	};
 }
 
+function addTraversalNeighbour(
+	direction: DependencyDirection,
+	current: GraphTraversalState,
+	neighbour: { key: string; reference: string },
+	queue: GraphTraversalState[],
+	ensureEntry: (key: string, reference: string) => GraphEntry,
+	addEdge: (fromKey: string, toKey: string) => void,
+): void {
+	const next = ensureEntry(neighbour.key, neighbour.reference);
+	if (direction === "dependencies") addEdge(current.key, neighbour.key);
+	else addEdge(neighbour.key, current.key);
+	if (depthInDirection(next.node, direction) !== null) return;
+	if (direction === "dependencies") next.node.dependencyDepth = current.depth + 1;
+	else next.node.dependentDepth = current.depth + 1;
+	queue.push({ key: neighbour.key, depth: current.depth + 1 });
+}
+
 /**
  * The shortest dependency path that leaves the root and returns to it, as node IDs with the root at
  * both ends, or null when no dependency of the root leads back to it.
@@ -219,39 +230,60 @@ export function buildDependencyGraph(
  */
 export function findCycleThroughRoot(graph: DependencyGraph): string[] | null {
 	const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+	return findShortestRootCycle(graph.rootId, nodesById, dependencyAdjacency(graph.edges));
+}
+
+function dependencyAdjacency(edges: DependencyGraphEdge[]): Map<string, string[]> {
 	const dependenciesById = new Map<string, string[]>();
-	for (const edge of graph.edges) {
+	for (const edge of edges) {
 		const existing = dependenciesById.get(edge.from);
 		if (existing) existing.push(edge.to);
 		else dependenciesById.set(edge.from, [edge.to]);
 	}
+	return dependenciesById;
+}
 
-	// Breadth-first from the root along dependency edges, so the first edge found pointing back at
-	// the root closes the shortest cycle and the parent chain names its path.
+function findShortestRootCycle(
+	rootId: string,
+	nodesById: ReadonlyMap<string, DependencyGraphNode>,
+	dependenciesById: ReadonlyMap<string, string[]>,
+): string[] | null {
 	const parents = new Map<string, string>();
-	const queue = [graph.rootId];
+	const queue = [rootId];
 	for (let cursor = 0; cursor < queue.length; cursor++) {
 		const currentId = queue[cursor];
 		if (currentId === undefined) break;
 		if (nodesById.get(currentId)?.state !== "resolved") continue;
 		for (const nextId of dependenciesById.get(currentId) ?? []) {
-			if (nextId === graph.rootId) {
-				if (currentId === graph.rootId) continue;
-				const reversed = [currentId];
-				let cursor: string | undefined = currentId;
-				while (cursor !== undefined && cursor !== graph.rootId) {
-					cursor = parents.get(cursor);
-					if (cursor !== undefined) reversed.push(cursor);
-				}
-				return [...reversed.reverse(), graph.rootId];
-			}
-			if (!parents.has(nextId)) {
-				parents.set(nextId, currentId);
-				queue.push(nextId);
-			}
+			const cycle = visitCycleEdge(currentId, nextId, rootId, parents, queue);
+			if (cycle) return cycle;
 		}
 	}
 	return null;
+}
+
+function visitCycleEdge(
+	currentId: string,
+	nextId: string,
+	rootId: string,
+	parents: Map<string, string>,
+	queue: string[],
+): string[] | null {
+	if (nextId === rootId) return currentId === rootId ? null : cyclePath(currentId, rootId, parents);
+	if (parents.has(nextId)) return null;
+	parents.set(nextId, currentId);
+	queue.push(nextId);
+	return null;
+}
+
+function cyclePath(currentId: string, rootId: string, parents: ReadonlyMap<string, string>): string[] {
+	const reversed = [currentId];
+	let cursor: string | undefined = currentId;
+	while (cursor !== undefined && cursor !== rootId) {
+		cursor = parents.get(cursor);
+		if (cursor !== undefined) reversed.push(cursor);
+	}
+	return [...reversed.reverse(), rootId];
 }
 
 export interface DependencyTreeNode {
@@ -272,15 +304,7 @@ export interface DependencyTreeNode {
  */
 export function buildDependencyTree(graph: DependencyGraph, direction: DependencyDirection): DependencyTreeNode[] {
 	const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
-	const children = new Map<string, string[]>();
-	for (const edge of graph.edges) {
-		const parent = direction === "dependencies" ? edge.from : edge.to;
-		const child = direction === "dependencies" ? edge.to : edge.from;
-		const existing = children.get(parent);
-		if (existing) existing.push(child);
-		else children.set(parent, [child]);
-	}
-	for (const list of children.values()) list.sort(compareTaskIds);
+	const children = treeChildren(graph.edges, direction);
 
 	const expanded = new Set<string>([graph.rootId]);
 	const branch = new Set<string>([graph.rootId]);
@@ -300,30 +324,43 @@ export function buildDependencyTree(graph: DependencyGraph, direction: Dependenc
 			continue;
 		}
 		frame.position += 1;
-		const node = nodesById.get(childId);
-		if (!node) continue;
-		if (branch.has(childId)) {
-			frame.into.push({ node, children: [], repeat: "cycle" });
-			continue;
-		}
-		if (expanded.has(childId)) {
-			frame.into.push({ node, children: [], repeat: "repeat" });
-			continue;
-		}
-		expanded.add(childId);
-		// An unresolved identity is reported, never traversed through. The reverse traversal can
-		// contribute edges leaving an ambiguous identity to the shared edge set, so the tree must
-		// refuse to follow them rather than trust the traversals to have kept them out.
-		if (node.state !== "resolved") {
-			frame.into.push({ node, children: [], repeat: null });
-			continue;
-		}
-		branch.add(childId);
-		const treeNode: DependencyTreeNode = { node, children: [], repeat: null };
-		frame.into.push(treeNode);
-		stack.push({ id: childId, childIds: children.get(childId) ?? [], position: 0, into: treeNode.children });
+		appendTreeChild(frame, childId, nodesById, children, expanded, branch, stack);
 	}
 	return roots;
+}
+
+function treeChildren(edges: DependencyGraphEdge[], direction: DependencyDirection): Map<string, string[]> {
+	const children = new Map<string, string[]>();
+	for (const edge of edges) {
+		const parent = direction === "dependencies" ? edge.from : edge.to;
+		const child = direction === "dependencies" ? edge.to : edge.from;
+		const existing = children.get(parent);
+		if (existing) existing.push(child);
+		else children.set(parent, [child]);
+	}
+	for (const list of children.values()) list.sort(compareTaskIds);
+	return children;
+}
+
+function appendTreeChild(
+	frame: { id: string; childIds: string[]; position: number; into: DependencyTreeNode[] },
+	childId: string,
+	nodesById: ReadonlyMap<string, DependencyGraphNode>,
+	children: ReadonlyMap<string, string[]>,
+	expanded: Set<string>,
+	branch: Set<string>,
+	stack: Array<{ id: string; childIds: string[]; position: number; into: DependencyTreeNode[] }>,
+): void {
+	const node = nodesById.get(childId);
+	if (!node) return;
+	if (branch.has(childId)) return void frame.into.push({ node, children: [], repeat: "cycle" });
+	if (expanded.has(childId)) return void frame.into.push({ node, children: [], repeat: "repeat" });
+	expanded.add(childId);
+	if (node.state !== "resolved") return void frame.into.push({ node, children: [], repeat: null });
+	branch.add(childId);
+	const treeNode: DependencyTreeNode = { node, children: [], repeat: null };
+	frame.into.push(treeNode);
+	stack.push({ id: childId, childIds: children.get(childId) ?? [], position: 0, into: treeNode.children });
 }
 
 /**

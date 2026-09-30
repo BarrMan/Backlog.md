@@ -264,7 +264,7 @@ describe("filter wiring across surfaces", () => {
 		await core.createTaskFromInput({ title: "Wiring no labels", status: "To Do" }, false);
 
 		mcpServer = new McpServer(testDir, "Test instructions");
-		const mcpConfig = await mcpServer.filesystem.loadConfig();
+		const mcpConfig = await mcpServer.application.filesystem.loadConfig();
 		if (!mcpConfig) throw new Error("Expected MCP test config");
 		registerTaskTools(mcpServer, mcpConfig);
 	});

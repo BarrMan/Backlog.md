@@ -317,33 +317,13 @@ export function generateNextSubtaskId(
 	const normalizedParent = normalizeId(parentId, prefix);
 	const parentBody = extractIdBody(normalizedParent, prefix);
 	const parentSegments = parentBody.split(".");
-	const canonicalizeNumericSegments = (segments: string[]): string[] | null => {
-		if (!segments.every((segment) => /^\d+$/.test(segment))) return null;
-		return segments.map((segment) => segment.replace(/^0+/, "") || "0");
-	};
 	const canonicalParentSegments = canonicalizeNumericSegments(parentSegments);
 
 	let max = 0n;
 
 	for (const id of existingIds) {
-		const body = extractIdBody(id, prefix);
-		const bodySegments = body.split(".");
-		if (bodySegments.length > parentSegments.length) {
-			const candidateParentSegments = bodySegments.slice(0, parentSegments.length);
-			const canonicalCandidateParentSegments = canonicalizeNumericSegments(candidateParentSegments);
-			const parentMatches =
-				canonicalParentSegments && canonicalCandidateParentSegments
-					? canonicalParentSegments.every((segment, index) => segment === canonicalCandidateParentSegments[index])
-					: candidateParentSegments.join(".").toLowerCase() === parentBody.toLowerCase();
-			if (!parentMatches) continue;
-			const firstSegment = bodySegments[parentSegments.length];
-			if (firstSegment && /^\d+$/.test(firstSegment)) {
-				const num = BigInt(firstSegment);
-				if (num > max) {
-					max = num;
-				}
-			}
-		}
+		const candidate = subtaskSequenceNumber(id, prefix, parentSegments, canonicalParentSegments, parentBody);
+		if (candidate !== null && candidate > max) max = candidate;
 	}
 
 	const nextNum = (max + 1n).toString();
@@ -353,6 +333,45 @@ export function generateNextSubtaskId(
 	}
 
 	return `${normalizedParent}.${nextNum}`;
+}
+
+function subtaskSequenceNumber(
+	id: string,
+	prefix: string,
+	parentSegments: string[],
+	canonicalParentSegments: string[] | null,
+	parentBody: string,
+): bigint | null {
+	const bodySegments = extractIdBody(id, prefix).split(".");
+	if (bodySegments.length <= parentSegments.length) return null;
+	const candidateParentSegments = bodySegments.slice(0, parentSegments.length);
+	if (
+		!subtaskParentMatches(
+			canonicalParentSegments,
+			canonicalizeNumericSegments(candidateParentSegments),
+			candidateParentSegments,
+			parentBody,
+		)
+	)
+		return null;
+	const sequence = bodySegments[parentSegments.length];
+	return sequence && /^\d+$/.test(sequence) ? BigInt(sequence) : null;
+}
+
+function canonicalizeNumericSegments(segments: string[]): string[] | null {
+	if (!segments.every((segment) => /^\d+$/.test(segment))) return null;
+	return segments.map((segment) => segment.replace(/^0+/, "") || "0");
+}
+
+function subtaskParentMatches(
+	canonicalParent: string[] | null,
+	canonicalCandidate: string[] | null,
+	candidateSegments: string[],
+	parentBody: string,
+): boolean {
+	if (canonicalParent && canonicalCandidate)
+		return canonicalParent.every((segment, index) => segment === canonicalCandidate[index]);
+	return candidateSegments.join(".").toLowerCase() === parentBody.toLowerCase();
 }
 
 /**

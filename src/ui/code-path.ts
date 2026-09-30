@@ -39,63 +39,32 @@ export function styleCodePath(path: string): string {
 	return `{gray-fg}\`${path}\`{/gray-fg}`;
 }
 
+function transformCodePathLine(line: string): string[] {
+	const codePaths = extractCodePaths(line);
+	if (codePaths.length === 0) return [line];
+
+	const lineWithoutPaths = line.replace(/`[^`]+`/g, "").trim();
+	if (codePaths.length === 1 && lineWithoutPaths.length < 10) {
+		return [codePaths.reduce((content, path) => content.replace(`\`${path}\``, styleCodePath(path)), line)];
+	}
+
+	let content = line;
+	const extracted: string[] = [];
+	for (const path of codePaths) {
+		const backticked = `\`${path}\``;
+		if (!content.includes(backticked)) continue;
+		content = content.replace(backticked, " ").replace(/\s+/g, " ").trim();
+		extracted.push(styleCodePath(path));
+	}
+	return [...(content ? [content] : []), ...extracted];
+}
+
 /**
  * Transform text to style code paths and place them on separate lines
  */
 export function transformCodePaths(text: string): string {
 	if (!text) return "";
-
-	// Split into lines to preserve existing line breaks
-	const lines = text.split("\n");
-	const result: string[] = [];
-
-	for (const line of lines) {
-		let transformedLine = line;
-		const codePaths = extractCodePaths(line);
-
-		if (codePaths.length === 0) {
-			// No code paths, add line as-is
-			result.push(transformedLine);
-			continue;
-		}
-
-		// Check if line contains only a code path (possibly with minimal surrounding text)
-		const lineWithoutPaths = line.replace(/`[^`]+`/g, "").trim();
-		const isIsolatedPath = codePaths.length === 1 && lineWithoutPaths.length < 10;
-
-		if (isIsolatedPath) {
-			// Style the code path in place
-			for (const path of codePaths) {
-				transformedLine = transformedLine.replace(`\`${path}\``, styleCodePath(path));
-			}
-			result.push(transformedLine);
-		} else {
-			// Extract code paths to separate lines
-			let workingLine = transformedLine;
-			const pathsToExtract: string[] = [];
-
-			for (const path of codePaths) {
-				const backticked = `\`${path}\``;
-				if (workingLine.includes(backticked)) {
-					// Remove from line and collect for separate placement, clean up extra spaces
-					workingLine = workingLine.replace(backticked, " ").replace(/\s+/g, " ").trim();
-					pathsToExtract.push(path);
-				}
-			}
-
-			// Add the line without code paths (if not empty)
-			if (workingLine.length > 0) {
-				result.push(workingLine);
-			}
-
-			// Add each code path on its own line
-			for (const path of pathsToExtract) {
-				result.push(styleCodePath(path));
-			}
-		}
-	}
-
-	return result.join("\n");
+	return text.split("\n").flatMap(transformCodePathLine).join("\n");
 }
 
 /**

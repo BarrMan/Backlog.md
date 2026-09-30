@@ -75,7 +75,7 @@ describe("readiness agreement across surfaces", () => {
 		expect(await core.completeTask("task-1", false)).toBe(true);
 
 		mcpServer = new McpServer(testDir, "Test instructions");
-		const mcpConfig = await mcpServer.filesystem.loadConfig();
+		const mcpConfig = await mcpServer.application.filesystem.loadConfig();
 		if (!mcpConfig) throw new Error("Expected MCP test config");
 		registerTaskTools(mcpServer, mcpConfig);
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import type { Task } from "../types/index.ts";
 import { toTaskDetail } from "../core/task-detail.ts";
+import type { Task } from "../types/index.ts";
 import { generateDetailContent, mergeDependencyCorpusTasks } from "../ui/task-viewer-with-search.ts";
 
 const STATUSES = ["To Do", "In Progress", "Done"] as const;
@@ -19,9 +19,7 @@ const CORPUS = [
 // A detail read hands the viewer a task that already carries its graph; every other caller hands it
 // a plain record. The viewer only renders what it was given.
 function detailBody(task: Task, asDetail: boolean): string {
-	const given = asDetail
-		? toTaskDetail(task, { tasks: CORPUS, completedTasks: [], statuses: STATUSES })
-		: task;
+	const given = asDetail ? toTaskDetail(task, { tasks: CORPUS, completedTasks: [], statuses: STATUSES }) : task;
 	return generateDetailContent(given).bodyContent.join("\n");
 }
 

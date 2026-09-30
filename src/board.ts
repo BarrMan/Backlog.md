@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMilestoneAliasMap, canonicalizeMilestone, getMilestoneLabel, milestoneKey } from "./core/milestones.ts";
 import type { Milestone, Task } from "./types/index.ts";
+import { compareTaskIds } from "./utils/task-sorting.ts";
 
 export type BoardLayout = "horizontal" | "vertical";
 
@@ -122,11 +123,7 @@ Project: ${projectName}
 		const pushWithChildren = (t: Task) => {
 			result.push(t);
 			const subs = children.get(t.id) || [];
-			subs.sort((a, b) => {
-				const idA = Number.parseInt(a.id.replace("task-", ""), 10);
-				const idB = Number.parseInt(b.id.replace("task-", ""), 10);
-				return idA - idB; // Subtasks in ascending order
-			});
+			subs.sort((a, b) => compareTaskIds(a.id, b.id));
 			for (const sub of subs) {
 				pushWithChildren(sub);
 			}

@@ -4,8 +4,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import type { Milestone, Task } from "../types/index.ts";
-import { ThemeProvider } from "../web/contexts/ThemeContext";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
+import { ThemeProvider } from "../web/contexts/ThemeContext";
 import { apiClient } from "../web/lib/api.ts";
 import { setNativeInputValue } from "./react-dom-input.ts";
 
@@ -297,15 +297,18 @@ describe("Web task popup Final Summary display", () => {
 				await Promise.resolve();
 			});
 
-			const authorInput = (container as HTMLElement).querySelector("input[placeholder='Author']") as HTMLInputElement | null;
+			const authorInput = (container as HTMLElement).querySelector(
+				"input[placeholder='Author']",
+			) as HTMLInputElement | null;
 			const commentTextarea = (container as HTMLElement).querySelector(
 				"textarea[placeholder='Add a comment...']",
 			) as HTMLTextAreaElement | null;
 			expect(authorInput).toBeTruthy();
 			expect(commentTextarea).toBeTruthy();
+			if (!authorInput || !commentTextarea) throw new Error("Expected comment inputs");
 			await act(async () => {
-				setFormValue(authorInput!, "@reviewer");
-				setFormValue(commentTextarea!, "New comment");
+				setFormValue(authorInput, "@reviewer");
+				setFormValue(commentTextarea, "New comment");
 				await Promise.resolve();
 			});
 
@@ -386,9 +389,10 @@ describe("Web task popup Final Summary display", () => {
 		const descriptionTextarea = findTextareaByValue(container as HTMLElement, "Original description");
 		expect(titleInput).toBeTruthy();
 		expect(descriptionTextarea).toBeTruthy();
+		if (!titleInput || !descriptionTextarea) throw new Error("Expected task edit inputs");
 		await act(async () => {
-			setFormValue(titleInput!, "Local title");
-			setFormValue(descriptionTextarea!, "Local description");
+			setFormValue(titleInput, "Local title");
+			setFormValue(descriptionTextarea, "Local description");
 			await Promise.resolve();
 		});
 		await flushReact();
@@ -440,9 +444,10 @@ describe("Web task popup Final Summary display", () => {
 		const descriptionTextarea = (container as HTMLElement).querySelector("textarea") as HTMLTextAreaElement | null;
 		expect(titleInput).toBeTruthy();
 		expect(descriptionTextarea).toBeTruthy();
+		if (!titleInput || !descriptionTextarea) throw new Error("Expected task creation inputs");
 		await act(async () => {
-			setFormValue(titleInput!, "Local draft title");
-			setFormValue(descriptionTextarea!, "Local draft description");
+			setFormValue(titleInput, "Local draft title");
+			setFormValue(descriptionTextarea, "Local draft description");
 			await Promise.resolve();
 		});
 		await flushReact();
@@ -451,7 +456,11 @@ describe("Web task popup Final Summary display", () => {
 				((container as HTMLElement).querySelector("input[placeholder='Enter task title']") as HTMLInputElement | null)
 					?.value === "Local draft title",
 		);
-		await waitFor(() => ((container as HTMLElement).querySelector("textarea") as HTMLTextAreaElement | null)?.value === "Local draft description");
+		await waitFor(
+			() =>
+				((container as HTMLElement).querySelector("textarea") as HTMLTextAreaElement | null)?.value ===
+				"Local draft description",
+		);
 
 		await act(async () => {
 			activeRoot?.render(
@@ -471,10 +480,7 @@ describe("Web task popup Final Summary display", () => {
 			"value",
 			"Local draft title",
 		);
-		expect((container as HTMLElement).querySelector("textarea")).toHaveProperty(
-			"value",
-			"Local draft description",
-		);
+		expect((container as HTMLElement).querySelector("textarea")).toHaveProperty("value", "Local draft description");
 	});
 
 	it("hides Final Summary section in preview when empty", () => {

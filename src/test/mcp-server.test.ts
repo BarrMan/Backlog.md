@@ -30,10 +30,10 @@ async function bootstrapServer(): Promise<McpServer> {
 	// Use normal mode instructions for bootstrapped test server
 	const server = new McpServer(TEST_DIR, "Test instructions");
 
-	await server.filesystem.ensureBacklogStructure();
+	await server.application.filesystem.ensureBacklogStructure();
 	await $`git init -b main`.cwd(TEST_DIR).quiet();
 
-	await initializeTestProject(server, "Test Project");
+	await initializeTestProject(server.application, "Test Project");
 
 	// Register workflow resources and tools manually (normally done in createMcpServer)
 	registerWorkflowResources(server);
@@ -270,9 +270,9 @@ describe("McpServer bootstrap", () => {
 		TEST_DIR = createUniqueTestDir("mcp-server-factory");
 
 		const bootstrap = new McpServer(TEST_DIR, "Bootstrap instructions");
-		await bootstrap.filesystem.ensureBacklogStructure();
+		await bootstrap.application.filesystem.ensureBacklogStructure();
 		await $`git init -b main`.cwd(TEST_DIR).quiet();
-		await initializeTestProject(bootstrap, "Factory Project");
+		await initializeTestProject(bootstrap.application, "Factory Project");
 		await bootstrap.stop();
 
 		const server = await createMcpServer(TEST_DIR);

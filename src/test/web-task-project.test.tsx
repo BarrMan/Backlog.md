@@ -182,11 +182,7 @@ describe("Web task project UI", () => {
 		});
 
 		const projectSelect = getSelectByFirstOption(container, "No Project");
-		expect(Array.from(projectSelect.options).map((option) => option.textContent)).toEqual([
-			"No Project",
-			"Web",
-			"API",
-		]);
+		expect(Array.from(projectSelect.options).map((option) => option.textContent)).toEqual(["No Project", "Web", "API"]);
 		expect(projectSelect.value).toBe("");
 
 		await setSelectValue(projectSelect, "Web");

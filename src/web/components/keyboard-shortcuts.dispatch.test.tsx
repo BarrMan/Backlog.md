@@ -79,7 +79,7 @@ describe("browser shortcut dispatch", () => {
 				}}
 			/>,
 		);
-		const card = container.querySelector("[role='button']");
+		const card = container.querySelector("button[aria-keyshortcuts]");
 		expect(card).toBeTruthy();
 		expect(card?.getAttribute("aria-keyshortcuts")).toBe("Enter Space");
 
@@ -108,7 +108,7 @@ describe("browser shortcut dispatch", () => {
 				onLaneChange={() => {}}
 			/>,
 		);
-		const card = container.querySelector("[role='button']");
+		const card = container.querySelector("button[aria-keyshortcuts]");
 		expect(card).toBeTruthy();
 		await act(async () => {
 			card?.dispatchEvent(new window.MouseEvent("click", { bubbles: true, ctrlKey: true }));

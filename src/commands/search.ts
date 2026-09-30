@@ -193,54 +193,75 @@ async function parseSearchOptions(
 	const modifiedFileFilters = parseDelimitedStringList(options.modifiedFile);
 	const rawTaskTypes = parseDelimitedStringList(options.taskType) ?? [];
 	const rawSearchProjects = parseDelimitedStringList(options.project) ?? [];
-	const rawTypes = options.type ? (Array.isArray(options.type) ? options.type : [options.type]) : undefined;
-	const allowedTypes: SearchResultType[] = ["task", "document", "decision"];
-	const types: SearchResultType[] = rawTypes
-		? rawTypes
-				.map((value: string) => value.toLowerCase())
-				.filter((value: string): value is SearchResultType => {
-					if (!allowedTypes.includes(value as SearchResultType)) {
-						console.warn(`Ignoring unsupported type '${value}'. Supported: task, document, decision`);
-						return false;
-					}
-					return true;
-				})
-		: modifiedFileFilters?.length || rawTaskTypes.length > 0 || rawSearchProjects.length > 0
-			? ["task"]
-			: allowedTypes;
+	const rawTypes = toSearchTypeValues(options.type);
+	const types = resolveSearchResultTypes(rawTypes, modifiedFileFilters, rawTaskTypes, rawSearchProjects);
 	if (rawTaskTypes.length > 0 && rawTypes && !types.includes("task")) return printTaskFilterTypeError("--task-type");
 	if (rawSearchProjects.length > 0 && rawTypes && !types.includes("task")) return printTaskFilterTypeError("--project");
-
-	const filters: SearchFilters = {};
-	if (options.status) filters.status = parseDelimitedStringList(options.status) ?? options.status;
-	const excludeStatuses = parseDelimitedStringList(options.excludeStatus) ?? [];
-	if (excludeStatuses.length > 0) {
-		const statuses = await dependencies.normalizeStatusList(core, excludeStatuses, "exclude-status");
-		if (!statuses) return null;
-		filters.excludeStatus = statuses;
-	}
-	if (rawTaskTypes.length > 0) {
-		const taskTypes = await dependencies.normalizeTaskTypes(core, rawTaskTypes, "task-type");
-		if (!taskTypes) return null;
-		filters.type = taskTypes;
-	}
-	if (rawSearchProjects.length > 0) {
-		const projects = await dependencies.normalizeProjects(core, rawSearchProjects, "project");
-		if (!projects) return null;
-		filters.project = projects;
-	}
-	if (options.priority) {
-		const priority = await dependencies.normalizePriority(core, String(options.priority));
-		if (!priority) return null;
-		filters.priority = priority;
-	}
-	if (modifiedFileFilters?.length) filters.modifiedFiles = modifiedFileFilters;
+	const filters = await resolveSearchFilters(
+		core,
+		options,
+		dependencies,
+		rawTaskTypes,
+		rawSearchProjects,
+		modifiedFileFilters,
+	);
+	if (!filters) return null;
 	const limit =
 		options.limit === undefined
 			? undefined
 			: parsePositiveIntegerOption(options.limit, "--limit", "backlog search --help");
 	if (limit === null) return null;
 	return { modifiedFileFilters, types, filters, limit };
+}
+
+function toSearchTypeValues(value: unknown): string[] | undefined {
+	return value ? (Array.isArray(value) ? value : [value]).map(String) : undefined;
+}
+
+function resolveSearchResultTypes(
+	rawTypes: string[] | undefined,
+	modifiedFileFilters: string[] | undefined,
+	rawTaskTypes: string[],
+	rawSearchProjects: string[],
+): SearchResultType[] {
+	const allowedTypes: SearchResultType[] = ["task", "document", "decision"];
+	if (!rawTypes)
+		return modifiedFileFilters?.length || rawTaskTypes.length > 0 || rawSearchProjects.length > 0
+			? ["task"]
+			: allowedTypes;
+	return rawTypes
+		.map((value) => value.toLowerCase())
+		.filter((value): value is SearchResultType => {
+			if (allowedTypes.includes(value as SearchResultType)) return true;
+			console.warn(`Ignoring unsupported type '${value}'. Supported: task, document, decision`);
+			return false;
+		});
+}
+
+async function resolveSearchFilters(
+	core: Core,
+	options: OptionValues,
+	dependencies: SearchCommandDependencies,
+	rawTaskTypes: string[],
+	rawSearchProjects: string[],
+	modifiedFileFilters: string[] | undefined,
+): Promise<SearchFilters | null> {
+	const excludeStatuses = parseDelimitedStringList(options.excludeStatus) ?? [];
+	const [statuses, taskTypes, projects, priority] = await Promise.all([
+		excludeStatuses.length > 0 ? dependencies.normalizeStatusList(core, excludeStatuses, "exclude-status") : [],
+		rawTaskTypes.length > 0 ? dependencies.normalizeTaskTypes(core, rawTaskTypes, "task-type") : [],
+		rawSearchProjects.length > 0 ? dependencies.normalizeProjects(core, rawSearchProjects, "project") : [],
+		options.priority ? dependencies.normalizePriority(core, String(options.priority)) : undefined,
+	]);
+	if (statuses === null || taskTypes === null || projects === null || priority === null) return null;
+	return {
+		...(options.status && { status: parseDelimitedStringList(options.status) ?? options.status }),
+		...(statuses.length > 0 && { excludeStatus: statuses }),
+		...(taskTypes.length > 0 && { type: taskTypes }),
+		...(projects.length > 0 && { project: projects }),
+		...(priority && { priority }),
+		...(modifiedFileFilters?.length && { modifiedFiles: modifiedFileFilters }),
+	};
 }
 
 function printTaskFilterTypeError(option: "--task-type" | "--project"): null {

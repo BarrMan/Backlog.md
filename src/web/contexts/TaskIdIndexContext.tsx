@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useMemo } from 'react';
-import { type Task } from '../../types';
-import { buildTaskIdIndex, type TaskIdIndex } from '../utils/task-id-links';
+import type React from "react";
+import { createContext, useContext, useMemo } from "react";
+import type { Task } from "../../types";
+import { buildTaskIdIndex, type TaskIdIndex } from "../utils/task-id-links";
 
 const EMPTY_INDEX: TaskIdIndex = new Map();
 

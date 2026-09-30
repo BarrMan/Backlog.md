@@ -27,6 +27,7 @@ import {
 	type WorkspaceDraft,
 	type WorkspaceEntry,
 } from "./agent-workspace-model.ts";
+import { reconciledWorkspaceSelection, workspaceRows } from "./agent-workspace-reconciliation.ts";
 import {
 	createFilterHeader,
 	type FilterControlId,
@@ -36,18 +37,13 @@ import {
 import { openTaskComposer, type TaskComposerOptions } from "./components/task-composer.ts";
 import { formatFooterContent } from "./footer-content.ts";
 import { formatKeymap, keymapKeys, matchesKey } from "./keymap.ts";
-import { getStatusColor, wrapStatusColor } from "./status-icon.ts";
 import {
 	focusTaskFilterControl,
 	openTaskFilterPicker,
 	taskFilterHeaderControls,
 	taskFilterOptions,
 } from "./task-filter-wiring.ts";
-import {
-	buildTaskViewerMilestoneFilterModel,
-	formatTaskViewerListItem,
-	generateDetailContent,
-} from "./task-viewer-with-search.ts";
+import { buildTaskViewerMilestoneFilterModel, generateDetailContent } from "./task-viewer-with-search.ts";
 import { addScrollKeys, createScreen, formatTuiTitle } from "./tui.ts";
 
 type Mode = "navigation" | "details" | "field" | "inline" | "history" | "config" | "composer";
@@ -77,6 +73,44 @@ const FIELDS: Array<[DraftField, string]> = [
 	["finalSummary", "Final summary"],
 ];
 type ScrollBox = { getScroll(): number; setScroll(value: number): void; setLabel?(label: string): void };
+type LayoutWidget = { top?: number; left?: string; width?: string; height?: number; bottom?: number };
+type EditableWidget = ReturnType<typeof textarea> & {
+	cancel?: () => void;
+	readInput?: () => void;
+	cpos?: { x: number; y: number };
+	getScroll?: () => number;
+	setScroll?: (value: number) => void;
+};
+
+// Blessed exposes these runtime properties but does not declare them on every widget subtype.
+function layoutWidget<T>(widget: T): T & LayoutWidget {
+	return widget as T & LayoutWidget;
+}
+
+function scrollBox(widget: unknown): ScrollBox {
+	return widget as ScrollBox;
+}
+
+function editableWidget(widget: unknown): EditableWidget {
+	return widget as EditableWidget;
+}
+
+function selectedIndex(widget: unknown): number {
+	return (widget as { selected: number }).selected;
+}
+
+function workspaceMouseIndex(
+	tree: { lpos?: { xi: number; xl: number; yi: number; yl: number } },
+	data: unknown,
+): number | undefined {
+	const point = data as { x?: number; y?: number };
+	const position = tree.lpos;
+	if (!position || point.x === undefined || point.y === undefined) return undefined;
+	if (point.x < position.xi || point.x > position.xl || point.y <= position.yi || point.y >= position.yl)
+		return undefined;
+	const state = tree as { childBase?: number; getScroll?: () => number };
+	return point.y - position.yi - 1 + (state.childBase ?? state.getScroll?.() ?? 0);
+}
 
 function sessionLabel(session?: AgentSession): string {
 	return session ? `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}` : "No active session";
@@ -215,7 +249,7 @@ export async function runAgentWorkspace(
 		let selectedTask: Task | undefined;
 		let taskSessions: TaskSessions | undefined;
 		let historySession: AgentSession | undefined;
-		let fieldEditor: { field: DraftField; widget: ReturnType<typeof textarea> } | undefined;
+		let fieldEditor: { field: DraftField; widget: EditableWidget } | undefined;
 		let inputQueue = Promise.resolve();
 		let attached = false;
 		let sessionAction = false;
@@ -237,7 +271,7 @@ export async function runAgentWorkspace(
 			clearNotification();
 			disposeConfig();
 			if (fieldEditor) {
-				(fieldEditor.widget as unknown as { cancel?: () => void }).cancel?.();
+				fieldEditor.widget.cancel?.();
 				fieldEditor.widget.destroy();
 				fieldEditor = undefined;
 			}
@@ -268,11 +302,11 @@ export async function runAgentWorkspace(
 		const updateFooter = () => {
 			const formatted = formatFooterContent(footerHelp(), screen.width);
 			footerHeight = formatted.height;
-			(footer as unknown as { height: number }).height = footerHeight;
+			layoutWidget(footer).height = footerHeight;
 			footer.setContent(formatted.content);
-			(statusRow as unknown as { bottom: number }).bottom = footerHeight;
-			(tree as unknown as { bottom: number }).bottom = footerHeight + (notification ? 1 : 0);
-			(preview as unknown as { bottom: number }).bottom = footerHeight + (notification ? 1 : 0);
+			layoutWidget(statusRow).bottom = footerHeight;
+			layoutWidget(tree).bottom = footerHeight + (notification ? 1 : 0);
+			layoutWidget(preview).bottom = footerHeight + (notification ? 1 : 0);
 		};
 		const render = () => {
 			if (closed || attached) return;
@@ -312,15 +346,15 @@ export async function runAgentWorkspace(
 			const right = 100 - leftWidth;
 			const top = headerHeight();
 			const detailHeight = detailsHeight();
-			(tree as unknown as { width: string }).width = `${leftWidth}%`;
-			(tree as unknown as { top: number }).top = top;
+			layoutWidget(tree).width = `${leftWidth}%`;
+			layoutWidget(tree).top = top;
 			for (const panel of [details, preview]) {
-				(panel as unknown as { left: string; width: string }).left = `${leftWidth}%`;
-				(panel as unknown as { left: string; width: string }).width = `${right}%`;
+				layoutWidget(panel).left = `${leftWidth}%`;
+				layoutWidget(panel).width = `${right}%`;
 			}
-			(details as unknown as { top: number; height: number }).top = top;
-			(details as unknown as { top: number; height: number }).height = detailHeight;
-			(preview as unknown as { top: number }).top = top + detailHeight;
+			layoutWidget(details).top = top;
+			layoutWidget(details).height = detailHeight;
+			layoutWidget(preview).top = top + detailHeight;
 		};
 		const resizeAgent = () => {
 			if (attached) return;
@@ -370,8 +404,8 @@ export async function runAgentWorkspace(
 		const clearTaskSelection = (message: string) => {
 			if (selectedTask)
 				scrolls.set(selectedTask.id, {
-					details: (details as unknown as ScrollBox).getScroll(),
-					preview: (preview as unknown as ScrollBox).getScroll(),
+					details: scrollBox(details).getScroll(),
+					preview: scrollBox(preview).getScroll(),
 				});
 			if (fieldEditor) closeField();
 			leaveInline();
@@ -387,45 +421,48 @@ export async function runAgentWorkspace(
 			clearNotification();
 			tree.focus();
 		};
-		const select = async (index: number) => {
-			const entry = entries[index];
-			if (!entry) return;
-			if (entry.kind === "header") {
-				const changed = selected !== index || selectedTask !== undefined;
-				selected = index;
-				tree.select(index);
-				state.selectedTaskId = undefined;
-				if (changed) clearTaskSelection(` ${entry.status} `);
-				render();
-				return;
-			}
-			const unchanged = selectedTask?.id === entry.task.id;
+		const selectHeader = (index: number, entry: Extract<WorkspaceEntry, { kind: "header" }>) => {
+			const changed = selected !== index || selectedTask !== undefined;
+			selected = index;
+			tree.select(index);
+			state.selectedTaskId = undefined;
+			if (changed) clearTaskSelection(` ${entry.status} `);
+			render();
+		};
+		const selectTask = async (index: number, task: Task) => {
+			const unchanged = selectedTask?.id === task.id;
 			if (!unchanged) {
 				clearTaskSelection("");
 				mode = "navigation";
 			}
 			selected = index;
 			tree.select(index);
-			selectedTask = entry.task;
-			state.selectedTaskId = entry.task.id;
+			selectedTask = task;
+			state.selectedTaskId = task.id;
 			if (!unchanged) {
 				historySession = undefined;
-				details.setContent(detailsText(entry.task, drafts.get(entry.task.id)));
+				details.setContent(detailsText(task, drafts.get(task.id)));
 				preview.setContent(`No active session. Press ${formatKeymap("workspace", "open")} to start or attach.`);
 			}
 			preview.setLabel?.(" Live preview ");
 			const token = ++generation;
 			render();
-			const sessions = await service.list(entry.task.id);
-			if (closed || token !== generation || selectedTask?.id !== entry.task.id) return;
+			const sessions = await service.list(task.id);
+			if (closed || token !== generation || selectedTask?.id !== task.id) return;
 			taskSessions = sessions;
 			if (mode !== "history") showDetails();
 			if (!unchanged) {
-				const saved = scrolls.get(entry.task.id);
-				(details as unknown as ScrollBox).setScroll(saved?.details ?? 0);
-				(preview as unknown as ScrollBox).setScroll(saved?.preview ?? 0);
+				const saved = scrolls.get(task.id);
+				scrollBox(details).setScroll(saved?.details ?? 0);
+				scrollBox(preview).setScroll(saved?.preview ?? 0);
 			}
-			if (mode !== "history") await showPreview(entry.task, active(), token);
+			if (mode !== "history") await showPreview(task, active(), token);
+		};
+		const select = async (index: number) => {
+			const entry = entries[index];
+			if (!entry) return;
+			if (entry.kind === "header") selectHeader(index, entry);
+			else await selectTask(index, entry.task);
 		};
 		const toggleGroup = async (index: number) => {
 			const entry = entries[index];
@@ -437,55 +474,52 @@ export async function runAgentWorkspace(
 			else collapsed.add(entry.status);
 			await reload(false);
 		};
+		const updateTreeRows = (rows: string[]) => {
+			const list = tree as typeof tree & { removeItem(index: number): void };
+			const node = screen as typeof screen & { remove(this: typeof tree, item: (typeof list.items)[number]): void };
+			while (list.items.length > rows.length) {
+				const index = list.items.length - 1;
+				// List#remove only handles numeric indexes, so use Node#remove to detach the row.
+				node.remove.call(tree, list.items[index]);
+				list.removeItem(index);
+			}
+			tree.setItems(rows);
+		};
+		const loadWorkspaceEntries = async () => {
+			const config = await core.filesystem.loadConfig();
+			if (closed) return false;
+			statuses = config?.statuses ?? statuses;
+			tasks = await core.filesystem.listTasks();
+			if (closed) return false;
+			availableLabels = collectAvailableLabels(tasks, initialConfig?.labels ?? []);
+			const filteredTasks = applyTaskFilters(
+				tasks,
+				taskFilterOptions(filters, "any", resolveMilestoneLabel),
+				createTaskSearchIndex(tasks),
+			);
+			entries = buildWorkspaceEntries(filteredTasks, statuses, "All", collapsed);
+			return filteredTasks.length > 0;
+		};
 		const reload = async (selectTask = true) => {
 			if (busy || closed) return;
 			busy = true;
 			try {
 				const previous = entries[selected];
-				const config = await core.filesystem.loadConfig();
+				const hasTasks = await loadWorkspaceEntries();
 				if (closed) return;
-				statuses = config?.statuses ?? statuses;
-				tasks = await core.filesystem.listTasks();
-				if (closed) return;
-				availableLabels = collectAvailableLabels(tasks, initialConfig?.labels ?? []);
-				const filteredTasks = applyTaskFilters(
-					tasks,
-					taskFilterOptions(filters, "any", resolveMilestoneLabel),
-					createTaskSearchIndex(tasks),
-				);
-				entries = buildWorkspaceEntries(filteredTasks, statuses, "All", collapsed);
-				const rows = entries.map((entry) =>
-					entry.kind === "task"
-						? `  ${formatTaskViewerListItem(entry.task)}`
-						: `${entry.label.slice(0, 2)} ${wrapStatusColor(entry.status, getStatusColor(entry.status))}${entry.label.slice(2 + entry.status.length)}`,
-				);
-				const list = tree as typeof tree & { removeItem(index: number): void };
-				const node = screen as typeof screen & {
-					remove(this: typeof tree, item: (typeof list.items)[number]): void;
-				};
-				while (list.items.length > rows.length) {
-					const index = list.items.length - 1;
-					// List#remove only handles numeric indexes, so use Node#remove to detach the row.
-					node.remove.call(tree, list.items[index]);
-					list.removeItem(index);
-				}
-				tree.setItems(rows);
-				if (filteredTasks.length === 0) {
+				updateTreeRows(workspaceRows(entries));
+				if (!hasTasks) {
 					selected = -1;
 					clearTaskSelection("No tasks match this filter.");
 					render();
 					return;
 				}
-				const retained = entries.findIndex(
-					(entry) => entry.kind === "task" && entry.task.id === (state.selectedTaskId ?? selectedTask?.id),
+				selected = reconciledWorkspaceSelection(
+					entries,
+					previous,
+					state.selectedTaskId ?? selectedTask?.id,
+					!selectTask,
 				);
-				const header =
-					previous?.kind === "header"
-						? entries.findIndex((entry) => entry.kind === "header" && entry.status === previous.status)
-						: -1;
-				const first = entries.findIndex((entry) => entry.kind === "task");
-				selected =
-					header >= 0 && !selectTask ? header : retained >= 0 ? retained : first >= 0 ? first : entries.length ? 0 : -1;
 				if (selected >= 0) {
 					await select(selected);
 					render();
@@ -502,14 +536,13 @@ export async function runAgentWorkspace(
 			const { field, widget } = fieldEditor;
 			const draft = drafts.get(selectedTask.id) ?? createWorkspaceDraft(selectedTask);
 			draft.values[field] = widget.getValue();
-			const inputState = widget as unknown as { cpos?: { x: number; y: number }; getScroll?: () => number };
 			draft.cursor[field] = {
-				x: inputState.cpos?.x ?? 0,
-				y: inputState.cpos?.y ?? 0,
-				scroll: inputState.getScroll?.() ?? 0,
+				x: widget.cpos?.x ?? 0,
+				y: widget.cpos?.y ?? 0,
+				scroll: widget.getScroll?.() ?? 0,
 			};
 			drafts.set(selectedTask.id, draft);
-			(widget as unknown as { cancel?: () => void }).cancel?.();
+			widget.cancel?.();
 			widget.destroy();
 			fieldEditor = undefined;
 			mode = "details";
@@ -522,29 +555,27 @@ export async function runAgentWorkspace(
 			const draft = drafts.get(task.id) ?? createWorkspaceDraft(task);
 			drafts.set(task.id, draft);
 			mode = "field";
-			const widget = textarea({
-				parent: screen,
-				top: headerHeight(),
-				left: `${leftWidth}%`,
-				width: `${100 - leftWidth}%`,
-				height: detailsHeight(),
-				border: "line",
-				label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · ${formatKeymap("workspace", "save")} save · ${formatKeymap("workspace", "close")} details `,
-				keys: true,
-				mouse: true,
-				inputOnFocus: false,
-				scrollable: true,
-				value: draft.values[field],
-			});
+			const widget = editableWidget(
+				textarea({
+					parent: screen,
+					top: headerHeight(),
+					left: `${leftWidth}%`,
+					width: `${100 - leftWidth}%`,
+					height: detailsHeight(),
+					border: "line",
+					label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · ${formatKeymap("workspace", "save")} save · ${formatKeymap("workspace", "close")} details `,
+					keys: true,
+					mouse: true,
+					inputOnFocus: false,
+					scrollable: true,
+					value: draft.values[field],
+				}),
+			);
 			fieldEditor = { field, widget };
 			const savedCursor = draft.cursor[field];
 			if (savedCursor) {
-				const inputState = widget as unknown as {
-					cpos?: { x: number; y: number };
-					setScroll?: (value: number) => void;
-				};
-				inputState.cpos = { x: savedCursor.x, y: savedCursor.y };
-				inputState.setScroll?.(savedCursor.scroll);
+				widget.cpos = { x: savedCursor.x, y: savedCursor.y };
+				widget.setScroll?.(savedCursor.scroll);
 			}
 			widget.focus();
 			widget.readInput();
@@ -815,10 +846,10 @@ export async function runAgentWorkspace(
 			let focusedWidget = 0;
 			const focusWidget = (index: number) => {
 				focusedWidget = (index + widgets.length) % widgets.length;
-				for (const widget of [command, environment, prepare]) (widget as unknown as { cancel?: () => void }).cancel?.();
+				for (const widget of [command, environment, prepare]) editableWidget(widget).cancel?.();
 				const widget = widgets[focusedWidget];
 				widget?.focus();
-				(widget as unknown as { readInput?: () => void }).readInput?.();
+				if (widget === command || widget === environment || widget === prepare) editableWidget(widget).readInput?.();
 			};
 			const tabHandler = () => {
 				if (mode !== "config") return;
@@ -864,9 +895,7 @@ export async function runAgentWorkspace(
 			run(load);
 			focusWidget(0);
 			scopeList.key(keymapKeys("workspace", "open"), () => {
-				const next = ["root", "project", "card"][
-					(scopeList as unknown as { selected: number }).selected
-				] as AgentConfigScope;
+				const next = ["root", "project", "card"][selectedIndex(scopeList)] as AgentConfigScope;
 				if (next && next !== scope) {
 					scope = next;
 					run(load);
@@ -876,9 +905,7 @@ export async function runAgentWorkspace(
 			presetList.key(keymapKeys("workspace", "open"), () => {
 				const config = editable;
 				if (!config) return false;
-				const name = [...Object.keys(config.presets), "+ New preset"][
-					(presetList as unknown as { selected: number }).selected
-				];
+				const name = [...Object.keys(config.presets), "+ New preset"][selectedIndex(presetList)];
 				if (name === "+ New preset") {
 					const prompt = textarea({
 						parent: screen,
@@ -929,7 +956,7 @@ export async function runAgentWorkspace(
 				return false;
 			});
 			bootstrapList.key(keymapKeys("workspace", "open"), () => {
-				const value = bootstraps[(bootstrapList as unknown as { selected: number }).selected];
+				const value = bootstraps[selectedIndex(bootstrapList)];
 				if (value) bootstrap = value as AgentPreset["bootstrap"];
 				return false;
 			});
@@ -975,11 +1002,11 @@ export async function runAgentWorkspace(
 		const onMouse = (data: unknown) => {
 			if (attached || mode === "config" || mode === "composer") return;
 			const point = data as { x?: number; y?: number; action?: string; button?: string };
-			const position = tree.lpos as { xi: number; xl: number; yi: number; yl: number } | undefined;
-			if (!position || point.x === undefined || point.y === undefined) return;
-			if (point.x < position.xi || point.x > position.xl || point.y <= position.yi || point.y >= position.yl) return;
-			const state = tree as unknown as { childBase?: number; getScroll?: () => number };
-			const index = point.y - position.yi - 1 + (state.childBase ?? state.getScroll?.() ?? 0);
+			const index = workspaceMouseIndex(
+				tree as unknown as { lpos?: { xi: number; xl: number; yi: number; yl: number } },
+				data,
+			);
+			if (index === undefined) return;
 			if (point.action !== "mousemove" && point.action !== "mousedown") return;
 			if (entries[index]?.kind === "header") {
 				if (point.action === "mousedown" && point.button === "left") run(() => toggleGroup(index));
@@ -989,7 +1016,7 @@ export async function runAgentWorkspace(
 		};
 		const attach = async (task: Task, session: AgentSession) => {
 			if (closed) return;
-			const mouseEnabled = (screen.program as unknown as { mouseEnabled?: boolean }).mouseEnabled === true;
+			const mouseEnabled = (screen.program as { mouseEnabled?: boolean }).mouseEnabled === true;
 			attached = true;
 			screen.leave();
 			const resume = screen.program.pause?.();
@@ -1128,33 +1155,47 @@ export async function runAgentWorkspace(
 			handoff: sendHandoffRequest,
 			config: openConfig,
 		};
+		const forwardsInlineInput = (
+			ch: string,
+			key: { name?: string; full?: string; sequence?: string; ctrl?: boolean },
+		) => {
+			if (mode !== "inline" || !selectedTask) return false;
+			if (matchesKey(keymapKeys("workspace", "inlineClose"), key)) {
+				const task = selectedTask;
+				const session = active();
+				mode = "navigation";
+				tell("Task navigation.");
+				if (session) run(() => service.resetSize(task.id, session.id));
+				return true;
+			}
+			const input = terminalInput(ch, key);
+			const session = active();
+			if (input && session) {
+				const task = selectedTask;
+				inputQueue = inputQueue
+					.then(() => service.sendInput(task.id, input, session.id))
+					.catch((error) => tell(error instanceof Error ? error.message : String(error)));
+			}
+			return true;
+		};
+		const capturesWorkspaceKey = () =>
+			filterFocused ||
+			filterPopupOpen ||
+			mode === "composer" ||
+			mode === "field" ||
+			mode === "config" ||
+			mode === "details" ||
+			mode === "history";
+		const dispatchNavigationKey = (key: { name?: string; full?: string; sequence?: string; ctrl?: boolean }) => {
+			const action = navigationBindings.find((binding) => matchesKey(binding.keys, key))?.action;
+			if (action) navigationActions[action]();
+		};
 		const onKeypress = (character: unknown, raw: unknown) => {
 			if (attached) return;
 			const ch = typeof character === "string" ? character : "";
 			const key = raw as { name?: string; full?: string; sequence?: string; ctrl?: boolean };
-			if (filterFocused || filterPopupOpen || mode === "composer") return;
-			if (mode === "inline" && selectedTask) {
-				if (matchesKey(keymapKeys("workspace", "inlineClose"), key)) {
-					const task = selectedTask;
-					const session = active();
-					mode = "navigation";
-					tell("Task navigation.");
-					if (session) run(() => service.resetSize(task.id, session.id));
-					return;
-				}
-				const input = terminalInput(ch, key);
-				const task = selectedTask;
-				const session = active();
-				if (input && session) {
-					inputQueue = inputQueue
-						.then(() => service.sendInput(task.id, input, session.id))
-						.catch((error) => tell(error instanceof Error ? error.message : String(error)));
-				}
-				return;
-			}
-			if (mode === "field" || mode === "config" || mode === "details" || mode === "history") return;
-			const action = navigationBindings.find((binding) => matchesKey(binding.keys, key))?.action;
-			if (action) navigationActions[action]();
+			if (capturesWorkspaceKey() || forwardsInlineInput(ch, key)) return;
+			dispatchNavigationKey(key);
 		};
 		const onResize = () => {
 			if (attached) return;

@@ -87,12 +87,7 @@ const renderModal = async (modalTask: Task | undefined): Promise<HTMLElement> =>
 				<ThemeProvider>
 					<TaskIdIndexProvider tasks={[task, dependency]}>
 						<LocationProbe />
-						<TaskDetailsModal
-							task={modalTask}
-							isOpen={true}
-							onClose={() => {}}
-							availableTasks={[task, dependency]}
-						/>
+						<TaskDetailsModal task={modalTask} isOpen={true} onClose={() => {}} availableTasks={[task, dependency]} />
 					</TaskIdIndexProvider>
 				</ThemeProvider>
 			</MemoryRouter>,

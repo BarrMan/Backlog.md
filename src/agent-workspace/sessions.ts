@@ -1,13 +1,13 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import lockfile from "proper-lockfile";
+import { randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { DEFAULT_IN_PROGRESS_STATUS, DEFAULT_STATUSES } from "../constants/index.ts";
 import type { Core } from "../core/backlog.ts";
 import { renderSessionBootstrap } from "./bootstrap.ts";
 import { resolveAgentConfiguration } from "./config.ts";
 import { hasEmptyHandoffInput } from "./handoff-input.ts";
 import { type AgentSessionRunner, BunRunner, SessionProcess } from "./session-process.ts";
+import { type SessionState, SessionStore } from "./session-store.ts";
 import { fail, slug } from "./session-utils.ts";
 import { spawnSessionWorker } from "./session-worker-client.ts";
 import { ensureSessionWorktree } from "./session-worktree.ts";
@@ -15,12 +15,6 @@ import type { AgentPreset, AgentSession, HandoffRequest, TaskSessions } from "./
 
 const COMPLETED_HANDOFF_STATUS = "completed";
 const TERMINAL_HANDOFF_STATUSES = new Set([COMPLETED_HANDOFF_STATUS, "failed"]);
-
-interface State extends TaskSessions {
-	version: 1;
-	hasSuccessfulSession?: boolean;
-	handoffDocumentId?: string;
-}
 
 export type { AgentSessionRunner } from "./session-process.ts";
 
@@ -32,6 +26,7 @@ function timestamp(): string {
 export class AgentSessionService {
 	private readonly runner: AgentSessionRunner;
 	private readonly process: SessionProcess;
+	private readonly store: SessionStore;
 	private readonly backgroundWorkers: boolean;
 
 	constructor(
@@ -40,12 +35,13 @@ export class AgentSessionService {
 	) {
 		this.runner = options.runner ?? new BunRunner();
 		this.process = new SessionProcess(this.runner);
+		this.store = new SessionStore(this.core.fs.rootDir, this.runner);
 		this.backgroundWorkers = !options.runner;
 	}
 
 	async list(taskId: string): Promise<TaskSessions> {
 		const task = await this.requireTask(taskId);
-		return await this.read(task.id);
+		return await this.store.read(task.id);
 	}
 
 	async start(taskId: string, options: { preset?: string; predecessorId?: string } = {}): Promise<AgentSession> {
@@ -66,9 +62,9 @@ export class AgentSessionService {
 		options: { predecessorId?: string; cwd?: string } = {},
 	): Promise<AgentSession> {
 		const inProgress = await this.inProgressStatus();
-		const paths = await this.paths(task.id);
+		const paths = await this.store.paths(task.id);
 		let session: AgentSession | undefined;
-		await this.mutate(task.id, async (state) => {
+		await this.store.mutate(task.id, async (state) => {
 			if (state.handoff?.status === "replacing" && state.handoff.sessionId !== options.predecessorId)
 				throw new Error(`Task ${task.id} is replacing its agent session.`);
 			if (state.sessions.some((candidate) => candidate.status === "starting" || candidate.status === "running"))
@@ -104,7 +100,7 @@ export class AgentSessionService {
 			if (preset.worktree) await ensureSessionWorktree(this.runner, this.core.fs.rootDir, task.id, reserved.cwd);
 			const env = { ...process.env, ...preset.env, ...this.environment(reserved) } as Record<string, string>;
 			if (preset.prepare) await this.process.prepare(preset.prepare, reserved.cwd, env);
-			await this.writeAtomic(
+			await this.store.write(
 				reserved.bootstrapPath,
 				renderSessionBootstrap({
 					taskId: task.id,
@@ -116,7 +112,7 @@ export class AgentSessionService {
 				}),
 			);
 			await this.process.launch(reserved, preset, env);
-			const first = !(await this.read(task.id)).hasSuccessfulSession;
+			const first = !(await this.store.read(task.id)).hasSuccessfulSession;
 			const latest = await this.requireTask(task.id);
 			if (
 				first &&
@@ -125,7 +121,7 @@ export class AgentSessionService {
 			) {
 				await this.core.updateTaskFromInput(task.id, { status: inProgress }, false, { includeCrossBranch: false });
 			}
-			await this.mutate(task.id, async (state) => {
+			await this.store.mutate(task.id, async (state) => {
 				const current = this.session(state, reserved.id);
 				current.status = "running";
 				current.ownerPid = undefined;
@@ -136,7 +132,7 @@ export class AgentSessionService {
 			return reserved;
 		} catch (error) {
 			await this.process.kill(reserved.tmuxName);
-			await this.mutate(task.id, async (state) => {
+			await this.store.mutate(task.id, async (state) => {
 				const current = this.session(state, reserved.id);
 				current.status = "failed";
 				current.endedAt = timestamp();
@@ -153,7 +149,7 @@ export class AgentSessionService {
 	async stop(taskId: string, sessionId?: string): Promise<void> {
 		const { task, session } = await this.sessionSnapshot(taskId, sessionId);
 		await this.process.kill(session.tmuxName);
-		await this.mutate(task.id, async (state) => {
+		await this.store.mutate(task.id, async (state) => {
 			const current = this.session(state, session.id);
 			current.status = "stopped";
 			current.endedAt = timestamp();
@@ -198,7 +194,7 @@ export class AgentSessionService {
 	async requestHandoff(taskId: string): Promise<HandoffRequest> {
 		const task = await this.requireTask(taskId);
 		let request: HandoffRequest | undefined;
-		await this.mutate(task.id, async (state) => {
+		await this.store.mutate(task.id, async (state) => {
 			if (state.handoff && !TERMINAL_HANDOFF_STATUSES.has(state.handoff.status))
 				throw new Error(`Task ${task.id} already has a handoff request.`);
 			const active = this.active(state);
@@ -243,13 +239,13 @@ export class AgentSessionService {
 		const delivery = await this.dispatchHandoff(task.id, handoff.id);
 		if (delivery === "waiting" && this.backgroundWorkers)
 			await spawnSessionWorker("handoff-dispatch", task.id, this.core.fs.rootDir);
-		return (await this.read(task.id)).handoff ?? handoff;
+		return (await this.store.read(task.id)).handoff ?? handoff;
 	}
 
 	async completeHandoff(taskId: string, requestId: string, content: string): Promise<void> {
 		if (!content.trim()) throw new Error("Handoff content cannot be empty.");
 		const task = await this.requireTask(taskId);
-		await this.mutate(task.id, async (state) => {
+		await this.store.mutate(task.id, async (state) => {
 			if (
 				!state.handoff ||
 				state.handoff.id !== requestId ||
@@ -295,7 +291,7 @@ export class AgentSessionService {
 	async continueHandoff(taskId: string): Promise<AgentSession | null> {
 		const task = await this.requireTask(taskId);
 		let predecessor: AgentSession | undefined;
-		await this.mutate(task.id, async (state) => {
+		await this.store.mutate(task.id, async (state) => {
 			if (!state.handoff || !["ready", "failed"].includes(state.handoff.status)) return;
 			if (!state.handoff.document || !(await Bun.file(join(this.core.fs.docsDir, state.handoff.documentPath)).exists()))
 				throw new Error("The completed handoff document is missing; save it before continuing.");
@@ -307,7 +303,7 @@ export class AgentSessionService {
 		const oldSession = predecessor;
 		try {
 			await this.process.kill(oldSession.tmuxName);
-			await this.mutate(task.id, async (state) => {
+			await this.store.mutate(task.id, async (state) => {
 				this.stopSession(state, oldSession.id);
 			});
 			const preset = oldSession.presetSnapshot ?? (await this.presetForLegacySession(task.id, oldSession.preset));
@@ -315,7 +311,7 @@ export class AgentSessionService {
 				predecessorId: oldSession.id,
 				cwd: oldSession.cwd,
 			});
-			await this.mutate(task.id, async (state) => {
+			await this.store.mutate(task.id, async (state) => {
 				const old = this.session(state, oldSession.id);
 				old.status = "handed-off";
 				old.endedAt = timestamp();
@@ -326,7 +322,7 @@ export class AgentSessionService {
 			});
 			return replacement;
 		} catch (error) {
-			await this.mutate(task.id, async (state) => {
+			await this.store.mutate(task.id, async (state) => {
 				this.stopSession(state, oldSession.id);
 				if (state.handoff) {
 					state.handoff.status = "failed";
@@ -338,7 +334,7 @@ export class AgentSessionService {
 		}
 	}
 
-	private stopSession(state: State, sessionId: string): void {
+	private stopSession(state: SessionState, sessionId: string): void {
 		const session = this.session(state, sessionId);
 		session.status = "stopped";
 		session.endedAt = timestamp();
@@ -347,7 +343,7 @@ export class AgentSessionService {
 
 	async recover(taskId: string): Promise<void> {
 		const task = await this.requireTask(taskId);
-		const state = await this.read(task.id);
+		const state = await this.store.read(task.id);
 		for (const session of state.sessions.filter(
 			(candidate) => candidate.status === "starting" || candidate.status === "running",
 		)) {
@@ -360,7 +356,7 @@ export class AgentSessionService {
 			if (alive.exitCode === 0 && dead.stdout.trim() !== "1" && session.status === "running") continue;
 			// An abandoned launch must not reserve the task forever, even if its placeholder pane survived.
 			if (session.status === "starting" && alive.exitCode === 0) await this.process.kill(session.tmuxName);
-			await this.mutate(task.id, async (current) => {
+			await this.store.mutate(task.id, async (current) => {
 				const target = this.session(current, session.id);
 				target.status = target.status === "starting" ? "failed" : "stopped";
 				target.endedAt = timestamp();
@@ -368,7 +364,7 @@ export class AgentSessionService {
 				if (current.activeSessionId === target.id) delete current.activeSessionId;
 			});
 		}
-		await this.mutate(task.id, async (current) => {
+		await this.store.mutate(task.id, async (current) => {
 			const handoff = current.handoff;
 			if (handoff?.status !== "replacing" || this.ownerIsAlive(handoff.replacementOwnerPid)) return;
 			const replacement = current.sessions.find(
@@ -384,7 +380,7 @@ export class AgentSessionService {
 			}
 			delete handoff.replacementOwnerPid;
 		});
-		const recovered = await this.read(task.id);
+		const recovered = await this.store.read(task.id);
 		if (recovered.handoff?.status === "requested") {
 			await this.dispatchHandoff(task.id);
 		} else if (recovered.handoff && ["ready", "failed"].includes(recovered.handoff.status)) {
@@ -401,7 +397,7 @@ export class AgentSessionService {
 
 	private async sessionSnapshot(taskId: string, sessionId?: string, activeOnly = true) {
 		const task = await this.requireTask(taskId);
-		const state = await this.read(task.id);
+		const state = await this.store.read(task.id);
 		const session = sessionId
 			? state.sessions.find((candidate) => candidate.id === sessionId)
 			: activeOnly
@@ -412,13 +408,13 @@ export class AgentSessionService {
 		return { task, session };
 	}
 
-	private session(state: State, id: string): AgentSession {
+	private session(state: SessionState, id: string): AgentSession {
 		const session = state.sessions.find((candidate) => candidate.id === id);
 		if (!session) throw new Error(`Agent session not found: ${id}`);
 		return session;
 	}
 
-	private active(state: State): AgentSession {
+	private active(state: SessionState): AgentSession {
 		const session = state.sessions.find(
 			(candidate) => candidate.id === state.activeSessionId && candidate.status === "running",
 		);
@@ -438,7 +434,7 @@ export class AgentSessionService {
 	async dispatchHandoff(requestedTaskId: string, requestId?: string): Promise<"sent" | "waiting" | "skipped"> {
 		const taskId = (await this.requireTask(requestedTaskId)).id;
 		let claimed = false;
-		await this.mutate(taskId, async (state) => {
+		await this.store.mutate(taskId, async (state) => {
 			const handoff = state.handoff;
 			if (handoff?.status !== "requested" || (requestId && handoff.id !== requestId)) return;
 			if (handoff.dispatchedAt || this.ownerIsAlive(handoff.dispatchOwnerPid)) return;
@@ -447,7 +443,7 @@ export class AgentSessionService {
 		});
 		if (!claimed) return "skipped";
 		try {
-			const state = await this.read(taskId);
+			const state = await this.store.read(taskId);
 			const handoff = state.handoff;
 			if (handoff?.status !== "requested" || (requestId && handoff.id !== requestId)) return "skipped";
 			const session = state.sessions.find(
@@ -462,7 +458,7 @@ export class AgentSessionService {
 				initial.stdout !== settled.stdout ||
 				!hasEmptyHandoffInput(session.presetSnapshot?.bootstrap ?? "prompt", settled.stdout, cursorRow)
 			) {
-				await this.mutate(taskId, async (current) => {
+				await this.store.mutate(taskId, async (current) => {
 					if (current.handoff?.id === handoff.id && current.handoff.status === "requested")
 						current.handoff.error =
 							"Waiting for the agent input line to become empty; the handoff request will be sent automatically.";
@@ -476,7 +472,7 @@ export class AgentSessionService {
 			].join(" ");
 			await this.process.paste(session.tmuxName, session.id, request);
 			await this.process.sendEnter(session.tmuxName, session.id);
-			await this.mutate(taskId, async (current) => {
+			await this.store.mutate(taskId, async (current) => {
 				if (current.handoff?.id === handoff.id && current.handoff.status === "requested") {
 					current.handoff.error = undefined;
 					current.handoff.dispatchedAt = timestamp();
@@ -484,7 +480,7 @@ export class AgentSessionService {
 			});
 			return "sent";
 		} finally {
-			await this.mutate(taskId, async (state) => {
+			await this.store.mutate(taskId, async (state) => {
 				if (state.handoff?.dispatchOwnerPid === process.pid) delete state.handoff.dispatchOwnerPid;
 			});
 		}
@@ -518,69 +514,5 @@ export class AgentSessionService {
 			);
 		}
 		return status;
-	}
-
-	private async paths(taskId: string): Promise<{ taskDir: string; statePath: string }> {
-		const git = await this.runner.run(["git", "rev-parse", "--git-common-dir"], { cwd: this.core.fs.rootDir });
-		const root =
-			git.exitCode === 0 && git.stdout.trim()
-				? join(resolve(this.core.fs.rootDir, git.stdout.trim()), "backlog-workspace")
-				: join(
-						process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? "/tmp", ".local", "state"),
-						"backlog-workspace",
-						createHash("sha256").update(resolve(this.core.fs.rootDir)).digest("hex").slice(0, 16),
-					);
-		const taskDir = join(
-			root,
-			createHash("sha256").update(resolve(this.core.fs.rootDir)).digest("hex").slice(0, 16),
-			slug(taskId),
-		);
-		return { taskDir, statePath: join(taskDir, "state.json") };
-	}
-
-	private async read(taskId: string): Promise<State> {
-		const paths = await this.paths(taskId);
-		try {
-			const state = JSON.parse(await Bun.file(paths.statePath).text()) as State;
-			if (state.version !== 1 || state.taskId !== taskId || !Array.isArray(state.sessions))
-				throw new Error("invalid state");
-			return state;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, taskId, sessions: [] };
-			throw new Error(
-				`Could not read session state for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	}
-
-	private async mutate(taskId: string, fn: (state: State) => Promise<void>): Promise<void> {
-		const paths = await this.paths(taskId);
-		await mkdir(paths.taskDir, { recursive: true });
-		const release = await lockfile.lock(paths.statePath, {
-			realpath: false,
-			stale: 30_000,
-			update: 5_000,
-			retries: { retries: 20, minTimeout: 25, maxTimeout: 100 },
-		});
-		try {
-			let state: State;
-			try {
-				state = await this.read(taskId);
-			} catch (error) {
-				if ((error as Error).message.includes("ENOENT")) state = { version: 1, taskId, sessions: [] };
-				else throw error;
-			}
-			await fn(state);
-			await this.writeAtomic(paths.statePath, `${JSON.stringify(state, null, "\t")}\n`);
-		} finally {
-			await release();
-		}
-	}
-
-	private async writeAtomic(path: string, content: string): Promise<void> {
-		await mkdir(dirname(path), { recursive: true });
-		const temporary = `${path}.${randomUUID()}.tmp`;
-		await Bun.write(temporary, content);
-		await rename(temporary, path);
 	}
 }

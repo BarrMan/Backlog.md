@@ -17,17 +17,7 @@ import { pinTimeZone } from "./pin-timezone.ts";
 // which is 67rem. 66rem keeps a rem of slack.
 const CONTENT_BUDGET_REM = 66;
 
-const EXPECTED_HEADERS = [
-	"ID",
-	"Title",
-	"Status",
-	"Priority",
-	"Ordinal",
-	"Labels",
-	"Assignee",
-	"Milestone",
-	"Created",
-];
+const EXPECTED_HEADERS = ["ID", "Title", "Status", "Priority", "Ordinal", "Labels", "Assignee", "Milestone", "Created"];
 
 const createTask = (overrides: Partial<Task>): Task => ({
 	id: "task-1",

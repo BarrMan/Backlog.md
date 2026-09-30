@@ -3,13 +3,13 @@ import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
+import { UnifiedViewSession } from "../ui/unified/session.ts";
 import {
 	createTaskFromBoard,
 	createUnifiedTaskUpdateCallbacks,
 	getDuplicateTaskStartupWarning,
 	getEmptyUnifiedViewMessage,
 	loadTasksForUnifiedView,
-	type UnifiedTaskState,
 } from "../ui/unified-view.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
@@ -114,13 +114,17 @@ describe("loadTasksForUnifiedView", () => {
 	});
 
 	it("publishes a newly created board task to shared unified state before returning", async () => {
-		let state: UnifiedTaskState = { tasks: [] };
-		const callbacks = createUnifiedTaskUpdateCallbacks(
-			() => state,
-			(next) => {
-				state = next;
-			},
-		);
+		const session = new UnifiedViewSession([], undefined, {
+			searchQuery: "",
+			statusFilter: [],
+			excludeStatus: [],
+			typeFilter: [],
+			projectFilter: [],
+			priorityFilter: "",
+			labelFilter: [],
+			milestoneFilter: "",
+		});
+		const callbacks = createUnifiedTaskUpdateCallbacks(session);
 		const created: Task = {
 			id: "TASK-1",
 			title: "First board task",
@@ -138,8 +142,8 @@ describe("loadTasksForUnifiedView", () => {
 		const result = await createTaskFromBoard(boardCore, { title: created.title }, callbacks.onTaskAdded);
 
 		expect(result).toBe(created);
-		expect(state.tasks).toEqual([created]);
-		expect(state.selectedTask).toBeUndefined();
+		expect(session.tasks).toEqual([created]);
+		expect(session.selectedTask).toBeUndefined();
 	});
 
 	it("builds a concise board warning from active and completed collisions", async () => {
@@ -177,28 +181,33 @@ describe("loadTasksForUnifiedView", () => {
 		});
 		const first = makeTask("task-1", "First");
 		const selected = makeTask("task-2", "Selected");
-		let state: UnifiedTaskState = { tasks: [first, selected], selectedTask: selected };
-		const published: UnifiedTaskState[] = [];
-		const callbacks = createUnifiedTaskUpdateCallbacks(
-			() => state,
-			(next) => {
-				state = next;
-				published.push(next);
-			},
-		);
+		const session = new UnifiedViewSession([first, selected], selected, {
+			searchQuery: "",
+			statusFilter: [],
+			excludeStatus: [],
+			typeFilter: [],
+			projectFilter: [],
+			priorityFilter: "",
+			labelFilter: [],
+			milestoneFilter: "",
+		});
+		const published: Task[][] = [];
+		const unsubscribe = session.subscribeTasks(({ tasks }) => published.push([...tasks]));
+		const callbacks = createUnifiedTaskUpdateCallbacks(session);
 
 		const moved = makeTask("task-2", "Selected edited", "In Progress");
 		await callbacks.onTaskChanged?.(moved);
-		expect(state.tasks).toEqual([first, moved]);
-		expect(state.selectedTask).toBe(moved);
+		expect(session.tasks).toEqual([first, moved]);
+		expect(session.selectedTask).toBe(moved);
 
 		const added = makeTask("task-3", "Added");
 		await callbacks.onTaskAdded?.(added);
-		expect(state.tasks).toEqual([first, moved, added]);
+		expect(session.tasks).toEqual([first, moved, added]);
 
 		await callbacks.onTaskRemoved?.("task-2");
-		expect(state.tasks).toEqual([first, added]);
-		expect(state.selectedTask).toBe(added);
-		expect(published).toHaveLength(3);
+		expect(session.tasks).toEqual([first, added]);
+		expect(session.selectedTask).toBe(added);
+		expect(published).toHaveLength(4);
+		unsubscribe();
 	});
 });

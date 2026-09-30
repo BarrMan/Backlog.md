@@ -117,6 +117,18 @@ describe("BacklogServer cleanup endpoints", () => {
 		expect(completedTasks.map((task) => task.id)).toEqual(["TASK-1"]);
 	});
 
+	it("uses the same parseInt age policy for preview and execution", async () => {
+		const preview = await fetchJson<{ count: number }>("/api/tasks/cleanup?age=3days");
+		expect(preview.count).toBe(1);
+
+		const result = await fetchJson<{ movedCount: number }>("/api/tasks/cleanup/execute", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ age: "3days" }),
+		});
+		expect(result.movedCount).toBe(1);
+	});
+
 	it("rejects archiving final-status work and preserves its record and incoming links", async () => {
 		await core.updateTaskFromInput("TASK-2", { dependencies: ["TASK-1"], references: ["TASK-1"] }, false);
 		const response = await fetch(`http://127.0.0.1:${serverPort}/api/tasks/TASK-1`, { method: "DELETE" });

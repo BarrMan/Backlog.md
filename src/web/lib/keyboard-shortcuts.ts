@@ -50,9 +50,10 @@ export function matchesBrowserShortcut(event: KeyboardEventLike, shortcut: Brows
 }
 
 export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+	// Events can originate in a separate window (for example, an isolated jsdom realm).
 	return (
-		target instanceof Element &&
-		target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null
+		typeof (target as Element | null)?.closest === "function" &&
+		(target as Element).closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null
 	);
 }
 

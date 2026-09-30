@@ -61,41 +61,10 @@ export async function openTaskFilterPicker(options: {
 	milestones: string[];
 }): Promise<FilterState | null> {
 	const { filterId, filters } = options;
-	if (filterId === "status") {
-		const value = await openMultiSelectFilterPopup({
-			screen: options.screen,
-			title: "Status Filter",
-			items: options.statuses,
-			selectedItems: filters.status,
-		});
-		return value === null ? null : { ...filters, status: value };
-	}
-	if (filterId === "type") {
-		const value = await openMultiSelectFilterPopup({
-			screen: options.screen,
-			title: "Task Type Filter",
-			items: options.taskTypes,
-			selectedItems: filters.taskTypes,
-		});
-		return value === null ? null : { ...filters, taskTypes: value };
-	}
-	if (filterId === "project") {
-		const value = await openMultiSelectFilterPopup({
-			screen: options.screen,
-			title: "Project Filter",
-			items: options.projects,
-			selectedItems: filters.projects,
-		});
-		return value === null ? null : { ...filters, projects: value };
-	}
-	if (filterId === "labels") {
-		const value = await openMultiSelectFilterPopup({
-			screen: options.screen,
-			title: "Label Filter",
-			items: [...options.labels].sort((a, b) => a.localeCompare(b)),
-			selectedItems: filters.labels,
-		});
-		return value === null ? null : { ...filters, labels: value };
+	const multiSelect = getMultiSelectFilterOptions(options, filterId);
+	if (multiSelect) {
+		const value = await openMultiSelectFilterPopup({ screen: options.screen, ...multiSelect });
+		return value === null ? null : { ...filters, [multiSelect.field]: value };
 	}
 	if (filterId === "priority") {
 		const value = await openSingleSelectFilterPopup({
@@ -120,4 +89,37 @@ export async function openTaskFilterPicker(options: {
 		],
 	});
 	return value === null ? null : { ...filters, milestone: value };
+}
+
+function getMultiSelectFilterOptions(
+	options: Parameters<typeof openTaskFilterPicker>[0],
+	filterId: Parameters<typeof openTaskFilterPicker>[0]["filterId"],
+): {
+	title: string;
+	items: string[];
+	selectedItems: string[];
+	field: "status" | "taskTypes" | "projects" | "labels";
+} | null {
+	const policies = {
+		status: { title: "Status Filter", items: options.statuses, selectedItems: options.filters.status, field: "status" },
+		type: {
+			title: "Task Type Filter",
+			items: options.taskTypes,
+			selectedItems: options.filters.taskTypes,
+			field: "taskTypes",
+		},
+		project: {
+			title: "Project Filter",
+			items: options.projects,
+			selectedItems: options.filters.projects,
+			field: "projects",
+		},
+		labels: {
+			title: "Label Filter",
+			items: [...options.labels].sort((a, b) => a.localeCompare(b)),
+			selectedItems: options.filters.labels,
+			field: "labels",
+		},
+	} as const;
+	return filterId in policies ? policies[filterId as keyof typeof policies] : null;
 }

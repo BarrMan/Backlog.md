@@ -11,6 +11,18 @@ const makeDoc = (overrides: Partial<Document>): Document => ({
 	...overrides,
 });
 
+function expectSingleDocumentPath(result: ReturnType<typeof buildDocsTree>, segments: string[]): void {
+	let nodes = result.tree;
+	for (const [index, segment] of segments.entries()) {
+		const node = nodes[0];
+		expect(node?.name).toBe(segment);
+		expect(node?.path).toBe(segments.slice(0, index + 1).join("/"));
+		expect(node?.docs).toHaveLength(index === segments.length - 1 ? 1 : 0);
+		expect(node?.children).toHaveLength(index === segments.length - 1 ? 0 : 1);
+		nodes = node?.children ?? [];
+	}
+}
+
 describe("buildDocsTree", () => {
 	it("organizes single-level folder structure", () => {
 		const docs = [
@@ -127,37 +139,8 @@ describe("buildDocsTree", () => {
 		const docs = [makeDoc({ id: "doc-1", title: "Deep Doc", path: "a/b/c/d/e/file.md" })];
 
 		const result = buildDocsTree(docs);
-
-		expect(result.tree).toHaveLength(1);
-		expect(result.tree[0]?.name).toBe("a");
-		expect(result.tree[0]?.path).toBe("a");
-		expect(result.tree[0]?.docs).toHaveLength(0);
-		expect(result.tree[0]?.children).toHaveLength(1);
-
-		const bNode = result.tree[0]?.children[0];
-		expect(bNode?.name).toBe("b");
-		expect(bNode?.path).toBe("a/b");
-		expect(bNode?.docs).toHaveLength(0);
-		expect(bNode?.children).toHaveLength(1);
-
-		const cNode = bNode?.children[0];
-		expect(cNode?.name).toBe("c");
-		expect(cNode?.path).toBe("a/b/c");
-		expect(cNode?.docs).toHaveLength(0);
-		expect(cNode?.children).toHaveLength(1);
-
-		const dNode = cNode?.children[0];
-		expect(dNode?.name).toBe("d");
-		expect(dNode?.path).toBe("a/b/c/d");
-		expect(dNode?.docs).toHaveLength(0);
-		expect(dNode?.children).toHaveLength(1);
-
-		const eNode = dNode?.children[0];
-		expect(eNode?.name).toBe("e");
-		expect(eNode?.path).toBe("a/b/c/d/e");
-		expect(eNode?.docs).toHaveLength(1);
-		expect(eNode?.docs[0]?.title).toBe("Deep Doc");
-		expect(eNode?.children).toHaveLength(0);
+		expectSingleDocumentPath(result, ["a", "b", "c", "d", "e"]);
+		expect(result.tree[0]?.children[0]?.children[0]?.children[0]?.children[0]?.docs[0]?.title).toBe("Deep Doc");
 	});
 
 	it("handles malformed paths with double slashes gracefully", () => {

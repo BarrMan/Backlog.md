@@ -1,263 +1,111 @@
-import {useMemo, useState, useCallback} from 'react';
-import {useParams, useNavigate, useSearchParams} from 'react-router-dom';
-import {apiClient} from '../lib/api';
-import {type Document} from '../../types';
-import ErrorBoundary from '../components/ErrorBoundary';
-import {SuccessToast} from './SuccessToast';
-import { sanitizeUrlTitle } from '../utils/urlHelpers';
-import StoredDate from './StoredDate';
-import EditableDocumentContent, { DocumentDetailTitle } from "./EditableDocumentContent";
+import type { Document } from "../../types";
+import { useDocumentationDetail } from "../hooks/use-documentation-detail";
 import DocumentDetailActions from "./DocumentDetailActions";
-import { useDocumentDetailLifecycle } from "../hooks/use-document-detail-lifecycle";
+import {
+	DocumentDetailHeader,
+	DocumentDetailMetadata,
+	DocumentDetailSaveError,
+	DocumentDetailSuccessToast,
+} from "./DocumentDetailChrome";
 import { DocumentDetailGate, EmptyDocumentDetail } from "./DocumentDetailStates";
-
-// Utility function to add doc prefix for API calls
-const addDocPrefix = (id: string): string => {
-    return id.startsWith('doc-') ? id : `doc-${id}`;
-};
-
-const getDocumentDirectory = (path?: string): string => {
-    if (!path) return '';
-    return path.split(/[\\/]+/).slice(0, -1).join('/');
-};
+import EditableDocumentContent from "./EditableDocumentContent";
+import ErrorBoundary from "./ErrorBoundary";
+import StoredDate from "./StoredDate";
 
 interface DocumentationDetailProps {
-    docs: Document[];
-    onRefreshData: () => Promise<void>;
-    dateFormat?: string;
+	docs: Document[];
+	onRefreshData: () => Promise<void>;
+	dateFormat?: string;
 }
 
-export default function DocumentationDetail({docs, onRefreshData, dateFormat}: DocumentationDetailProps) {
-    const {id, title} = useParams<{ id: string; title: string }>();
-    const navigate = useNavigate();
-    const [searchParams, setSearchParams] = useSearchParams();
-    const [content, setContent] = useState<string>('');
-    const [originalContent, setOriginalContent] = useState<string>('');
-    const [docTitle, setDocTitle] = useState<string>('');
-    const [originalDocTitle, setOriginalDocTitle] = useState<string>('');
-    const [docPath, setDocPath] = useState<string>('');
-    const [originalDocPath, setOriginalDocPath] = useState<string>('');
-    const [isSaving, setIsSaving] = useState(false);
-    const [saveError, setSaveError] = useState<Error | null>(null);
-    const [showSaveSuccess, setShowSaveSuccess] = useState(false);
-    const adapter = useMemo(() => ({
-        prefix: addDocPrefix,
-        fetch: apiClient.fetchDoc.bind(apiClient),
-        onLoad: (next: Document) => {
-            setContent(next.rawContent || ""); setOriginalContent(next.rawContent || "");
-            setDocTitle(next.title || ""); setOriginalDocTitle(next.title || "");
-            setDocPath(getDocumentDirectory(next.path)); setOriginalDocPath(getDocumentDirectory(next.path));
-        },
-        onFallback: (next: Document) => {
-            setDocTitle(next.title || ""); setOriginalDocTitle(next.title || "");
-            setDocPath(getDocumentDirectory(next.path)); setOriginalDocPath(getDocumentDirectory(next.path));
-        },
-        onNew: () => { setDocTitle(""); setOriginalDocTitle(""); setDocPath(""); setOriginalDocPath(""); setContent(""); setOriginalContent(""); },
-        notFoundError: (prefixedId: string) => new Error(`Document with ID "${prefixedId}" not found`),
-        logError: (next: unknown) => console.error("Failed to load document:", next),
-    }), []);
-    const { entity: document, isLoading, isEditing, setIsEditing, isNew: isNewDocument, setIsNew: setIsNewDocument, error } = useDocumentDetailLifecycle({
-        id, items: docs, adapter, editRequested: searchParams.get("edit") === "true",
-        consumeEditRequest: () => setSearchParams((params) => { params.delete("edit"); return params; }),
-    });
+const tagIcon =
+	"M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a.997.997 0 01-1.414 0l-7-7A1.997 1.997 0 013 12V7a4 4 0 014-4z";
+const collectionIcon =
+	"M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 01-2-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012 2v2M7 7h10";
+const folderIcon = "M3 7h5l2 2h11v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z";
+const calendarIcon =
+	"M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012 2v2M7 7h10";
 
-    const handleSave = useCallback(async () => {
-        if (!docTitle.trim()) {
-            setSaveError(new Error('Document title is required'));
-            return;
-        }
-
-        try {
-            setIsSaving(true);
-            setSaveError(null);
-            const normalizedTitle = docTitle.trim();
-            const normalizedPath = docPath.trim();
-
-            if (isNewDocument) {
-                // Create new document
-                const result = await apiClient.createDoc(normalizedTitle, content, normalizedPath);
-                // Refresh data and navigate to the new document
-                await onRefreshData();
-                // Show success toast
-                setShowSaveSuccess(true);
-                setTimeout(() => setShowSaveSuccess(false), 4000);
-                // Exit edit mode and navigate to the new document
-                setIsEditing(false);
-                setIsNewDocument(false);
-                setDocTitle(normalizedTitle);
-                setOriginalDocTitle(normalizedTitle);
-                setDocPath(getDocumentDirectory(result.path) || normalizedPath);
-                setOriginalDocPath(getDocumentDirectory(result.path) || normalizedPath);
-                // Use the returned document ID for navigation
-                const documentId = result.id.replace('doc-', ''); // Remove prefix for URL
-                navigate(`/documentation/${documentId}/${sanitizeUrlTitle(normalizedTitle)}`);
-            } else {
-                // Update existing document
-                if (!id) return;
-
-                // Check if title has changed
-                const titleChanged = normalizedTitle !== originalDocTitle;
-                const pathChanged = normalizedPath !== originalDocPath;
-
-                // Pass title only if it has changed
-                const updatedDocument = await apiClient.updateDoc(
-                    addDocPrefix(id),
-                    content,
-                    titleChanged ? normalizedTitle : undefined,
-                    pathChanged ? normalizedPath : undefined
-                );
-
-                // Update original title to the new value
-                if (titleChanged) {
-                    setDocTitle(normalizedTitle);
-                    setOriginalDocTitle(normalizedTitle);
-                }
-                if (pathChanged) {
-                    const updatedPath = getDocumentDirectory(updatedDocument.path) || normalizedPath;
-                    setDocPath(updatedPath);
-                    setOriginalDocPath(updatedPath);
-                }
-
-                // Refresh data from parent
-                await onRefreshData();
-                // Show success toast
-                setShowSaveSuccess(true);
-                setTimeout(() => setShowSaveSuccess(false), 4000);
-                // Exit edit mode and navigate to document detail page (this will load in preview mode)
-                setIsEditing(false);
-                navigate(`/documentation/${id}/${sanitizeUrlTitle(normalizedTitle)}`);
-            }
-        } catch (err) {
-            const error = err instanceof Error ? err : new Error('Failed to save document');
-            setSaveError(error);
-            console.error('Failed to save document:', error);
-        } finally {
-            setIsSaving(false);
-        }
-    }, [id, docTitle, docPath, originalDocTitle, originalDocPath, content, isNewDocument, onRefreshData, navigate]);
-
-    const handleEdit = () => {
-        setIsEditing(true);
-    };
-
-    const handleCancelEdit = () => {
-        if (isNewDocument) {
-            // Navigate back for new documents
-            navigate('/documentation');
-        } else {
-            // Revert changes for existing documents
-            setContent(originalContent);
-            setDocTitle(originalDocTitle);
-            setDocPath(originalDocPath);
-            setIsEditing(false);
-        }
-    };
-
-    const hasChanges = content !== originalContent || docTitle !== originalDocTitle || docPath !== originalDocPath;
-
-    return (
-        <DocumentDetailGate id={id} isLoading={isLoading} error={error} empty={<EmptyDocumentDetail kind="document" message="Select a document from the sidebar to view its content." icon="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />}>
-        <ErrorBoundary>
-            <div className="h-full bg-white dark:bg-gray-900 flex flex-col transition-colors duration-200">
-                {/* Header Section - Confluence/Linear Style */}
-                <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 transition-colors duration-200">
-                    <div className="max-w-4xl mx-auto px-8 py-6">
-                        <div className="flex items-start justify-between mb-6">
-                            <div className="flex-1">
-                                <DocumentDetailTitle isEditing={isEditing} value={docTitle} fallback={document?.title || (title ? decodeURIComponent(title) : `Document ${id}`)} placeholder="Document title" onChange={setDocTitle}>
-                                        <input
-                                            type="text"
-                                            value={docPath}
-                                            onChange={(e) => setDocPath(e.target.value)}
-                                            className="w-full max-w-md bg-transparent border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
-                                            placeholder="guides/setup"
-                                        />
-                                </DocumentDetailTitle>
-                                <div className="flex items-center space-x-6 text-sm text-gray-500 dark:text-gray-400 transition-colors duration-200">
-                                    <div className="flex items-center space-x-2">
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                                  d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a.997.997 0 01-1.414 0l-7-7A1.997 1.997 0 013 12V7a4 4 0 014-4z"/>
-                                        </svg>
-                                        <span>ID: {document?.id || `doc-${id}`}</span>
-                                    </div>
-                                    <div className="flex items-center space-x-2">
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-                                        </svg>
-                                        <span>Documentation</span>
-                                    </div>
-                                    {document?.path && (
-                                        <div className="flex items-center space-x-2">
-                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                                      d="M3 7h5l2 2h11v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
-                                            </svg>
-                                            <span>{document.path}</span>
-                                        </div>
-                                    )}
-                                    {document?.createdDate && (
-                                        <div className="flex items-center space-x-2">
-                                            <svg className="w-4 h-4" fill="none" stroke="currentColor"
-                                                 viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                                      d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                                            </svg>
-                                            <span>Created: <StoredDate value={document.createdDate} dateFormat={dateFormat} /></span>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="flex items-center space-x-3 ml-6"><DocumentDetailActions isEditing={isEditing} onEdit={handleEdit} onCancel={handleCancelEdit} onSave={handleSave} hasChanges={hasChanges} isSaving={isSaving} /></div>
-                        </div>
-                    </div>
-                </div>
-
-                <EditableDocumentContent
-                    value={content}
-                    onChange={setContent}
-                    isEditing={isEditing}
-                    placeholder="Write your documentation here..."
-                />
-
-                {/* Save Error Alert */}
-                {saveError && (
-                    <div className="border-t border-red-200 bg-red-50 px-8 py-3">
-                        <div className="flex items-center space-x-3">
-                            <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.464 0L4.35 16.5c-.77.833.192 2.5 1.732 2.5z"/>
-                            </svg>
-                            <span className="text-sm text-red-700">Failed to save: {saveError.message}</span>
-                            <button
-                                onClick={() => setSaveError(null)}
-                                className="ml-auto text-red-700 hover:text-red-900"
-                            >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                          d="M6 18L18 6M6 6l12 12"/>
-                                </svg>
-                            </button>
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            {/* Save Success Toast */}
-            {showSaveSuccess && (
-                <SuccessToast
-                    message={`Document "${docTitle}" saved successfully!`}
-                    onDismiss={() => setShowSaveSuccess(false)}
-                    icon={
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                    }
-                />
-            )}
-        </ErrorBoundary>
-        </DocumentDetailGate>
-    );
+export default function DocumentationDetail({ docs, onRefreshData, dateFormat }: DocumentationDetailProps) {
+	const detail = useDocumentationDetail(docs, onRefreshData);
+	return (
+		<DocumentDetailGate
+			id={detail.id}
+			isLoading={detail.isLoading}
+			error={detail.error}
+			empty={
+				<EmptyDocumentDetail
+					kind="document"
+					message="Select a document from the sidebar to view its content."
+					icon="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+				/>
+			}
+		>
+			<ErrorBoundary>
+				<div className="h-full bg-white dark:bg-gray-900 flex flex-col transition-colors duration-200">
+					<DocumentDetailHeader
+						isEditing={detail.isEditing}
+						title={detail.docTitle}
+						titleFallback={detail.titleFallback}
+						titlePlaceholder="Document title"
+						onTitleChange={detail.setDocTitle}
+						titleChildren={
+							<input
+								type="text"
+								value={detail.docPath}
+								onChange={(event) => detail.setDocPath(event.target.value)}
+								className="w-full max-w-md bg-transparent border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
+								placeholder="guides/setup"
+							/>
+						}
+						metadata={
+							<DocumentDetailMetadata
+								items={[
+									{ icon: tagIcon, content: <span>ID: {detail.document?.id || `doc-${detail.id}`}</span> },
+									{ icon: collectionIcon, content: <span>Documentation</span> },
+									{
+										icon: folderIcon,
+										content: <span>{detail.document?.path}</span>,
+										visible: Boolean(detail.document?.path),
+									},
+									{
+										icon: calendarIcon,
+										content: (
+											<span>
+												Created: <StoredDate value={detail.document?.createdDate || ""} dateFormat={dateFormat} />
+											</span>
+										),
+										visible: Boolean(detail.document?.createdDate),
+									},
+								]}
+							/>
+						}
+						actions={
+							<DocumentDetailActions
+								isEditing={detail.isEditing}
+								onEdit={() => detail.setIsEditing(true)}
+								onCancel={detail.handleCancelEdit}
+								onSave={detail.handleSave}
+								hasChanges={detail.hasChanges}
+								isSaving={detail.isSaving}
+							/>
+						}
+					/>
+					<EditableDocumentContent
+						value={detail.content}
+						onChange={detail.setContent}
+						isEditing={detail.isEditing}
+						placeholder="Write your documentation here..."
+					/>
+					<DocumentDetailSaveError error={detail.saveError} onDismiss={() => detail.setSaveError(null)} />
+				</div>
+				{detail.showSaveSuccess && (
+					<DocumentDetailSuccessToast
+						message={`Document "${detail.docTitle}" saved successfully!`}
+						onDismiss={detail.dismissSuccess}
+					/>
+				)}
+			</ErrorBoundary>
+		</DocumentDetailGate>
+	);
 }

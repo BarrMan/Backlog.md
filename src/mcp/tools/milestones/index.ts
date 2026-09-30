@@ -12,7 +12,7 @@ import {
 } from "./schemas.ts";
 
 export function registerMilestoneTools(server: McpServer): void {
-	const handlers = new MilestoneHandlers(server);
+	const handlers = new MilestoneHandlers(server.application);
 
 	const listTool: McpToolHandler = createSimpleValidatedTool(
 		{

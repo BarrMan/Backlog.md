@@ -1080,5 +1080,52 @@ Invalid content`,
 			);
 			expect(docFiles).toEqual(["doc-punct - untitled.md"]);
 		});
+
+		it("publishes completed content mutations and supports unsubscribe", async () => {
+			const mutations: string[] = [];
+			const unsubscribe = filesystem.subscribeToContentMutations((mutation) => {
+				mutations.push(`${mutation.type}:${mutation.root}`);
+			});
+			const task: Task = {
+				id: "TASK-1",
+				title: "Published task",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2025-01-01",
+				labels: [],
+				dependencies: [],
+				rawContent: "",
+			};
+			const document: Document = {
+				id: "doc-1",
+				title: "Published document",
+				type: "guide",
+				createdDate: "2025-01-01",
+				rawContent: "",
+			};
+			const decision: Decision = {
+				id: "decision-1",
+				title: "Published decision",
+				date: "2025-01-01",
+				status: "proposed",
+				context: "",
+				decision: "",
+				consequences: "",
+				rawContent: "",
+			};
+
+			await filesystem.saveTask(task);
+			await filesystem.saveDocument(document);
+			await filesystem.saveDecision(decision);
+
+			expect(mutations).toEqual([
+				`task:${filesystem.backlogDir}`,
+				`document:${filesystem.backlogDir}`,
+				`decision:${filesystem.backlogDir}`,
+			]);
+			unsubscribe();
+			await filesystem.saveTask({ ...task, title: "Unobserved task" });
+			expect(mutations).toHaveLength(3);
+		});
 	});
 });

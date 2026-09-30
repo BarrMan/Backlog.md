@@ -1,4 +1,4 @@
-import React from "react";
+import type React from "react";
 import type { Task } from "../../types";
 
 interface MilestoneTaskRowProps {
@@ -12,7 +12,12 @@ interface MilestoneTaskRowProps {
 }
 
 const DragHandle = () => (
-	<svg className="w-4 h-4 text-gray-400 cursor-grab active:cursor-grabbing" viewBox="0 0 24 24" fill="currentColor">
+	<svg
+		aria-hidden="true"
+		className="w-4 h-4 text-gray-400 cursor-grab active:cursor-grabbing"
+		viewBox="0 0 24 24"
+		fill="currentColor"
+	>
 		<circle cx="9" cy="6" r="1.5" />
 		<circle cx="15" cy="6" r="1.5" />
 		<circle cx="9" cy="12" r="1.5" />
@@ -31,7 +36,8 @@ const MilestoneTaskRow: React.FC<MilestoneTaskRowProps> = ({
 	onDragStart,
 	onDragEnd,
 }) => (
-	<div
+	<button
+		type="button"
 		draggable
 		onDragStart={(event) => onDragStart(event, task)}
 		onDragEnd={onDragEnd}
@@ -42,7 +48,9 @@ const MilestoneTaskRow: React.FC<MilestoneTaskRowProps> = ({
 			<DragHandle />
 		</div>
 
-		<div className={`w-24 text-xs font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap ${isDone ? "opacity-60" : ""}`}>
+		<div
+			className={`w-24 text-xs font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap ${isDone ? "opacity-60" : ""}`}
+		>
 			{task.id}
 		</div>
 
@@ -69,7 +77,7 @@ const MilestoneTaskRow: React.FC<MilestoneTaskRowProps> = ({
 				<span className="text-xs text-gray-300 dark:text-gray-600">—</span>
 			)}
 		</div>
-	</div>
+	</button>
 );
 
 export default MilestoneTaskRow;

@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from "react";
-import { matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
+import type React from "react";
+import { useRef } from "react";
+import { useModalFocus } from "./modal-focus";
 
 interface ModalProps {
 	isOpen: boolean;
@@ -30,100 +31,33 @@ const Modal: React.FC<ModalProps> = ({
 	disableEscapeCloseRef.current = disableEscapeClose;
 	initialFocusRefRef.current = initialFocusRef;
 
-	useEffect(() => {
-		if (!isOpen) {
-			return;
-		}
-
-		const dialog = dialogRef.current;
-		if (!dialog) {
-			return;
-		}
-
-		const ownerDocument = dialog.ownerDocument;
-		const activeElement = ownerDocument.activeElement;
-		const previouslyFocused = activeElement && "focus" in activeElement ? (activeElement as HTMLElement) : null;
-		const previousOverflow = ownerDocument.body.style.overflow;
-		const handleKeyDown = (event: KeyboardEvent) => {
-			if (matchesBrowserShortcut(event, "closeModal")) {
-				event.preventDefault();
-				event.stopPropagation();
-				if (!disableEscapeCloseRef.current) {
-					onCloseRef.current();
-				}
-				return;
-			}
-
-			if (matchesBrowserShortcut(event, "focusSearch")) {
-				event.preventDefault();
-				event.stopPropagation();
-				if (!dialog.contains(ownerDocument.activeElement)) {
-					dialog.focus();
-				}
-				return;
-			}
-
-			if (event.key !== "Tab") {
-				return;
-			}
-
-			const focusable = Array.from(
-				dialog.querySelectorAll<HTMLElement>(
-					'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-				),
-			);
-			const first = focusable[0];
-			const last = focusable.at(-1);
-			if (!first || !last) {
-				event.preventDefault();
-				dialog.focus();
-				return;
-			}
-			if (!dialog.contains(ownerDocument.activeElement)) {
-				event.preventDefault();
-				event.stopPropagation();
-				(event.shiftKey ? last : first).focus();
-			} else if (event.shiftKey && (ownerDocument.activeElement === first || ownerDocument.activeElement === dialog)) {
-				event.preventDefault();
-				last.focus();
-			} else if (!event.shiftKey && ownerDocument.activeElement === last) {
-				event.preventDefault();
-				first.focus();
-			}
-		};
-
-		ownerDocument.addEventListener("keydown", handleKeyDown, true);
-		ownerDocument.body.style.overflow = "hidden";
-		(initialFocusRefRef.current?.current ?? dialog).focus();
-
-		return () => {
-			ownerDocument.removeEventListener("keydown", handleKeyDown, true);
-			ownerDocument.body.style.overflow = previousOverflow;
-			if (previouslyFocused?.isConnected) {
-				previouslyFocused.focus();
-			}
-		};
-	}, [isOpen]);
+	useModalFocus(isOpen, dialogRef, onCloseRef, disableEscapeCloseRef, initialFocusRefRef);
 
 	if (!isOpen) return null;
 
 	return (
-		<div
-			className="fixed inset-0 bg-black/40 dark:bg-black/60 flex items-center justify-center z-50 p-4"
-			onClick={disableEscapeClose ? undefined : onClose}
-			role="presentation"
-		>
+		<div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+			{!disableEscapeClose && (
+				<button
+					type="button"
+					className="absolute inset-0 bg-black/40 dark:bg-black/60"
+					onClick={onClose}
+					aria-label="Dismiss modal"
+				/>
+			)}
 			<div
 				ref={dialogRef}
-				className={`bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 shadow-2xl ${maxWidthClass} w-full max-h-[94vh] overflow-y-auto transition-colors duration-200`}
-				onClick={(event) => event.stopPropagation()}
+				className={`relative bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 shadow-2xl ${maxWidthClass} w-full max-h-[94vh] overflow-y-auto transition-colors duration-200`}
 				role="dialog"
 				tabIndex={-1}
 				aria-modal="true"
 				aria-labelledby="modal-title"
 			>
 				<div className="sticky top-0 z-10 flex flex-wrap items-start gap-3 px-6 pt-4 pb-3 border-b border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-800/95 backdrop-blur supports-[backdrop-filter]:bg-white/75 supports-[backdrop-filter]:dark:bg-gray-800/75">
-					<h2 id="modal-title" className="min-w-0 flex-1 basis-full break-words text-base font-semibold text-gray-900 dark:text-gray-100 sm:basis-auto">
+					<h2
+						id="modal-title"
+						className="min-w-0 flex-1 basis-full break-words text-base font-semibold text-gray-900 dark:text-gray-100 sm:basis-auto"
+					>
 						{title}
 					</h2>
 					<div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">

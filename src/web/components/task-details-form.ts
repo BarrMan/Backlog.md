@@ -50,26 +50,29 @@ export function buildTaskDetailsFormState({
 	defaultDefinitionOfDone: AcceptanceCriterion[];
 	createModeAssignee: string[];
 }): TaskDetailsFormState {
+	const taskValues = (task ?? {}) as Partial<Task>;
+	const text = (value?: string) => value || "";
+	const items = <T>(value: T[] | undefined, fallback: T[]) => value || fallback;
 	return {
-		title: task?.title || "",
-		description: task?.description || "",
-		plan: task?.implementationPlan || "",
-		notes: task?.implementationNotes || "",
-		displayComments: task?.comments ?? [],
-		finalSummary: task?.finalSummary || "",
-		criteria: task?.acceptanceCriteriaItems || [],
-		definitionOfDone: task?.definitionOfDoneItems || (isCreateMode ? defaultDefinitionOfDone : []),
-		status: isDraftMode ? "Draft" : task?.status || availableStatuses?.[0] || "To Do",
-		assignee: task?.assignee || createModeAssignee,
-		labels: task?.labels || [],
-		priority: task?.priority || "",
-		taskType: task?.type || "",
-		project: task?.project || "",
-		dependencies: task?.dependencies || [],
-		references: task?.references || [],
-		modifiedFiles: task?.modifiedFiles || [],
-		milestone: task?.milestone || "",
-		dueDate: task?.dueDate || "",
+		title: text(taskValues.title),
+		description: text(taskValues.description),
+		plan: text(taskValues.implementationPlan),
+		notes: text(taskValues.implementationNotes),
+		displayComments: taskValues.comments ?? [],
+		finalSummary: text(taskValues.finalSummary),
+		criteria: items(taskValues.acceptanceCriteriaItems, []),
+		definitionOfDone: items(taskValues.definitionOfDoneItems, isCreateMode ? defaultDefinitionOfDone : []),
+		status: isDraftMode ? "Draft" : text(taskValues.status || availableStatuses?.[0] || "To Do"),
+		assignee: items(taskValues.assignee, createModeAssignee),
+		labels: items(taskValues.labels, []),
+		priority: text(taskValues.priority),
+		taskType: text(taskValues.type),
+		project: text(taskValues.project),
+		dependencies: items(taskValues.dependencies, []),
+		references: items(taskValues.references, []),
+		modifiedFiles: items(taskValues.modifiedFiles, []),
+		milestone: text(taskValues.milestone),
+		dueDate: text(taskValues.dueDate),
 	};
 }
 
@@ -89,52 +92,70 @@ export function buildDefinitionOfDonePayload({
 	isCreateMode: boolean;
 }): TaskUpdatePayload {
 	const cleanedCurrent = normalizeChecklistItems(definitionOfDone);
-	if (isCreateMode) {
-		const defaults = definitionOfDoneDefaults.map((item) => item.trim()).filter((item) => item.length > 0);
-		const defaultItems = defaults.map((text, index) => ({ index: index + 1, text, checked: false }));
-		const defaultsMatch =
-			cleanedCurrent.length >= defaultItems.length &&
-			defaultItems.every(
-				(item, index) => cleanedCurrent[index]?.text === item.text && cleanedCurrent[index]?.checked === false,
-			);
-		const definitionOfDoneAdd = (defaultsMatch ? cleanedCurrent.slice(defaultItems.length) : cleanedCurrent).map(
-			(item) => item.text,
-		);
-		return {
-			...(definitionOfDoneAdd.length > 0 ? { definitionOfDoneAdd } : {}),
-			...(!defaultsMatch ? { disableDefinitionOfDoneDefaults: true } : {}),
-		};
-	}
+	return isCreateMode
+		? buildCreateDefinitionOfDonePayload(cleanedCurrent, definitionOfDoneDefaults)
+		: buildExistingDefinitionOfDonePayload(task?.definitionOfDoneItems ?? [], cleanedCurrent);
+}
 
-	const original = task?.definitionOfDoneItems ?? [];
-	const originalByIndex = new Map(original.map((item) => [item.index, item]));
-	const currentByIndex = new Map(cleanedCurrent.map((item) => [item.index, item]));
-	const removals = new Set<number>();
-	const additions: string[] = [];
-	const checks: number[] = [];
-	const unchecks: number[] = [];
-	let nextIndex = original.reduce((max, item) => Math.max(max, item.index), 0);
-
-	for (const item of cleanedCurrent) {
-		const originalItem = originalByIndex.get(item.index);
-		if (!originalItem || originalItem.text !== item.text) {
-			if (originalItem) removals.add(item.index);
-			additions.push(item.text);
-			nextIndex += 1;
-			if (item.checked) checks.push(nextIndex);
-			continue;
-		}
-		if (originalItem.checked !== item.checked) {
-			(item.checked ? checks : unchecks).push(item.index);
-		}
-	}
-	for (const item of original) {
-		if (!currentByIndex.has(item.index)) removals.add(item.index);
-	}
+function buildCreateDefinitionOfDonePayload(current: AcceptanceCriterion[], defaults: string[]): TaskUpdatePayload {
+	const defaultItems = defaults
+		.map((text) => text.trim())
+		.filter(Boolean)
+		.map((text, index) => ({ index: index + 1, text, checked: false }));
+	const defaultsMatch = defaultItems.every(
+		(item, index) => current[index]?.text === item.text && current[index]?.checked === false,
+	);
+	const definitionOfDoneAdd = (defaultsMatch ? current.slice(defaultItems.length) : current).map((item) => item.text);
 	return {
-		...(additions.length > 0 ? { definitionOfDoneAdd: additions } : {}),
-		...(removals.size > 0 ? { definitionOfDoneRemove: Array.from(removals) } : {}),
-		...(checks.length > 0 ? { definitionOfDoneCheck: checks } : {}),
-		...(unchecks.length > 0 ? { definitionOfDoneUncheck: unchecks } : {}),
+		...(definitionOfDoneAdd.length > 0 ? { definitionOfDoneAdd } : {}),
+		...(!defaultsMatch ? { disableDefinitionOfDoneDefaults: true } : {}),
 	};
+}
+
+function buildExistingDefinitionOfDonePayload(
+	original: AcceptanceCriterion[],
+	current: AcceptanceCriterion[],
+): TaskUpdatePayload {
+	const changes = collectDefinitionOfDoneChanges(original, current);
+	return {
+		...(changes.additions.length > 0 ? { definitionOfDoneAdd: changes.additions } : {}),
+		...(changes.removals.size > 0 ? { definitionOfDoneRemove: Array.from(changes.removals) } : {}),
+		...(changes.checks.length > 0 ? { definitionOfDoneCheck: changes.checks } : {}),
+		...(changes.unchecks.length > 0 ? { definitionOfDoneUncheck: changes.unchecks } : {}),
+	};
+}
+
+function collectDefinitionOfDoneChanges(original: AcceptanceCriterion[], current: AcceptanceCriterion[]) {
+	const originalByIndex = new Map(original.map((item) => [item.index, item]));
+	const currentByIndex = new Map(current.map((item) => [item.index, item]));
+	const changes = {
+		removals: new Set<number>(),
+		additions: [] as string[],
+		checks: [] as number[],
+		unchecks: [] as number[],
+		nextIndex: original.reduce((max, item) => Math.max(max, item.index), 0),
+	};
+	current.forEach((item) => {
+		applyChecklistItemChange(item, originalByIndex, changes);
+	});
+	original.forEach((item) => {
+		if (!currentByIndex.has(item.index)) changes.removals.add(item.index);
+	});
+	return changes;
+}
+
+function applyChecklistItemChange(
+	item: AcceptanceCriterion,
+	original: Map<number, AcceptanceCriterion>,
+	changes: { removals: Set<number>; additions: string[]; checks: number[]; unchecks: number[]; nextIndex: number },
+) {
+	const previous = original.get(item.index);
+	if (!previous || previous.text !== item.text) {
+		if (previous) changes.removals.add(item.index);
+		changes.additions.push(item.text);
+		changes.nextIndex += 1;
+		if (item.checked) changes.checks.push(changes.nextIndex);
+		return;
+	}
+	if (previous.checked !== item.checked) (item.checked ? changes.checks : changes.unchecks).push(item.index);
 }

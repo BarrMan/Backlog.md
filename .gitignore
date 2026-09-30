@@ -5,6 +5,8 @@ node_modules
 out
 dist
 cli
+!src/cli/
+!src/cli/*.ts
 *.tgz
 
 # code coverage

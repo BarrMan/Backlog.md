@@ -211,13 +211,20 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 
 	private refreshList(): void {
 		if (!this.listBox) return;
+		this.filteredItems = this.filteredItemsForSearch();
+		const displayItems = this.buildDisplayItems();
+		this.listBox.setItems(displayItems);
+		this.highlightedIndex = null;
+		this.restoreHighlightedItem();
+	}
 
-		// Apply search filter
-		this.filteredItems = this.searchTerm
-			? this.items.filter((item) => JSON.stringify(item).toLowerCase().includes(this.searchTerm.toLowerCase()))
-			: [...this.items];
+	private filteredItemsForSearch(): T[] {
+		if (!this.searchTerm) return [...this.items];
+		const searchTerm = this.searchTerm.toLowerCase();
+		return this.items.filter((item) => JSON.stringify(item).toLowerCase().includes(searchTerm));
+	}
 
-		// Build display items
+	private buildDisplayItems(): string[] {
 		const displayItems: string[] = [];
 		this.displayIndexByFilteredIndex.clear();
 		this.filteredIndexByDisplayIndex.clear();
@@ -230,41 +237,9 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 			displayIndex += 1;
 		}
 
-		if (this.groupBy) {
-			// Group items
-			const groups = new Map<string, Array<{ item: T; filteredIndex: number }>>();
-			for (const [filteredIndex, item] of this.filteredItems.entries()) {
-				const group = this.groupBy(item);
-				if (!groups.has(group)) {
-					groups.set(group, []);
-				}
-				const groupList = groups.get(group);
-				if (groupList) {
-					groupList.push({ item, filteredIndex });
-				}
-			}
-
-			// Render groups
-			for (const [group, groupItems] of groups) {
-				displayItems.push(formatHeading(group || "No Group", 2));
-				displayIndex += 1;
-				for (const { item, filteredIndex } of groupItems) {
-					const content = this.buildDisplayContent(item, filteredIndex, true);
-					displayItems.push(content.normal);
-					this.registerDisplayItem(filteredIndex, displayIndex, content);
-					displayIndex += 1;
-				}
-			}
-		} else {
-			// Render flat list
-			for (const [filteredIndex, item] of this.filteredItems.entries()) {
-				if (!item) continue;
-				const content = this.buildDisplayContent(item, filteredIndex, false);
-				displayItems.push(content.normal);
-				this.registerDisplayItem(filteredIndex, displayIndex, content);
-				displayIndex += 1;
-			}
-		}
+		displayIndex = this.groupBy
+			? this.appendGroupedDisplayItems(displayItems, displayIndex)
+			: this.appendFlatDisplayItems(displayItems, displayIndex);
 
 		// Add help text
 		if (this.options.showHelp !== false) {
@@ -272,11 +247,51 @@ export class GenericList<T extends GenericListItem> implements GenericListContro
 			displayItems.push("", helpText);
 		}
 
-		this.listBox.setItems(displayItems);
-		this.highlightedIndex = null;
-		if (this.filteredItems.length === 0) {
-			return;
+		return displayItems;
+	}
+
+	private appendGroupedDisplayItems(displayItems: string[], displayIndex: number): number {
+		let nextDisplayIndex = displayIndex;
+		const groups = new Map<string, Array<{ item: T; filteredIndex: number }>>();
+		for (const [filteredIndex, item] of this.filteredItems.entries()) {
+			const group = this.groupBy?.(item) ?? "";
+			const groupItems = groups.get(group) ?? [];
+			groupItems.push({ item, filteredIndex });
+			groups.set(group, groupItems);
 		}
+		for (const [group, groupItems] of groups) {
+			displayItems.push(formatHeading(group || "No Group", 2));
+			nextDisplayIndex += 1;
+			for (const { item, filteredIndex } of groupItems) {
+				nextDisplayIndex = this.appendDisplayItem(displayItems, item, filteredIndex, nextDisplayIndex, true);
+			}
+		}
+		return nextDisplayIndex;
+	}
+
+	private appendFlatDisplayItems(displayItems: string[], displayIndex: number): number {
+		let nextDisplayIndex = displayIndex;
+		for (const [filteredIndex, item] of this.filteredItems.entries()) {
+			nextDisplayIndex = this.appendDisplayItem(displayItems, item, filteredIndex, nextDisplayIndex, false);
+		}
+		return nextDisplayIndex;
+	}
+
+	private appendDisplayItem(
+		displayItems: string[],
+		item: T,
+		filteredIndex: number,
+		displayIndex: number,
+		grouped: boolean,
+	): number {
+		const content = this.buildDisplayContent(item, filteredIndex, grouped);
+		displayItems.push(content.normal);
+		this.registerDisplayItem(filteredIndex, displayIndex, content);
+		return displayIndex + 1;
+	}
+
+	private restoreHighlightedItem(): void {
+		if (this.filteredItems.length === 0) return;
 		const clampedIndex = Math.max(0, Math.min(this.selectedIndex, this.filteredItems.length - 1));
 		this.setHighlightedIndex(clampedIndex, { emitHighlight: false });
 	}

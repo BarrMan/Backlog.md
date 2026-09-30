@@ -1,13 +1,13 @@
-import type { AcceptanceCriterion, Decision, Document, Milestone, ParsedMarkdown, Task } from "../types/index.ts";
+import type { Decision, Document, Milestone, ParsedMarkdown, Task } from "../types/index.ts";
 import { normalizeDueDate } from "../utils/due-date.ts";
 import { normalizePriorityValue } from "../utils/priority-config.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
+import { extractTopLevelSection } from "./ranges.ts";
 import {
 	AcceptanceCriteriaManager,
 	CommentsManager,
 	DefinitionOfDoneManager,
-	extractStructuredSection,
-	STRUCTURED_SECTION_KEYS,
+	getStructuredSections,
 } from "./structured-sections.ts";
 
 function normalizeFlowList(prefix: string, rawValue: string): string | null {
@@ -37,6 +37,31 @@ function normalizeFlowList(prefix: string, rawValue: string): string | null {
 	return `${prefix}[${normalizedItems.join(", ")}]${trailingComment}`;
 }
 
+function preprocessDueDateLine(line: string): string | undefined {
+	const dueDateMatch = line.match(/^(\s*(?:due_date|"due_date"|'due_date')\s*:\s*)(.*)$/);
+	if (!dueDateMatch) return undefined;
+	const prefix = dueDateMatch[1] ?? "";
+	const raw = dueDateMatch[2] ?? "";
+	const scalarMatch = raw.match(/^(.*?)(\s+#.*)?$/);
+	const value = (scalarMatch?.[1] ?? raw).trim();
+	const comment = scalarMatch?.[2] ?? "";
+	return value && !/^(?:null|~)$/i.test(value) && !value.startsWith("'") && !value.startsWith('"')
+		? `${prefix}"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"${comment}`
+		: line;
+}
+
+function preprocessIdentityLine(line: string): string {
+	const match = line.match(/^(\s*(?:assignee|reporter):\s*)(.*)$/);
+	if (!match) return line;
+	const prefix = match[1] ?? "";
+	const value = (match[2] ?? "").trim();
+	const normalizedFlowList = normalizeFlowList(prefix, value);
+	if (normalizedFlowList !== null) return normalizedFlowList;
+	return value && !value.startsWith("[") && !value.startsWith("'") && !value.startsWith('"') && !value.startsWith("-")
+		? `${prefix}"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+		: line;
+}
+
 function preprocessFrontmatter(frontmatter: string): string {
 	return frontmatter
 		.split(/\r?\n/) // Handle both Windows (\r\n) and Unix (\n) line endings
@@ -44,42 +69,7 @@ function preprocessFrontmatter(frontmatter: string): string {
 			// The key spelling matters: an unquoted timestamp left for YAML to resolve comes back as a
 			// Date with its written offset already discarded, so a due date read under a quoted key
 			// would land on a different day than the same value read under a bare one.
-			const dueDateMatch = line.match(/^(\s*(?:due_date|"due_date"|'due_date')\s*:\s*)(.*)$/);
-			if (dueDateMatch) {
-				const prefix = dueDateMatch[1] ?? "";
-				const raw = dueDateMatch[2] ?? "";
-				const scalarMatch = raw.match(/^(.*?)(\s+#.*)?$/);
-				const value = (scalarMatch?.[1] ?? raw).trim();
-				const comment = scalarMatch?.[2] ?? "";
-				const isYamlNull = /^(?:null|~)$/i.test(value);
-				if (value && !isYamlNull && !value.startsWith("'") && !value.startsWith('"')) {
-					return `${prefix}"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"${comment}`;
-				}
-			}
-
-			// Handle both assignee and reporter fields that start with @
-			const match = line.match(/^(\s*(?:assignee|reporter):\s*)(.*)$/);
-			if (!match) return line;
-
-			const prefix = match[1] ?? "";
-			const raw = match[2] ?? "";
-			const value = raw.trim();
-
-			const normalizedFlowList = normalizeFlowList(prefix, value);
-			if (normalizedFlowList !== null) {
-				return normalizedFlowList;
-			}
-
-			if (
-				value &&
-				!value.startsWith("[") &&
-				!value.startsWith("'") &&
-				!value.startsWith('"') &&
-				!value.startsWith("-")
-			) {
-				return `${prefix}"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-			}
-			return line;
+			return preprocessDueDateLine(line) ?? preprocessIdentityLine(line);
 		})
 		.join("\n"); // Always join with \n for consistent YAML parsing
 }
@@ -176,65 +166,77 @@ function isStructuredDependency(value: unknown): boolean {
 	return Array.isArray(value) || Object.prototype.toString.call(value) === "[object Object]";
 }
 
-export function parseTask(content: string): Task {
-	const { frontmatter, content: rawContent } = parseMarkdown(content);
-	const id = String(frontmatter.id || "");
-	const dependencies = frontmatter.dependencies;
-	if (Array.isArray(dependencies)) {
-		const invalidIndex = dependencies.findIndex(isStructuredDependency);
-		if (invalidIndex !== -1) throw new TaskDependenciesParseError(id, invalidIndex);
-	} else if (isStructuredDependency(dependencies)) {
-		throw new TaskDependenciesParseError(id);
+function parseDependencies(value: unknown, taskId: string): string[] {
+	if (Array.isArray(value)) {
+		const invalidIndex = value.findIndex(isStructuredDependency);
+		if (invalidIndex !== -1) throw new TaskDependenciesParseError(taskId, invalidIndex);
+		return value.map(String);
 	}
+	if (isStructuredDependency(value)) throw new TaskDependenciesParseError(taskId);
+	return [];
+}
 
-	const priority = normalizePriorityValue(frontmatter.priority ? String(frontmatter.priority) : undefined);
-
-	// Parse structured acceptance criteria (checked/text/index) from all sections
-	const structuredCriteria: AcceptanceCriterion[] = AcceptanceCriteriaManager.parseAllCriteria(rawContent);
-	const structuredDefinitionOfDone: AcceptanceCriterion[] = DefinitionOfDoneManager.parseAllCriteria(rawContent);
-	const comments = CommentsManager.parseAllComments(rawContent);
-
-	// Parse other sections
-	const descriptionSection = extractStructuredSection(rawContent, STRUCTURED_SECTION_KEYS.description) || "";
-	const planSection = extractStructuredSection(rawContent, STRUCTURED_SECTION_KEYS.implementationPlan) || undefined;
-	const notesSection = extractStructuredSection(rawContent, STRUCTURED_SECTION_KEYS.implementationNotes) || undefined;
-	const finalSummarySection = extractStructuredSection(rawContent, STRUCTURED_SECTION_KEYS.finalSummary) || undefined;
-
+function parseTaskSections(rawContent: string) {
+	const sections = getStructuredSections(rawContent);
 	return {
-		id,
+		acceptanceCriteriaItems: AcceptanceCriteriaManager.parseAllCriteria(rawContent),
+		definitionOfDoneItems: DefinitionOfDoneManager.parseAllCriteria(rawContent),
+		comments: CommentsManager.parseAllComments(rawContent),
+		description: sections.description || "",
+		implementationPlan: sections.implementationPlan,
+		implementationNotes: sections.implementationNotes,
+		finalSummary: sections.finalSummary,
+	};
+}
+
+function taskList(value: unknown): string[] {
+	return Array.isArray(value) ? value.map(String) : [];
+}
+
+function optionalTaskValue(value: unknown): string | undefined {
+	return value ? String(value) : undefined;
+}
+
+function taskAssignees(value: unknown): string[] {
+	return Array.isArray(value) ? value.map(String) : value ? [String(value)] : [];
+}
+
+function taskFrontmatterFields(frontmatter: Record<string, unknown>) {
+	return {
+		id: String(frontmatter.id || ""),
 		title: String(frontmatter.title || ""),
 		status: String(frontmatter.status || ""),
-		assignee: Array.isArray(frontmatter.assignee)
-			? frontmatter.assignee.map(String)
-			: frontmatter.assignee
-				? [String(frontmatter.assignee)]
-				: [],
-		reporter: frontmatter.reporter ? String(frontmatter.reporter) : undefined,
+		assignee: taskAssignees(frontmatter.assignee),
+		reporter: optionalTaskValue(frontmatter.reporter),
 		createdDate: normalizeDate(frontmatter.created_date),
 		updatedDate: frontmatter.updated_date ? normalizeDate(frontmatter.updated_date) : undefined,
 		dueDate: normalizeDueDate(frontmatter.due_date, "due_date"),
-		labels: Array.isArray(frontmatter.labels) ? frontmatter.labels.map(String) : [],
-		milestone: frontmatter.milestone ? String(frontmatter.milestone) : undefined,
-		dependencies: Array.isArray(dependencies) ? dependencies.map(String) : [],
-		references: Array.isArray(frontmatter.references) ? frontmatter.references.map(String) : [],
-		documentation: Array.isArray(frontmatter.documentation) ? frontmatter.documentation.map(String) : [],
-		modifiedFiles: Array.isArray(frontmatter.modified_files) ? frontmatter.modified_files.map(String) : [],
-		rawContent,
-		acceptanceCriteriaItems: structuredCriteria,
-		definitionOfDoneItems: structuredDefinitionOfDone,
-		description: descriptionSection,
-		implementationPlan: planSection,
-		implementationNotes: notesSection,
-		comments,
-		finalSummary: finalSummarySection,
-		parentTaskId: frontmatter.parent_task_id ? String(frontmatter.parent_task_id) : undefined,
+		labels: taskList(frontmatter.labels),
+		milestone: optionalTaskValue(frontmatter.milestone),
+		references: taskList(frontmatter.references),
+		documentation: taskList(frontmatter.documentation),
+		modifiedFiles: taskList(frontmatter.modified_files),
+		parentTaskId: optionalTaskValue(frontmatter.parent_task_id),
 		subtasks: Array.isArray(frontmatter.subtasks) ? frontmatter.subtasks.map(String) : undefined,
-		priority,
-		type: frontmatter.type ? String(frontmatter.type) : undefined,
-		project: frontmatter.project ? String(frontmatter.project) : undefined,
+		priority: normalizePriorityValue(frontmatter.priority ? String(frontmatter.priority) : undefined),
+		type: optionalTaskValue(frontmatter.type),
+		project: optionalTaskValue(frontmatter.project),
 		ordinal: frontmatter.ordinal !== undefined ? Number(frontmatter.ordinal) : undefined,
-		onStatusChange: frontmatter.onStatusChange ? String(frontmatter.onStatusChange) : undefined,
+		onStatusChange: optionalTaskValue(frontmatter.onStatusChange),
 		agentConfiguration: frontmatter.agentConfiguration as Task["agentConfiguration"],
+	};
+}
+
+export function parseTask(content: string): Task {
+	const { frontmatter, content: rawContent } = parseMarkdown(content);
+	const fields = taskFrontmatterFields(frontmatter);
+	const sections = parseTaskSections(rawContent);
+
+	return {
+		...fields,
+		dependencies: parseDependencies(frontmatter.dependencies, fields.id),
+		rawContent,
+		...sections,
 	};
 }
 
@@ -246,10 +248,10 @@ export function parseDecision(content: string): Decision {
 		title: String(frontmatter.title || ""),
 		date: normalizeDate(frontmatter.date),
 		status: String(frontmatter.status || "proposed") as Decision["status"],
-		context: extractSection(rawContent, "Context") || "",
-		decision: extractSection(rawContent, "Decision") || "",
-		consequences: extractSection(rawContent, "Consequences") || "",
-		alternatives: extractSection(rawContent, "Alternatives"),
+		context: extractTopLevelSection(rawContent, "Context") || "",
+		decision: extractTopLevelSection(rawContent, "Decision") || "",
+		consequences: extractTopLevelSection(rawContent, "Consequences") || "",
+		alternatives: extractTopLevelSection(rawContent, "Alternatives"),
 		rawContent, // Raw markdown content without frontmatter
 	};
 }
@@ -275,15 +277,7 @@ export function parseMilestone(content: string): Milestone {
 		id: String(frontmatter.id || ""),
 		title: String(frontmatter.title || ""),
 		dueDate: normalizeDueDate(frontmatter.due_date, "due_date"),
-		description: extractSection(rawContent, "Description") || "",
+		description: extractTopLevelSection(rawContent, "Description") || "",
 		rawContent,
 	};
-}
-
-function extractSection(content: string, sectionTitle: string): string | undefined {
-	// Normalize to LF for reliable matching across platforms
-	const src = content.replace(/\r\n/g, "\n");
-	const regex = new RegExp(`## ${sectionTitle}\\s*\\n([\\s\\S]*?)(?=\\n## |$)`, "i");
-	const match = src.match(regex);
-	return match?.[1]?.trim();
 }

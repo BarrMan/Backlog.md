@@ -12,7 +12,7 @@ let TEST_DIR: string;
 let mcpServer: McpServer;
 
 async function loadConfig(server: McpServer) {
-	const config = await server.filesystem.loadConfig();
+	const config = await server.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load backlog configuration for tests");
 	}
@@ -23,9 +23,9 @@ describe("MCP final summary", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-final-summary");
 		mcpServer = new McpServer(TEST_DIR, "Test instructions");
-		await mcpServer.filesystem.ensureBacklogStructure();
+		await mcpServer.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(mcpServer, "MCP Final Summary Project");
+		await initializeFilesystemTestProject(mcpServer.application, "MCP Final Summary Project");
 
 		const config = await loadConfig(mcpServer);
 		registerTaskTools(mcpServer, config);
@@ -57,7 +57,7 @@ describe("MCP final summary", () => {
 		expect(createText).toContain("Final Summary:");
 		expect(createText).toContain("PR-style summary");
 
-		const createdTask = await mcpServer.getTask("task-1");
+		const createdTask = await mcpServer.application.getTask("task-1");
 		expect(createdTask?.finalSummary).toBe("PR-style summary");
 
 		const viewResult = await mcpServer.testInterface.callTool({
@@ -86,7 +86,7 @@ describe("MCP final summary", () => {
 			},
 		});
 
-		let task = await mcpServer.getTask("task-1");
+		let task = await mcpServer.application.getTask("task-1");
 		expect(task?.finalSummary).toBe("Initial");
 
 		await mcpServer.testInterface.callTool({
@@ -96,7 +96,7 @@ describe("MCP final summary", () => {
 			},
 		});
 
-		task = await mcpServer.getTask("task-1");
+		task = await mcpServer.application.getTask("task-1");
 		expect(task?.finalSummary).toBe("Initial\n\nSecond\n\nThird");
 
 		await mcpServer.testInterface.callTool({
@@ -106,7 +106,7 @@ describe("MCP final summary", () => {
 			},
 		});
 
-		task = await mcpServer.getTask("task-1");
+		task = await mcpServer.application.getTask("task-1");
 		expect(task?.finalSummary).toBeUndefined();
 	});
 });

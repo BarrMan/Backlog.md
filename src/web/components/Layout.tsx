@@ -1,10 +1,10 @@
-import { Outlet } from 'react-router-dom';
-import SideNavigation from './SideNavigation';
-import Navigation from './Navigation';
-import { HealthIndicator, HealthSuccessToast } from './HealthIndicator';
-import { DuplicateIdWarning } from './DuplicateIdWarning';
-import type { DuplicateRepairPlan } from '../../core/duplicate-task-repair';
-import { type Task, type Document, type Decision } from '../../types';
+import { Outlet } from "react-router-dom";
+import type { DuplicateRepairPlan } from "../../core/duplicate-task-repair";
+import type { Decision, Document, Task } from "../../types";
+import { DuplicateIdWarning } from "./DuplicateIdWarning";
+import { HealthIndicator, HealthSuccessToast } from "./HealthIndicator";
+import Navigation from "./Navigation";
+import SideNavigation from "./SideNavigation";
 
 interface LayoutProps {
 	projectName: string;
@@ -36,7 +36,7 @@ export default function Layout({
 	return (
 		<div className="h-screen bg-gray-50 dark:bg-gray-900 flex overflow-hidden transition-colors duration-200">
 			<HealthIndicator />
-			<SideNavigation 
+			<SideNavigation
 				taskCount={tasks.length}
 				docs={docs}
 				decisions={decisions}
@@ -52,9 +52,7 @@ export default function Layout({
 					<Outlet context={{ tasks, docs, decisions, isLoading, onRefreshData }} />
 				</main>
 			</div>
-			{showSuccessToast && (
-				<HealthSuccessToast onDismiss={onDismissToast} />
-			)}
+			{showSuccessToast && <HealthSuccessToast onDismiss={onDismissToast} />}
 		</div>
 	);
 }

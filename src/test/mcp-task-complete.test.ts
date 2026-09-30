@@ -12,7 +12,7 @@ let TEST_DIR: string;
 let server: McpServer;
 
 async function loadConfigOrThrow(mcpServer: McpServer) {
-	const config = await mcpServer.filesystem.loadConfig();
+	const config = await mcpServer.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load config");
 	}
@@ -23,9 +23,9 @@ describe("MCP task_complete", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-task-complete");
 		server = new McpServer(TEST_DIR, "Test instructions");
-		await server.filesystem.ensureBacklogStructure();
+		await server.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(server, "Test Project");
+		await initializeFilesystemTestProject(server.application, "Test Project");
 
 		const config = await loadConfigOrThrow(server);
 		registerTaskTools(server, config);
@@ -68,10 +68,10 @@ describe("MCP task_complete", () => {
 		expect(archiveAttempt.isError).toBe(true);
 		expect(archiveAttempt.structuredContent?.code).toBe("VALIDATION_ERROR");
 		expect(getText(archiveAttempt.content)).toContain("task_complete");
-		expect((await server.filesystem.loadTask("TASK-1"))?.status).toBe("Done");
-		expect((await server.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1"]);
-		expect((await server.filesystem.loadTask("TASK-2"))?.references).toEqual(["TASK-1"]);
-		expect(await server.filesystem.listArchivedTasks()).toEqual([]);
+		expect((await server.application.filesystem.loadTask("TASK-1"))?.status).toBe("Done");
+		expect((await server.application.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1"]);
+		expect((await server.application.filesystem.loadTask("TASK-2"))?.references).toEqual(["TASK-1"]);
+		expect(await server.application.filesystem.listArchivedTasks()).toEqual([]);
 
 		const complete = await server.testInterface.callTool({
 			params: {
@@ -82,18 +82,18 @@ describe("MCP task_complete", () => {
 		expect(complete.isError).toBeUndefined();
 		expect(getText(complete.content)).toContain("Completed task TASK-1");
 
-		const activeTask = await server.filesystem.loadTask("task-1");
+		const activeTask = await server.application.filesystem.loadTask("task-1");
 		expect(activeTask).toBeNull();
 
 		const completedFiles = await Array.fromAsync(
-			new Bun.Glob("task-1*.md").scan({ cwd: server.filesystem.completedDir, followSymlinks: true }),
+			new Bun.Glob("task-1*.md").scan({ cwd: server.application.filesystem.completedDir, followSymlinks: true }),
 		);
 		expect(completedFiles.length).toBe(1);
-		expect((await server.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1"]);
+		expect((await server.application.filesystem.loadTask("TASK-2"))?.dependencies).toEqual(["TASK-1"]);
 	});
 
 	it("refuses to complete tasks that are not Done", async () => {
-		await server.createTask(
+		await server.application.createTask(
 			{
 				id: "task-1",
 				title: "Not done task",
@@ -116,7 +116,7 @@ describe("MCP task_complete", () => {
 		expect(complete.isError).toBe(true);
 		expect(getText(complete.content)).toContain("not Done");
 
-		const activeTask = await server.filesystem.loadTask("task-1");
+		const activeTask = await server.application.filesystem.loadTask("task-1");
 		expect(activeTask?.status).toBe("Not Done");
 
 		const archive = await server.testInterface.callTool({
@@ -126,6 +126,6 @@ describe("MCP task_complete", () => {
 			},
 		});
 		expect(archive.isError).toBeUndefined();
-		expect(await server.filesystem.loadTask("task-1")).toBeNull();
+		expect(await server.application.filesystem.loadTask("task-1")).toBeNull();
 	});
 });

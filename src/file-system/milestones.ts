@@ -7,6 +7,10 @@ import { normalizeDueDate } from "../utils/due-date.ts";
 
 type Scope = "active" | "archived";
 type MilestoneFile = { file: string; filepath: string; content: string; milestone: Milestone };
+type MilestoneMatches = Record<
+	"rawId" | "canonicalId" | "aliasId" | "title" | "variantId" | "variantTitle",
+	MilestoneFile[]
+>;
 
 export interface MilestoneStoreContext {
 	activeDirectory(): Promise<string>;
@@ -45,6 +49,35 @@ function rewriteDefaultDescription(rawContent: string, previousTitle: string, ne
 	});
 }
 
+function canonicalIdentifier(input: string): string | null {
+	return /^\d+$/.test(input) || /^m-\d+$/.test(input)
+		? `m-${String(Number.parseInt(input.replace(/^m-/, ""), 10))}`
+		: null;
+}
+
+function emptyMatches(): MilestoneMatches {
+	return { rawId: [], canonicalId: [], aliasId: [], title: [], variantId: [], variantTitle: [] };
+}
+
+function chooseMatch(input: string, matches: MilestoneMatches): MilestoneFile | null {
+	const one = (items: MilestoneFile[]) => (items.length === 1 ? items[0] : null);
+	const numeric = /^\d+$/.test(input) || /^m-\d+$/.test(input);
+	return numeric
+		? (matches.rawId[0] ??
+				matches.canonicalId[0] ??
+				one(matches.aliasId) ??
+				one(matches.variantId) ??
+				one(matches.title) ??
+				one(matches.variantTitle) ??
+				null)
+		: (matches.rawId[0] ??
+				one(matches.title) ??
+				matches.canonicalId[0] ??
+				one(matches.variantId) ??
+				one(matches.variantTitle) ??
+				null);
+}
+
 export class MilestoneStore {
 	constructor(private readonly context: MilestoneStoreContext) {}
 
@@ -58,18 +91,8 @@ export class MilestoneStore {
 		if (!keys.size) return null;
 		const variants = new Set(keys);
 		variants.delete(input);
-		const canonical =
-			/^\d+$/.test(input) || /^m-\d+$/.test(input)
-				? `m-${String(Number.parseInt(input.replace(/^m-/, ""), 10))}`
-				: null;
-		const matches = {
-			rawId: [] as MilestoneFile[],
-			canonicalId: [] as MilestoneFile[],
-			aliasId: [] as MilestoneFile[],
-			title: [] as MilestoneFile[],
-			variantId: [] as MilestoneFile[],
-			variantTitle: [] as MilestoneFile[],
-		};
+		const canonical = canonicalIdentifier(input);
+		const matches = emptyMatches();
 		const milestonesDir = await this.directory(scope);
 		const files = await Array.fromAsync(new Bun.Glob("m-*.md").scan({ cwd: milestonesDir, followSymlinks: true }));
 		for (const file of files) {
@@ -93,22 +116,23 @@ export class MilestoneStore {
 			else if ([...identifierKeys(milestone.id)].some((key) => variants.has(key))) matches.variantId.push(match);
 			else if (variants.has(title)) matches.variantTitle.push(match);
 		}
-		const one = (items: MilestoneFile[]) => (items.length === 1 ? items[0] : null);
-		const numeric = /^\d+$/.test(input) || /^m-\d+$/.test(input);
-		return numeric
-			? (matches.rawId[0] ??
-					matches.canonicalId[0] ??
-					one(matches.aliasId) ??
-					one(matches.variantId) ??
-					one(matches.title) ??
-					one(matches.variantTitle) ??
-					null)
-			: (matches.rawId[0] ??
-					one(matches.title) ??
-					matches.canonicalId[0] ??
-					one(matches.variantId) ??
-					one(matches.variantTitle) ??
-					null);
+		return chooseMatch(input, matches);
+	}
+
+	private async restoreRename(
+		sourcePath: string | undefined,
+		targetPath: string | undefined,
+		original: string | undefined,
+		moved: boolean,
+	): Promise<void> {
+		try {
+			if (moved && sourcePath && targetPath && sourcePath !== targetPath) {
+				await rename(targetPath, sourcePath);
+				if (original) await Bun.write(sourcePath, original);
+			} else if (original) await Bun.write(sourcePath ?? targetPath ?? "", original);
+		} catch {
+			/* Preserve the original failure. */
+		}
 	}
 
 	private async list(directory: string): Promise<Milestone[]> {
@@ -222,14 +246,7 @@ export class MilestoneStore {
 				previousDueDate: found.milestone.dueDate,
 			};
 		} catch {
-			try {
-				if (moved && sourcePath && targetPath && sourcePath !== targetPath) {
-					await rename(targetPath, sourcePath);
-					if (original) await Bun.write(sourcePath, original);
-				} else if (original) await Bun.write(sourcePath ?? targetPath ?? "", original);
-			} catch {
-				/* Preserve the original failure. */
-			}
+			await this.restoreRename(sourcePath, targetPath, original, moved);
 			return { success: false };
 		}
 	}

@@ -1,10 +1,12 @@
-import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { $ } from "bun";
 import { DEFAULT_DIRECTORIES } from "../constants/index.ts";
 import type { BacklogConfig } from "../types/index.ts";
 import { MILLISECONDS_PER_DAY } from "../utils/time.ts";
+import { type GitIndexEntry, parseIndexEntries, SelectedCommit, type TaskCommitRequest } from "./selected-commit.ts";
+
+export type { GitIndexEntry } from "./selected-commit.ts";
 
 type GitPathContext = {
 	repoRoot: string;
@@ -13,10 +15,13 @@ type GitPathContext = {
 
 type GitConfigLoader = () => Promise<BacklogConfig | null>;
 
+type RepositoryCommitRequest = {
+	repoRoot: string;
+	filePaths: string[];
+};
+
 const FETCH_TIMEOUT_MS = 10_000;
 const MILLISECONDS_PER_SECOND = 1_000;
-const TASK_COMMIT_MAX_ATTEMPTS = 3;
-const TASK_COMMIT_RETRY_DELAY_MS = 100;
 
 export interface GitBranchTip {
 	name: string;
@@ -24,51 +29,53 @@ export interface GitBranchTip {
 	current: boolean;
 }
 
-export interface GitIndexEntry {
-	mode: string;
-	objectId: string;
-	stage: number;
+function branchLogArgs(ref: string, dir: string, since?: number | Date): string[] {
+	const args = ["log", "--pretty=format:%ct%x00", "--raw", "-z"];
+	if (typeof since === "number" && since) args.push(`--since=${since}.days`);
+	else if (since instanceof Date) args.push(`--since=@${Math.floor(since.getTime() / MILLISECONDS_PER_SECOND)}`);
+	return [...args, ref, "--", dir];
 }
 
-function indexEntriesEqual(left: readonly GitIndexEntry[], right: readonly GitIndexEntry[]): boolean {
-	return (
-		left.length === right.length &&
-		left.every(
-			(entry, index) =>
-				entry.mode === right[index]?.mode &&
-				entry.objectId === right[index]?.objectId &&
-				entry.stage === right[index]?.stage,
-		)
-	);
-}
-
-function parseIndexEntries(output: string): GitIndexEntry[] {
-	return output
-		.split("\0")
-		.filter(Boolean)
-		.flatMap((record) => {
-			const tabIndex = record.indexOf("\t");
-			if (tabIndex < 0) return [];
-			const [mode, objectId, stageText] = record.slice(0, tabIndex).split(" ");
-			const stage = Number(stageText);
-			if (!mode || !objectId || !Number.isInteger(stage)) return [];
-			return [{ mode, objectId, stage }];
-		});
+function parseBranchModificationLog(output: string): Map<string, Date> {
+	const modified = new Map<string, Date>();
+	const parts = output.split("\0").filter(Boolean);
+	let index = 0;
+	while (index < parts.length) {
+		const timestamp = Number(parts[index]?.trim());
+		if (!Number.isInteger(timestamp)) break;
+		index += 1;
+		const date = new Date(timestamp * MILLISECONDS_PER_SECOND);
+		while (parts[index]?.trimStart().startsWith(":")) {
+			const status = parts[index]?.trimStart().split(" ").at(-1) ?? "";
+			index += 1;
+			const pathCount = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+			for (let pathIndex = 0; pathIndex < pathCount; pathIndex += 1) {
+				const file = parts[index++];
+				if (file && !modified.has(file)) modified.set(file, date);
+			}
+		}
+	}
+	return modified;
 }
 
 export class GitOperations {
 	private projectRoot: string;
 	private config: BacklogConfig | null = null;
 	private readonly configLoader?: GitConfigLoader;
-	private hookRunSupported?: boolean;
 	private readonly repositories = new Set<string>();
 	private readonly repositoryChecks = new Map<string, Promise<boolean>>();
 	private readonly fetches = new Map<string, Promise<void>>();
+	private readonly selectedCommit: SelectedCommit;
 
 	constructor(projectRoot: string, config: BacklogConfig | null = null, configLoader?: GitConfigLoader) {
 		this.projectRoot = projectRoot;
 		this.config = config;
 		this.configLoader = configLoader;
+		this.selectedCommit = new SelectedCommit(
+			(args, options) => this.execGit(args, options),
+			() => this.config,
+			(filePath) => this.hashFile(filePath),
+		);
 	}
 
 	setConfig(config: BacklogConfig | null): void {
@@ -155,262 +162,38 @@ export class GitOperations {
 		await this.execGit(args, { cwd: repoRoot ?? undefined });
 	}
 
+	private async partitionPathsByRepository(filePaths: string[]): Promise<Map<string, string[]>> {
+		const pathsByRepo = new Map<string, string[]>();
+		for (const filePath of filePaths) {
+			const repoRoot = (await this.getPathContext(filePath))?.repoRoot ?? this.projectRoot;
+			const paths = pathsByRepo.get(repoRoot) ?? [];
+			paths.push(filePath);
+			pathsByRepo.set(repoRoot, paths);
+		}
+		return pathsByRepo;
+	}
+
 	async commitFiles(message: string, filePaths: string[], repoRoot?: string | null): Promise<void> {
 		const uniqueFilePaths = this.normalizeFilePaths(filePaths);
-		if (uniqueFilePaths.length === 0) {
-			return;
+		for (const request of await this.getRepositoryCommitRequests(uniqueFilePaths, repoRoot)) {
+			await this.commitRepositoryFiles(message, request);
 		}
-		let requestedRepoRoot = repoRoot;
-		if (requestedRepoRoot == null) {
-			const pathsByRepo = new Map<string, string[]>();
-			for (const filePath of uniqueFilePaths) {
-				const pathRepoRoot = (await this.getPathContext(filePath))?.repoRoot ?? this.projectRoot;
-				const repoPaths = pathsByRepo.get(pathRepoRoot) ?? [];
-				repoPaths.push(filePath);
-				pathsByRepo.set(pathRepoRoot, repoPaths);
-			}
-			if (pathsByRepo.size > 1) {
-				for (const [pathRepoRoot, repoPaths] of pathsByRepo) {
-					await this.commitFiles(message, repoPaths, pathRepoRoot);
-				}
-				return;
-			}
-			requestedRepoRoot = pathsByRepo.keys().next().value;
-		}
+	}
 
-		const paths = await this.resolveRepositoryPaths(uniqueFilePaths, requestedRepoRoot);
+	private async getRepositoryCommitRequests(
+		filePaths: string[],
+		repoRoot?: string | null,
+	): Promise<RepositoryCommitRequest[]> {
+		if (filePaths.length === 0) return [];
+		if (repoRoot != null) return [{ repoRoot, filePaths }];
+		const pathsByRepo = await this.partitionPathsByRepository(filePaths);
+		return Array.from(pathsByRepo, ([repoRoot, paths]) => ({ repoRoot, filePaths: paths }));
+	}
+
+	private async commitRepositoryFiles(message: string, request: RepositoryCommitRequest): Promise<void> {
+		const paths = await this.resolveRepositoryPaths(request.filePaths, request.repoRoot);
 		if (!paths) return;
-		const { repoRoot: resolvedRepoRoot, relativePaths: uniqueRelativePaths } = paths;
-
-		const { stdout: stagedForPaths } = await this.execGit(
-			["diff", "--name-only", "--cached", "--", ...uniqueRelativePaths],
-			{
-				cwd: resolvedRepoRoot,
-				readOnly: true,
-			},
-		);
-		if (!stagedForPaths.trim()) {
-			return;
-		}
-
-		await this.assertNoCommitOperationInProgress(resolvedRepoRoot);
-
-		let ownedEntries = new Map<string, GitIndexEntry[]>();
-		for (const relativePath of uniqueRelativePaths) {
-			ownedEntries.set(relativePath, await this.getIndexEntries(join(resolvedRepoRoot, relativePath)));
-		}
-		let commitEntries = ownedEntries;
-
-		const temporaryDirectory = await mkdtemp(join(tmpdir(), "backlog-git-commit-"));
-		const temporaryIndexEnv = { GIT_INDEX_FILE: join(temporaryDirectory, "index") };
-		const messagePath = join(temporaryDirectory, "message");
-		try {
-			const signCommit = await this.shouldSignCommit(resolvedRepoRoot);
-			let baseHead = await this.resolveHead(resolvedRepoRoot);
-			await this.populateTemporaryIndex(resolvedRepoRoot, temporaryIndexEnv, baseHead, commitEntries);
-			await writeFile(messagePath, `${message}\n`);
-			if (!this.config?.bypassGitHooks) {
-				await this.runCommitHook("pre-commit", [], resolvedRepoRoot, temporaryIndexEnv);
-			}
-			commitEntries = await this.readSelectedIndexEntries(uniqueRelativePaths, resolvedRepoRoot, temporaryIndexEnv);
-			await this.runCommitHook("prepare-commit-msg", [messagePath, "message"], resolvedRepoRoot, temporaryIndexEnv);
-			if (!this.config?.bypassGitHooks) {
-				await this.runCommitHook("commit-msg", [messagePath], resolvedRepoRoot, temporaryIndexEnv);
-			}
-			let lastHeadUpdateError: Error | undefined;
-
-			for (let attempt = 1; attempt <= 3; attempt += 1) {
-				await this.assertNoCommitOperationInProgress(resolvedRepoRoot);
-				baseHead = await this.resolveHead(resolvedRepoRoot);
-				await this.populateTemporaryIndex(resolvedRepoRoot, temporaryIndexEnv, baseHead, commitEntries);
-				const { stdout: treeOutput } = await this.execGit(["write-tree"], {
-					cwd: resolvedRepoRoot,
-					env: temporaryIndexEnv,
-				});
-				const treeId = treeOutput.trim();
-				if (baseHead) {
-					const { stdout: baseTreeOutput } = await this.execGit(["rev-parse", `${baseHead}^{tree}`], {
-						cwd: resolvedRepoRoot,
-						readOnly: true,
-					});
-					if (treeId === baseTreeOutput.trim()) {
-						throw new Error("No staged changes to commit for the selected paths");
-					}
-				}
-
-				const commitArgs = ["commit-tree", ...(signCommit ? ["-S"] : []), treeId];
-				if (baseHead) commitArgs.push("-p", baseHead);
-				commitArgs.push("-F", messagePath);
-				const { stdout: commitOutput } = await this.execGit(commitArgs, {
-					cwd: resolvedRepoRoot,
-					env: temporaryIndexEnv,
-				});
-				const commitId = commitOutput.trim();
-
-				for (const relativePath of uniqueRelativePaths) {
-					const reconciled = await this.restoreIndexEntriesIfMatches(
-						join(resolvedRepoRoot, relativePath),
-						ownedEntries.get(relativePath) ?? [],
-						commitEntries.get(relativePath) ?? [],
-					);
-					if (!reconciled) {
-						throw new Error(`Git index changed before the selected commit could be finalized: ${relativePath}`);
-					}
-				}
-				ownedEntries = commitEntries;
-
-				try {
-					await this.execGit(
-						["update-ref", "-m", `commit: ${message.split("\n", 1)[0]}`, "HEAD", commitId, baseHead ?? ""],
-						{
-							cwd: resolvedRepoRoot,
-						},
-					);
-					await this.runCommitHook("post-commit", [], resolvedRepoRoot, {}).catch(() => undefined);
-					return;
-				} catch (error) {
-					lastHeadUpdateError = error instanceof Error ? error : new Error(String(error));
-					if ((await this.resolveHead(resolvedRepoRoot)) === baseHead) throw lastHeadUpdateError;
-				}
-			}
-
-			throw new Error(`Git HEAD kept changing while committing selected paths: ${lastHeadUpdateError?.message}`);
-		} finally {
-			await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
-		}
-	}
-
-	private async assertNoCommitOperationInProgress(repoRoot: string): Promise<void> {
-		const operationMarkers = [
-			{ path: "MERGE_HEAD", name: "merge" },
-			{ path: "rebase-merge", name: "rebase" },
-			{ path: "rebase-apply", name: "rebase" },
-			{ path: "CHERRY_PICK_HEAD", name: "cherry-pick" },
-			{ path: "REVERT_HEAD", name: "revert" },
-		] as const;
-
-		for (const marker of operationMarkers) {
-			const { stdout } = await this.execGit(["rev-parse", "--git-path", marker.path], {
-				cwd: repoRoot,
-				readOnly: true,
-			});
-			const configuredPath = stdout.trim();
-			if (!configuredPath) continue;
-			const markerPath = isAbsolute(configuredPath) ? configuredPath : join(repoRoot, configuredPath);
-			if (await stat(markerPath).catch(() => null)) {
-				throw new Error(`Cannot auto-commit selected files while a Git ${marker.name} is in progress`);
-			}
-		}
-	}
-
-	private async resolveHead(repoRoot: string): Promise<string | null> {
-		try {
-			const { stdout } = await this.execGit(["rev-parse", "--verify", "HEAD"], { cwd: repoRoot, readOnly: true });
-			return stdout.trim() || null;
-		} catch {
-			return null;
-		}
-	}
-
-	private async shouldSignCommit(repoRoot: string): Promise<boolean> {
-		const { stdout } = await this.execGit(["config", "--bool", "--get", "commit.gpgSign"], {
-			cwd: repoRoot,
-			readOnly: true,
-			acceptedExitCodes: [1],
-		});
-		return stdout.trim() === "true";
-	}
-
-	private async readSelectedIndexEntries(
-		relativePaths: readonly string[],
-		repoRoot: string,
-		env: Record<string, string>,
-	): Promise<Map<string, GitIndexEntry[]>> {
-		const entries = new Map<string, GitIndexEntry[]>();
-		for (const relativePath of relativePaths) {
-			const { stdout } = await this.execGit(["ls-files", "-s", "-z", "--", relativePath], {
-				cwd: repoRoot,
-				readOnly: true,
-				env,
-			});
-			entries.set(relativePath, parseIndexEntries(stdout));
-		}
-		return entries;
-	}
-
-	private async populateTemporaryIndex(
-		repoRoot: string,
-		env: Record<string, string>,
-		baseHead: string | null,
-		selectedEntries: ReadonlyMap<string, readonly GitIndexEntry[]>,
-	): Promise<void> {
-		await this.execGit(baseHead ? ["read-tree", baseHead] : ["read-tree", "--empty"], { cwd: repoRoot, env });
-		for (const [relativePath, entries] of selectedEntries) {
-			await this.execGit(["update-index", "--force-remove", "--", relativePath], { cwd: repoRoot, env });
-			if (entries.length === 0) continue;
-			await this.execGit(["update-index", "-z", "--index-info"], {
-				cwd: repoRoot,
-				env,
-				input: entries.map((entry) => `${entry.mode} ${entry.objectId} ${entry.stage}\t${relativePath}\0`).join(""),
-			});
-		}
-	}
-
-	private async runCommitHook(
-		hook: string,
-		args: readonly string[],
-		repoRoot: string,
-		env: Record<string, string>,
-	): Promise<void> {
-		const hookEnv = { ...env, GIT_EDITOR: ":" };
-		if (await this.supportsHookRun(repoRoot)) {
-			await this.execGit(["hook", "run", "--ignore-missing", hook, ...(args.length > 0 ? ["--", ...args] : [])], {
-				cwd: repoRoot,
-				env: hookEnv,
-			});
-			return;
-		}
-		await this.runLegacyCommitHook(hook, args, repoRoot, hookEnv);
-	}
-
-	private async supportsHookRun(repoRoot: string): Promise<boolean> {
-		if (this.hookRunSupported !== undefined) return this.hookRunSupported;
-		try {
-			const { stdout } = await this.execGit(["version"], { cwd: repoRoot, readOnly: true });
-			const match = stdout.match(/git version (\d+)\.(\d+)/);
-			const major = Number(match?.[1]);
-			const minor = Number(match?.[2]);
-			this.hookRunSupported =
-				Number.isInteger(major) && Number.isInteger(minor) && (major > 2 || (major === 2 && minor >= 36));
-		} catch {
-			this.hookRunSupported = false;
-		}
-		return this.hookRunSupported;
-	}
-
-	private async runLegacyCommitHook(
-		hook: string,
-		args: readonly string[],
-		repoRoot: string,
-		env: Record<string, string>,
-	): Promise<void> {
-		const { stdout } = await this.execGit(["rev-parse", "--git-path", `hooks/${hook}`], {
-			cwd: repoRoot,
-			readOnly: true,
-		});
-		const configuredPath = stdout.trim();
-		const hookPath = isAbsolute(configuredPath) ? configuredPath : join(repoRoot, configuredPath);
-		const hookStat = await stat(hookPath).catch((error) => {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-			throw error;
-		});
-		if (!hookStat) return;
-		if (!hookStat.isFile() || (process.platform !== "win32" && (hookStat.mode & 0o111) === 0)) return;
-
-		await this.execGit(["-c", 'alias.backlog-run-hook=!f() { "$@" 1>&2; }; f', "backlog-run-hook", hookPath, ...args], {
-			cwd: repoRoot,
-			env,
-		});
+		await this.selectedCommit.commit(message, paths.repoRoot, paths.relativePaths);
 	}
 
 	async resetPaths(filePaths: string[], repoRoot?: string | null): Promise<void> {
@@ -468,25 +251,12 @@ export class GitOperations {
 		if (!context || !(await this.isRepository(context.repoRoot))) {
 			return false;
 		}
-		const currentEntries = await this.getIndexEntries(filePath);
-		if (!indexEntriesEqual(currentEntries, expectedEntries)) {
-			return false;
-		}
-		if (indexEntriesEqual(currentEntries, restoreEntries)) {
-			return true;
-		}
-
-		const objectIdLength = expectedEntries[0]?.objectId.length ?? restoreEntries[0]?.objectId.length ?? 40;
-		const zeroObjectId = "0".repeat(objectIdLength);
-		const records = [`0 ${zeroObjectId}\t${context.relativePath}\0`];
-		for (const entry of restoreEntries) {
-			records.push(`${entry.mode} ${entry.objectId} ${entry.stage}\t${context.relativePath}\0`);
-		}
-		await this.execGit(["update-index", "-z", "--index-info"], {
-			cwd: context.repoRoot,
-			input: records.join(""),
-		});
-		return true;
+		return await this.selectedCommit.restoreIndexEntriesIfMatches(
+			context.repoRoot,
+			context.relativePath,
+			expectedEntries,
+			restoreEntries,
+		);
 	}
 
 	async getStatus(): Promise<string> {
@@ -622,6 +392,7 @@ export class GitOperations {
 		const lowerMessage = message.toLowerCase();
 		return networkErrorPatterns.some((pattern) => lowerMessage.includes(pattern));
 	}
+
 	async addAndCommitTaskFile(
 		taskId: string,
 		filePath: string,
@@ -633,41 +404,21 @@ export class GitOperations {
 			update: `Update task ${taskId}`,
 			archive: `Archive task ${taskId}`,
 		};
+		const request = await this.createTaskCommitRequest(filePath);
+		if (!request) return;
+		await this.selectedCommit.commitTaskFile(actionMessages[action], request, onStaged);
+	}
 
+	private async createTaskCommitRequest(filePath: string): Promise<TaskCommitRequest | null> {
 		const context = await this.getPathContext(filePath);
 		const repoRoot = context?.repoRoot ?? this.projectRoot;
-		if (!(await this.isRepository(repoRoot))) {
-			return;
-		}
-		const pathForAdd = context?.relativePath ?? relative(this.projectRoot, filePath).replace(/\\/g, "/");
-		const expectedWorkingHash = await this.hashFile(filePath);
-		const initialIndexEntries = await this.getIndexEntries(filePath);
-		let expectedIndexEntries = initialIndexEntries;
-		let lastError: Error | undefined;
-
-		for (let attempt = 1; attempt <= TASK_COMMIT_MAX_ATTEMPTS; attempt += 1) {
-			if ((await this.hashFile(filePath)) !== expectedWorkingHash) {
-				throw lastError ?? new Error(`Task file changed before it could be committed: ${filePath}`);
-			}
-			try {
-				await this.execGit(["add", pathForAdd], { cwd: repoRoot });
-				expectedIndexEntries = await this.getIndexEntries(filePath);
-				onStaged?.(expectedIndexEntries);
-				await this.commitFiles(actionMessages[action], [filePath], repoRoot);
-				return;
-			} catch (error) {
-				lastError = error instanceof Error ? error : new Error(String(error));
-				if (attempt === TASK_COMMIT_MAX_ATTEMPTS) break;
-				const workingOwned = (await this.hashFile(filePath)) === expectedWorkingHash;
-				const indexOwned = indexEntriesEqual(await this.getIndexEntries(filePath), expectedIndexEntries);
-				if (!workingOwned || !indexOwned) throw lastError;
-				await new Promise((resolve) => setTimeout(resolve, 2 ** (attempt - 1) * TASK_COMMIT_RETRY_DELAY_MS));
-			}
-		}
-
-		throw new Error(
-			`Git operation 'commit task file ${filePath}' failed after ${TASK_COMMIT_MAX_ATTEMPTS} attempts: ${lastError?.message}`,
-		);
+		if (!(await this.isRepository(repoRoot))) return null;
+		return {
+			filePath,
+			pathForAdd: context?.relativePath ?? relative(this.projectRoot, filePath).replace(/\\/g, "/"),
+			repoRoot,
+			expectedWorkingHash: await this.hashFile(filePath),
+		};
 	}
 
 	async stageBacklogDirectory(backlogDir: string = DEFAULT_DIRECTORIES.BACKLOG): Promise<string | null> {
@@ -927,60 +678,11 @@ export class GitOperations {
 	 * Returns a Map of filePath -> Date
 	 */
 	async getBranchLastModifiedMap(ref: string, dir: string, since?: number | Date): Promise<Map<string, Date>> {
-		const out = new Map<string, Date>();
 		if (!(await this.isRepository())) {
-			return out;
+			return new Map();
 		}
-
-		// Build args with optional --since filter
-		const args = [
-			"log",
-			"--pretty=format:%ct%x00", // Unix timestamp + NUL for bulletproof parsing
-			"--name-only",
-			"-z", // Null-delimited for safety
-		];
-
-		if (typeof since === "number" && since) {
-			args.push(`--since=${since}.days`);
-		} else if (since instanceof Date) {
-			args.push(`--since=@${Math.floor(since.getTime() / MILLISECONDS_PER_SECOND)}`);
-		}
-
-		args.push(ref, "--", dir);
-
-		// Null-delimited to be safe with filenames
-		const { stdout } = await this.execGit(args, { readOnly: true });
-
-		// Parse null-delimited output
-		// Format is: timestamp\0 file1\0 file2\0 ... timestamp\0 file1\0 ...
-		const parts = stdout.split("\0").filter(Boolean);
-		let i = 0;
-
-		while (i < parts.length) {
-			const timestampStr = parts[i]?.trim();
-			if (timestampStr && /^\d+$/.test(timestampStr)) {
-				// This is a timestamp, files follow until next timestamp
-				const epoch = Number(timestampStr);
-				const date = new Date(epoch * MILLISECONDS_PER_SECOND);
-				i++;
-
-				// Process files until we hit another timestamp or end
-				// Check if next part looks like a timestamp (digits only)
-				while (i < parts.length && parts[i] && !/^\d+$/.test(parts[i]?.trim() || "")) {
-					const file = parts[i]?.trim();
-					// First time we see a file is its last modification
-					if (file && !out.has(file)) {
-						out.set(file, date);
-					}
-					i++;
-				}
-			} else {
-				// Skip unexpected content
-				i++;
-			}
-		}
-
-		return out;
+		const { stdout } = await this.execGit(branchLogArgs(ref, dir, since), { readOnly: true });
+		return parseBranchModificationLog(stdout);
 	}
 
 	async getFileLastModifiedBranch(filePath: string): Promise<string | null> {

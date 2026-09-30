@@ -1,7 +1,7 @@
 import { type FSWatcher, watch } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { FileSystem } from "../file-system/operations.ts";
+import type { ContentMutation, FileSystem } from "../file-system/operations.ts";
 import { parseDecision, parseDocument, parseTask } from "../markdown/parser.ts";
 import type { BacklogConfig, Decision, Document, Task, TaskListFilter } from "../types/index.ts";
 import { watchConfigFile } from "../utils/config-watcher.ts";
@@ -126,7 +126,7 @@ export class ContentStore {
 	private readonly rootWatchers: WatchHandle[] = [];
 	private configWatcher: WatchHandle | null = null;
 	private configWatcherPath: string | null = null;
-	private restoreFilesystemPatch?: () => void;
+	private readonly unsubscribeContentMutations: () => void;
 	private chainTail: Promise<void> = Promise.resolve();
 	private rootWatchersInitialized = false;
 	private configWatcherActive = false;
@@ -177,7 +177,9 @@ export class ContentStore {
 		private readonly enableWatchers = false,
 	) {
 		this.publishedRoot = this.currentRoot();
-		this.patchFilesystem();
+		this.unsubscribeContentMutations = this.filesystem.subscribeToContentMutations(async (mutation) => {
+			await this.handleContentMutation(mutation);
+		});
 	}
 
 	subscribe(listener: ContentStoreListener): () => void {
@@ -363,20 +365,8 @@ export class ContentStore {
 	}
 
 	upsertTask(task: Task, owner?: PublicationOwner): void {
-		if (!this.canPublishContent()) {
-			return;
-		}
-		const publicationRoot = task.filePath
-			? resolve(dirname(dirname(task.filePath)))
-			: owner
-				? resolve(owner.root)
-				: null;
-		if (!publicationRoot) {
-			return;
-		}
-		if (publicationRoot !== this.currentRoot()) {
-			return;
-		}
+		const publicationRoot = this.taskPublicationRoot(task, owner);
+		if (!publicationRoot || !this.canPublishContent() || publicationRoot !== this.currentRoot()) return;
 		const normalizedId = normalizeTaskId(task.id);
 		const previous =
 			publicationRoot === this.publishedRoot
@@ -392,18 +382,31 @@ export class ContentStore {
 			return;
 		}
 		if (task.branch && this.taskIdentityIndex) {
-			this.taskIdentityIndex = this.taskIdentityIndex.withRecord({
-				id: task.id,
-				type: "task",
-				branch: task.branch,
-				path: task.filePath ?? `${task.branch}:${task.id}`,
-				lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
-				task,
-			});
-			this.replaceVisibleTasks(this.taskIdentityIndex.getTasks(false));
-			this.publishTaskChange();
+			this.publishBranchTask(task);
 			return;
 		}
+		this.publishWorkingCopyTask(task);
+	}
+
+	private taskPublicationRoot(task: Task, owner?: PublicationOwner): string | null {
+		if (task.filePath) return resolve(dirname(dirname(task.filePath)));
+		return owner ? resolve(owner.root) : null;
+	}
+
+	private publishBranchTask(task: Task): void {
+		this.taskIdentityIndex = this.taskIdentityIndex?.withRecord({
+			id: task.id,
+			type: "task",
+			branch: task.branch as string,
+			path: task.filePath ?? `${task.branch}:${task.id}`,
+			lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
+			task,
+		});
+		this.replaceVisibleTasks(this.taskIdentityIndex?.getTasks(false) ?? this.cachedTasks);
+		this.publishTaskChange();
+	}
+
+	private publishWorkingCopyTask(task: Task): void {
 		this.activeTasks = this.activeTasks.filter(
 			(candidate) =>
 				candidate.filePath !== task.filePath &&
@@ -521,10 +524,7 @@ export class ContentStore {
 		this.closed = true;
 		this.invalidateRootWatchers();
 		this.stopConfigWatcher();
-		if (this.restoreFilesystemPatch) {
-			this.restoreFilesystemPatch();
-			this.restoreFilesystemPatch = undefined;
-		}
+		this.unsubscribeContentMutations();
 		this.pendingTaskPublications.clear();
 		this.listeners.clear();
 		this.initializing = null;
@@ -602,44 +602,7 @@ export class ContentStore {
 
 	private async loadInitialData(progressCallback?: ProgressCallback): Promise<void> {
 		let ready = false;
-		for (let attempt = 0; attempt < 12 && !ready; attempt += 1) {
-			if (this.closed) {
-				throw new Error("ContentStore has been disposed.");
-			}
-			const owner: PublicationOwner = { root: this.currentRoot() };
-			await this.filesystem.ensureBacklogStructure();
-			if (!this.isPublicationOwnerCurrent(owner)) {
-				continue;
-			}
-
-			// Use custom task loader if provided (e.g., loadTasks for cross-branch support)
-			// Otherwise fall back to filesystem-only loading
-			const epoch = this.rootWatcherEpoch;
-			const attemptLoaded = await this.loadCurrentContent(
-				epoch,
-				(snapshot) => {
-					this.installTaskCorpus(snapshot.taskCorpus ?? this.asTaskCorpus(snapshot.tasks));
-					this.replaceDocuments(snapshot.documents);
-					this.replaceDecisions(snapshot.decisions);
-				},
-				progressCallback,
-			);
-			if (!attemptLoaded || !this.isPublicationOwnerCurrent(owner)) {
-				continue;
-			}
-
-			if (this.enableWatchers) {
-				await this.setupWatchers();
-				if (
-					this.publishedRoot !== this.currentRoot() ||
-					(this.rootWatchersInitialized && !this.hasCurrentRootWatchers())
-				) {
-					this.invalidateRootWatchers();
-					continue;
-				}
-			}
-			ready = true;
-		}
+		for (let attempt = 0; attempt < 12 && !ready; attempt += 1) ready = await this.loadInitialAttempt(progressCallback);
 		if (!ready) {
 			if (this.closed) {
 				throw new Error("ContentStore has been disposed.");
@@ -649,6 +612,33 @@ export class ContentStore {
 
 		this.initialized = true;
 		this.notify("ready");
+	}
+
+	private async loadInitialAttempt(progressCallback?: ProgressCallback): Promise<boolean> {
+		if (this.closed) throw new Error("ContentStore has been disposed.");
+		const owner: PublicationOwner = { root: this.currentRoot() };
+		await this.filesystem.ensureBacklogStructure();
+		if (!this.isPublicationOwnerCurrent(owner)) return false;
+		const loaded = await this.loadCurrentContent(
+			this.rootWatcherEpoch,
+			(snapshot) => {
+				this.installTaskCorpus(snapshot.taskCorpus ?? this.asTaskCorpus(snapshot.tasks));
+				this.replaceDocuments(snapshot.documents);
+				this.replaceDecisions(snapshot.decisions);
+			},
+			progressCallback,
+		);
+		if (!loaded || !this.isPublicationOwnerCurrent(owner)) return false;
+		return await this.stabilizeInitialWatchers();
+	}
+
+	private async stabilizeInitialWatchers(): Promise<boolean> {
+		if (!this.enableWatchers) return true;
+		await this.setupWatchers();
+		if (this.publishedRoot === this.currentRoot() && (!this.rootWatchersInitialized || this.hasCurrentRootWatchers()))
+			return true;
+		this.invalidateRootWatchers();
+		return false;
 	}
 
 	private async setupWatchers(): Promise<void> {
@@ -673,35 +663,32 @@ export class ContentStore {
 	 * Called when the config file is created after the server started.
 	 */
 	async ensureConfigWatcher(): Promise<void> {
-		if (this.closed) {
-			return;
-		}
+		if (this.closed) return;
 		const rootNeedsReconciliation =
 			this.canPublishContent() &&
 			this.enableWatchers &&
 			(!this.hasCurrentRootWatchers() || this.publishedRoot !== this.currentRoot());
-		const configPath = resolve(this.filesystem.configFilePath);
-		if (!this.configWatcherActive || this.configWatcherPath !== configPath) {
-			this.stopConfigWatcher();
-			try {
-				const configWatcher = this.createConfigWatcher();
-				if (configWatcher) {
-					this.configWatcher = configWatcher;
-					this.configWatcherPath = configPath;
-					this.configWatcherActive = true;
-				}
-			} catch (error) {
-				if (process.env.DEBUG) {
-					console.error("Failed to setup config watcher after init", error);
-				}
-			}
-		}
-
+		this.ensureActiveConfigWatcher();
 		if (rootNeedsReconciliation) {
 			const config = await this.filesystem.loadConfig();
 			if (config && !this.closed) {
 				await this.handleConfigChanged(config, true);
 			}
+		}
+	}
+
+	private ensureActiveConfigWatcher(): void {
+		const configPath = resolve(this.filesystem.configFilePath);
+		if (this.configWatcherActive && this.configWatcherPath === configPath) return;
+		this.stopConfigWatcher();
+		try {
+			const configWatcher = this.createConfigWatcher();
+			if (!configWatcher) return;
+			this.configWatcher = configWatcher;
+			this.configWatcherPath = configPath;
+			this.configWatcherActive = true;
+		} catch (error) {
+			if (process.env.DEBUG) console.error("Failed to setup config watcher after init", error);
 		}
 	}
 
@@ -731,45 +718,68 @@ export class ContentStore {
 		}
 
 		await this.enqueue(async () => {
-			if (
-				this.closed ||
-				(rootChanged && transitionEpoch !== this.rootWatcherEpoch) ||
-				!this.isPublicationOwnerCurrent(transitionOwner)
-			)
-				return;
-
-			await this.filesystem.ensureBacklogStructure();
-			if (
-				this.closed ||
-				(rootChanged && transitionEpoch !== this.rootWatcherEpoch) ||
-				!this.isPublicationOwnerCurrent(transitionOwner)
-			)
-				return;
-
-			if (rootChanged || needsRootWatcher) {
-				this.boundBacklogDir = nextBacklogDir;
-				try {
-					await this.bindRootWatchers(transitionEpoch);
-				} catch (error) {
-					if (process.env.DEBUG) {
-						console.error("Failed to reconcile content watchers", error);
-					}
-					if (!bestEffortWatcherBinding) {
-						throw error;
-					}
-				}
-				if (!this.isRootWatcherCurrent(transitionEpoch) || !this.isPublicationOwnerCurrent(transitionOwner)) return;
-			}
-			if (!this.isPublicationOwnerCurrent(transitionOwner)) return;
-
-			const loaded = await this.loadCurrentContent(transitionEpoch, (snapshot) => {
-				this.installTaskCorpus(snapshot.taskCorpus ?? this.asTaskCorpus(snapshot.tasks));
-				this.replaceDocuments(snapshot.documents);
-				this.replaceDecisions(snapshot.decisions);
-			});
-			if (!loaded) return;
-			this.notifyConfig(config);
+			await this.reconcileConfigChange(
+				config,
+				transitionOwner,
+				rootChanged,
+				needsRootWatcher,
+				transitionEpoch,
+				bestEffortWatcherBinding,
+			);
 		});
+	}
+
+	private async reconcileConfigChange(
+		config: BacklogConfig,
+		transitionOwner: PublicationOwner,
+		rootChanged: boolean,
+		needsRootWatcher: boolean,
+		transitionEpoch: number,
+		bestEffortWatcherBinding: boolean,
+	): Promise<void> {
+		if (!this.isConfigTransitionCurrent(transitionOwner, rootChanged, transitionEpoch)) return;
+		await this.filesystem.ensureBacklogStructure();
+		if (!this.isConfigTransitionCurrent(transitionOwner, rootChanged, transitionEpoch)) return;
+		if (
+			!(await this.reconcileConfigRootWatcher(
+				transitionOwner,
+				rootChanged || needsRootWatcher,
+				transitionEpoch,
+				bestEffortWatcherBinding,
+			))
+		)
+			return;
+		if (!this.isPublicationOwnerCurrent(transitionOwner)) return;
+		const loaded = await this.loadCurrentContent(transitionEpoch, (snapshot) => this.installContentSnapshot(snapshot));
+		if (!loaded) return;
+		this.notifyConfig(config);
+	}
+
+	private isConfigTransitionCurrent(owner: PublicationOwner, rootChanged: boolean, epoch: number): boolean {
+		return !this.closed && (!rootChanged || epoch === this.rootWatcherEpoch) && this.isPublicationOwnerCurrent(owner);
+	}
+
+	private async reconcileConfigRootWatcher(
+		owner: PublicationOwner,
+		shouldBind: boolean,
+		epoch: number,
+		bestEffort: boolean,
+	): Promise<boolean> {
+		if (!shouldBind) return true;
+		this.boundBacklogDir = owner.root;
+		try {
+			await this.bindRootWatchers(epoch);
+		} catch (error) {
+			if (process.env.DEBUG) console.error("Failed to reconcile content watchers", error);
+			if (!bestEffort) throw error;
+		}
+		return this.isRootWatcherCurrent(epoch) && this.isPublicationOwnerCurrent(owner);
+	}
+
+	private installContentSnapshot(snapshot: ContentSnapshot): void {
+		this.installTaskCorpus(snapshot.taskCorpus ?? this.asTaskCorpus(snapshot.tasks));
+		this.replaceDocuments(snapshot.documents);
+		this.replaceDecisions(snapshot.decisions);
 	}
 
 	private async bindRootWatchers(epoch: number): Promise<void> {
@@ -1371,44 +1381,21 @@ export class ContentStore {
 		this.cachedDecisions = sortByTaskId(Array.from(this.decisions.values()));
 	}
 
-	private patchFilesystem(): void {
-		if (this.restoreFilesystemPatch) {
+	private async handleContentMutation(mutation: ContentMutation): Promise<void> {
+		const owner: PublicationOwner = { root: mutation.root };
+		if (mutation.type === "task") {
+			const savedTask = {
+				...normalizeTaskIdentity(parseTask(await Bun.file(mutation.filePath).text())),
+				filePath: mutation.filePath,
+			};
+			await this.updateTaskFromDisk(mutation.taskId, owner, savedTask);
 			return;
 		}
-
-		const originalSaveTask = this.filesystem.saveTask;
-		const originalSaveDocument = this.filesystem.saveDocument;
-		const originalSaveDecision = this.filesystem.saveDecision;
-
-		this.filesystem.saveTask = (async (task: Task): Promise<string> => {
-			const owner: PublicationOwner = { root: this.currentRoot() };
-			const result = await originalSaveTask.call(this.filesystem, task);
-			const savedTask = { ...normalizeTaskIdentity(parseTask(await Bun.file(result).text())), filePath: result };
-			await this.updateTaskFromDisk(task.id, owner, savedTask);
-			return result;
-		}) as FileSystem["saveTask"];
-
-		this.filesystem.saveDocument = (async (document: Document, subPath = "") => {
-			const owner: PublicationOwner = { root: this.currentRoot() };
-			const result = await originalSaveDocument.call(this.filesystem, document, subPath);
-			await this.handleDocumentWrite(document.id, owner);
-			return result;
-		}) as FileSystem["saveDocument"];
-
-		this.filesystem.saveDecision = (async (
-			decision: Decision,
-		): Promise<{ filepath: string; removedFilepaths: string[] }> => {
-			const owner: PublicationOwner = { root: this.currentRoot() };
-			const result = await originalSaveDecision.call(this.filesystem, decision);
-			await this.handleDecisionWrite(decision.id, owner);
-			return result;
-		}) as FileSystem["saveDecision"];
-
-		this.restoreFilesystemPatch = () => {
-			this.filesystem.saveTask = originalSaveTask;
-			this.filesystem.saveDocument = originalSaveDocument;
-			this.filesystem.saveDecision = originalSaveDecision;
-		};
+		if (mutation.type === "document") {
+			await this.handleDocumentWrite(mutation.documentId, owner);
+			return;
+		}
+		await this.handleDecisionWrite(mutation.decisionId, owner);
 	}
 
 	private async handleDocumentWrite(documentId: string, owner: PublicationOwner): Promise<void> {

@@ -154,11 +154,7 @@ describe("Web task popup keyboard shortcuts", () => {
 			["reference", container.querySelector("input[name='newRef']"), "e"],
 			["assignee", container.querySelector("#chip-input-assignee"), "e"],
 			["label", container.querySelector("#chip-input-labels"), "E"],
-			[
-				"title",
-				Array.from(container.querySelectorAll("input")).find((input) => input.value === task.title),
-				"e",
-			],
+			["title", Array.from(container.querySelectorAll("input")).find((input) => input.value === task.title), "e"],
 			["dependency", container.querySelector("#dependency-input"), "e"],
 			["select", container.querySelector("select"), "e"],
 			["content editable descendant", contentEditableChild, "e"],
@@ -229,7 +225,11 @@ describe("Web task popup keyboard shortcuts", () => {
 				onClose: () => closeCalls++,
 				onSaved: async () => {
 					flushSync(() => {
-						activeRoot?.render(<ThemeProvider><TaskDetailsModal task={replacement} isOpen onClose={() => closeCalls++} /></ThemeProvider>);
+						activeRoot?.render(
+							<ThemeProvider>
+								<TaskDetailsModal task={replacement} isOpen onClose={() => closeCalls++} />
+							</ThemeProvider>,
+						);
 					});
 					markSaved?.();
 					await savedRelease;
@@ -283,10 +283,18 @@ describe("Web task popup keyboard shortcuts", () => {
 
 			await act(async () => {
 				flushSync(() => {
-					activeRoot?.render(<ThemeProvider><TaskDetailsModal task={task} isOpen={false} onClose={() => {}} /></ThemeProvider>);
+					activeRoot?.render(
+						<ThemeProvider>
+							<TaskDetailsModal task={task} isOpen={false} onClose={() => {}} />
+						</ThemeProvider>,
+					);
 				});
 				flushSync(() => {
-					activeRoot?.render(<ThemeProvider><TaskDetailsModal task={task} isOpen onClose={() => {}} /></ThemeProvider>);
+					activeRoot?.render(
+						<ThemeProvider>
+							<TaskDetailsModal task={task} isOpen onClose={() => {}} />
+						</ThemeProvider>,
+					);
 				});
 				await Promise.resolve();
 			});
@@ -420,9 +428,10 @@ describe("Web task popup keyboard shortcuts", () => {
 	it("does not roll back a replacement task when an earlier metadata request fails", async () => {
 		const originalUpdateTask = apiClient.updateTask.bind(apiClient);
 		let rejectUpdate: ((reason?: unknown) => void) | undefined;
-		apiClient.updateTask = () => new Promise<Task>((_, reject) => {
-			rejectUpdate = reject;
-		});
+		apiClient.updateTask = () =>
+			new Promise<Task>((_, reject) => {
+				rejectUpdate = reject;
+			});
 		try {
 			const container = await mountModal();
 			const title = Array.from(container.querySelectorAll("input")).find((input) => input.value === task.title);
@@ -438,14 +447,20 @@ describe("Web task popup keyboard shortcuts", () => {
 			await waitFor(() => Boolean(rejectUpdate));
 			const replacement = { ...task, id: "BACK-559", title: "Replacement task" };
 			await act(async () => {
-				activeRoot?.render(<ThemeProvider><TaskDetailsModal task={replacement} isOpen onClose={() => {}} /></ThemeProvider>);
+				activeRoot?.render(
+					<ThemeProvider>
+						<TaskDetailsModal task={replacement} isOpen onClose={() => {}} />
+					</ThemeProvider>,
+				);
 				await Promise.resolve();
 			});
 			await act(async () => {
 				rejectUpdate?.(new Error("Request failed"));
 				await Promise.resolve();
 			});
-			expect(Array.from(container.querySelectorAll("input")).some((input) => input.value === replacement.title)).toBe(true);
+			expect(Array.from(container.querySelectorAll("input")).some((input) => input.value === replacement.title)).toBe(
+				true,
+			);
 			expect(container.textContent).not.toContain("Request failed");
 		} finally {
 			apiClient.updateTask = originalUpdateTask;
@@ -475,9 +490,7 @@ describe("Web task popup keyboard shortcuts", () => {
 				const editButton = findButton(container, "Edit");
 				expect(editButton).toBeTruthy();
 				await click(editButton as HTMLButtonElement);
-				const titleInput = Array.from(container.querySelectorAll("input")).find(
-					(input) => input.value === task.title,
-				);
+				const titleInput = Array.from(container.querySelectorAll("input")).find((input) => input.value === task.title);
 				expect(titleInput).toBeTruthy();
 
 				const event = await press(titleInput as HTMLInputElement, "s", modifier);

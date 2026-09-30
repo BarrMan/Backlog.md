@@ -25,9 +25,9 @@ async function createProject(projectRoot: string, projectName: string): Promise<
 	await $`mkdir -p ${projectRoot}`.quiet();
 
 	const bootstrap = new McpServer(projectRoot, "Bootstrap");
-	await bootstrap.filesystem.ensureBacklogStructure();
+	await bootstrap.application.filesystem.ensureBacklogStructure();
 	await $`git init -b main`.cwd(projectRoot).quiet();
-	await initializeTestProject(bootstrap, projectName);
+	await initializeTestProject(bootstrap.application, projectName);
 	await bootstrap.stop();
 }
 
@@ -109,12 +109,12 @@ describe("MCP roots discovery", () => {
 
 		const server = new McpServer(uninitializedDir, "Fallback instructions");
 
-		const configBefore = await server.filesystem.loadConfig();
+		const configBefore = await server.application.filesystem.loadConfig();
 		expect(configBefore).toBeNull();
 
-		server.reinitializeProjectRoot(projectRoot);
-		await server.ensureConfigLoaded();
-		const configAfter = await server.filesystem.loadConfig();
+		server.application.reinitializeProjectRoot(projectRoot);
+		await server.application.ensureConfigLoaded();
+		const configAfter = await server.application.filesystem.loadConfig();
 		expect(configAfter).toBeTruthy();
 		expect(configAfter?.projectName).toBe("Roots Test Project");
 		if (!configAfter) {
@@ -153,7 +153,7 @@ describe("MCP roots discovery", () => {
 			const toolNames = tools.tools.map((tool) => tool.name);
 			expect(toolNames).toContain("task_create");
 			expect(toolNames).toContain("get_backlog_instructions");
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(1);
 
 			const resources = await client.listResources();
@@ -177,7 +177,7 @@ describe("MCP roots discovery", () => {
 		try {
 			const resources = await client.listResources();
 			expect(resources.resources.map((resource) => resource.uri)).toContain("backlog://workflow/overview");
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(1);
 		} finally {
 			await client.close();
@@ -201,7 +201,7 @@ describe("MCP roots discovery", () => {
 		try {
 			const tools = await client.listTools();
 			expect(tools.tools.map((tool) => tool.name)).toContain("task_create");
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(1);
 		} finally {
 			await client.close();
@@ -225,7 +225,7 @@ describe("MCP roots discovery", () => {
 		try {
 			const tools = await client.listTools();
 			expect(tools.tools.map((tool) => tool.name)).toContain("task_create");
-			expect(server.filesystem.rootDir).toBe(secondProjectRoot);
+			expect(server.application.filesystem.rootDir).toBe(secondProjectRoot);
 		} finally {
 			await client.close();
 			await server.stop();
@@ -241,7 +241,7 @@ describe("MCP roots discovery", () => {
 
 		try {
 			await client.listTools();
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(1);
 
 			rootsRef.current = [pathToFileURL(uninitializedDir).toString()];
@@ -250,7 +250,7 @@ describe("MCP roots discovery", () => {
 
 			const fallbackResources = await client.listResources();
 			expect(fallbackResources.resources.map((resource) => resource.uri)).toEqual(["backlog://init-required"]);
-			expect(server.filesystem.rootDir).toBe(uninitializedDir);
+			expect(server.application.filesystem.rootDir).toBe(uninitializedDir);
 			expect(getRootsRequestCount()).toBe(2);
 
 			rootsRef.current = [pathToFileURL(secondProjectRoot).toString()];
@@ -259,7 +259,7 @@ describe("MCP roots discovery", () => {
 
 			const recoveredTools = await client.listTools();
 			expect(recoveredTools.tools.map((tool) => tool.name)).toContain("task_create");
-			expect(server.filesystem.rootDir).toBe(secondProjectRoot);
+			expect(server.application.filesystem.rootDir).toBe(secondProjectRoot);
 			expect(getRootsRequestCount()).toBe(3);
 		} finally {
 			await client.close();
@@ -277,12 +277,12 @@ describe("MCP roots discovery", () => {
 		try {
 			const tools = await client.listTools();
 			expect(tools.tools.map((tool) => tool.name)).toContain("task_create");
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(1);
 
 			// Matching roots keep the same project and the resolution is cached.
 			await client.listResources();
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(1);
 		} finally {
 			await client.close();
@@ -300,7 +300,7 @@ describe("MCP roots discovery", () => {
 		try {
 			const tools = await client.listTools();
 			expect(tools.tools.map((tool) => tool.name)).toContain("task_create");
-			expect(server.filesystem.rootDir).toBe(projectRoot);
+			expect(server.application.filesystem.rootDir).toBe(projectRoot);
 			expect(getRootsRequestCount()).toBe(0);
 		} finally {
 			await client.close();

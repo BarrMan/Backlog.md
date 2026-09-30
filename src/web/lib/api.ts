@@ -144,6 +144,39 @@ const DEFAULT_CONFIG: RequestConfig = {
 	timeout: 10000,
 };
 
+type SearchOptions = {
+	query?: string;
+	types?: SearchResultType[];
+	status?: string | string[];
+	excludeStatus?: string | string[];
+	priority?: SearchPriorityFilter | SearchPriorityFilter[];
+	assignee?: string | string[];
+	labels?: string[];
+	modifiedFiles?: string[];
+	limit?: number;
+};
+
+const appendQueryValues = (params: URLSearchParams, key: string, values?: string | string[]): void => {
+	if (!values) return;
+	for (const value of Array.isArray(values) ? values : [values]) {
+		if (value.trim()) params.append(key, value.trim());
+	}
+};
+
+const buildSearchParams = (options: SearchOptions): URLSearchParams => {
+	const params = new URLSearchParams();
+	if (options.query) params.set("query", options.query);
+	appendQueryValues(params, "type", options.types);
+	appendQueryValues(params, "status", options.status);
+	appendQueryValues(params, "excludeStatus", options.excludeStatus);
+	appendQueryValues(params, "priority", options.priority);
+	appendQueryValues(params, "assignee", options.assignee);
+	appendQueryValues(params, "label", options.labels);
+	appendQueryValues(params, "modifiedFile", options.modifiedFiles);
+	if (options.limit !== undefined) params.set("limit", String(options.limit));
+	return params;
+};
+
 export class ApiClient {
 	private config: RequestConfig;
 
@@ -159,32 +192,7 @@ export class ApiClient {
 
 		for (let attempt = 0; attempt <= retries; attempt++) {
 			try {
-				// Add timeout to the request
-				const controller = new AbortController();
-				const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-				const response = await fetch(url, {
-					...options,
-					signal: controller.signal,
-					headers: {
-						"Content-Type": "application/json",
-						...options.headers,
-					},
-				});
-
-				clearTimeout(timeoutId);
-
-				if (!response.ok) {
-					let errorData: unknown = null;
-					try {
-						errorData = await response.json();
-					} catch {
-						// Ignore JSON parse errors for error data
-					}
-					throw ApiError.fromResponse(response, errorData);
-				}
-
-				return response;
+				return await this.fetchAttempt(url, options, timeout);
 			} catch (error) {
 				lastError = error as Error;
 
@@ -208,6 +216,23 @@ export class ApiClient {
 		throw new NetworkError(`Request failed after ${retries + 1} attempts: ${lastError?.message}`);
 	}
 
+	private async fetchAttempt(url: string, options: RequestInit, timeout: number): Promise<Response> {
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), timeout);
+		try {
+			const response = await fetch(url, {
+				...options,
+				signal: controller.signal,
+				headers: { "Content-Type": "application/json", ...options.headers },
+			});
+			if (response.ok) return response;
+			const errorData = await response.json().catch(() => null);
+			throw ApiError.fromResponse(response, errorData);
+		} finally {
+			clearTimeout(timeoutId);
+		}
+	}
+
 	private async fetchWithoutRetry(url: string, options: RequestInit = {}): Promise<Response> {
 		return await this.fetchWithRetry(url, options, 0);
 	}
@@ -219,10 +244,7 @@ export class ApiClient {
 	}
 
 	private appendNonBlankQueryValues(params: URLSearchParams, key: string, values?: string | string[]): void {
-		if (!values) return;
-		for (const value of Array.isArray(values) ? values : [values]) {
-			if (value && value.trim().length > 0) params.append(key, value.trim());
-		}
+		appendQueryValues(params, key, values);
 	}
 	async fetchTasks(options?: {
 		status?: string;
@@ -247,61 +269,8 @@ export class ApiClient {
 		return this.fetchJson<Task[]>(url);
 	}
 
-	async search(
-		options: {
-			query?: string;
-			types?: SearchResultType[];
-			status?: string | string[];
-			excludeStatus?: string | string[];
-			priority?: SearchPriorityFilter | SearchPriorityFilter[];
-			assignee?: string | string[];
-			labels?: string[];
-			modifiedFiles?: string[];
-			limit?: number;
-		} = {},
-	): Promise<SearchResult[]> {
-		const params = new URLSearchParams();
-		if (options.query) {
-			params.set("query", options.query);
-		}
-		if (options.types && options.types.length > 0) {
-			for (const type of options.types) {
-				params.append("type", type);
-			}
-		}
-		if (options.status) {
-			const statuses = Array.isArray(options.status) ? options.status : [options.status];
-			for (const status of statuses) {
-				params.append("status", status);
-			}
-		}
-		this.appendNonBlankQueryValues(params, "excludeStatus", options.excludeStatus);
-		if (options.priority) {
-			const priorities = Array.isArray(options.priority) ? options.priority : [options.priority];
-			for (const priority of priorities) {
-				params.append("priority", priority);
-			}
-		}
-		if (options.assignee) {
-			const assignees = Array.isArray(options.assignee) ? options.assignee : [options.assignee];
-			for (const assignee of assignees) {
-				if (assignee && assignee.trim().length > 0) {
-					params.append("assignee", assignee.trim());
-				}
-			}
-		}
-		this.appendNonBlankQueryValues(params, "label", options.labels);
-		if (options.modifiedFiles) {
-			for (const file of options.modifiedFiles) {
-				if (file && file.trim().length > 0) {
-					params.append("modifiedFile", file.trim());
-				}
-			}
-		}
-		if (options.limit !== undefined) {
-			params.set("limit", String(options.limit));
-		}
-
+	async search(options: SearchOptions = {}): Promise<SearchResult[]> {
+		const params = buildSearchParams(options);
 		const url = `${API_BASE}/search${params.toString() ? `?${params.toString()}` : ""}`;
 		return this.fetchJson<SearchResult[]>(url);
 	}

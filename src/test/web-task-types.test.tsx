@@ -320,14 +320,9 @@ describe("Web task type UI", () => {
 		await act(async () => {
 			activeRoot?.render(
 				<ThemeProvider>
-					<TaskDetailsModal
-							task={task}
-							isOpen
-							onClose={() => {}}
-							availableTypes={["Legacy Type", "Bug", "Feature"]}
-						/>
-					</ThemeProvider>,
-				);
+					<TaskDetailsModal task={task} isOpen onClose={() => {}} availableTypes={["Legacy Type", "Bug", "Feature"]} />
+				</ThemeProvider>,
+			);
 			await Promise.resolve();
 		});
 
@@ -343,12 +338,7 @@ describe("Web task type UI", () => {
 		await act(async () => {
 			activeRoot?.render(
 				<ThemeProvider>
-					<TaskDetailsModal
-						task={task}
-						isOpen
-						onClose={() => {}}
-						availableTypes={["Bug", "Feature"]}
-					/>
+					<TaskDetailsModal task={task} isOpen onClose={() => {}} availableTypes={["Bug", "Feature"]} />
 				</ThemeProvider>,
 			);
 			await Promise.resolve();

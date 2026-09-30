@@ -50,6 +50,35 @@ function hasNul(value: string): boolean {
 	return value.includes("\0");
 }
 
+function assertPreset(value: unknown, name: string, label: string): void {
+	if (!SAFE_PRESET_NAME.test(name) || !value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`${label}.presets entries must be named objects.`);
+	}
+	const preset = value as Partial<AgentPreset>;
+	if (typeof preset.command !== "string" || !preset.command.trim() || hasNul(preset.command)) {
+		throw new Error(`${label}.presets.${name}.command must be a non-empty string.`);
+	}
+	if (typeof preset.prepare !== "string" || hasNul(preset.prepare)) {
+		throw new Error(`${label}.presets.${name}.prepare must be a string.`);
+	}
+	if (typeof preset.worktree !== "boolean") throw new Error(`${label}.presets.${name}.worktree must be a boolean.`);
+	if (!BOOTSTRAP_TYPES.has(preset.bootstrap as AgentPreset["bootstrap"])) {
+		throw new Error(`${label}.presets.${name}.bootstrap is invalid.`);
+	}
+	assertPresetEnvironment(preset.env, name, label);
+}
+
+function assertPresetEnvironment(value: unknown, name: string, label: string): void {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`${label}.presets.${name}.env must be an object of strings.`);
+	}
+	for (const [key, envValue] of Object.entries(value)) {
+		if (!POSIX_ENV_NAME.test(key) || typeof envValue !== "string" || hasNul(envValue)) {
+			throw new Error(`${label}.presets.${name}.env must be an object of strings.`);
+		}
+	}
+}
+
 function assertAgentConfiguration(value: unknown, label = "Agent configuration"): asserts value is AgentConfiguration {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
 	const config = value as Partial<AgentConfiguration>;
@@ -63,32 +92,7 @@ function assertAgentConfiguration(value: unknown, label = "Agent configuration")
 		throw new Error(`${label}.selectedPreset must name a configured preset.`);
 	}
 
-	for (const [name, preset] of Object.entries(config.presets)) {
-		if (!SAFE_PRESET_NAME.test(name) || !preset || typeof preset !== "object" || Array.isArray(preset)) {
-			throw new Error(`${label}.presets entries must be named objects.`);
-		}
-		const candidate = preset as Partial<AgentPreset>;
-		if (typeof candidate.command !== "string" || !candidate.command.trim() || hasNul(candidate.command)) {
-			throw new Error(`${label}.presets.${name}.command must be a non-empty string.`);
-		}
-		if (typeof candidate.prepare !== "string" || hasNul(candidate.prepare)) {
-			throw new Error(`${label}.presets.${name}.prepare must be a string.`);
-		}
-		if (typeof candidate.worktree !== "boolean") {
-			throw new Error(`${label}.presets.${name}.worktree must be a boolean.`);
-		}
-		if (!BOOTSTRAP_TYPES.has(candidate.bootstrap as AgentPreset["bootstrap"])) {
-			throw new Error(`${label}.presets.${name}.bootstrap is invalid.`);
-		}
-		if (!candidate.env || typeof candidate.env !== "object" || Array.isArray(candidate.env)) {
-			throw new Error(`${label}.presets.${name}.env must be an object of strings.`);
-		}
-		for (const [key, envValue] of Object.entries(candidate.env)) {
-			if (!POSIX_ENV_NAME.test(key) || typeof envValue !== "string" || hasNul(envValue)) {
-				throw new Error(`${label}.presets.${name}.env must be an object of strings.`);
-			}
-		}
-	}
+	for (const [name, preset] of Object.entries(config.presets)) assertPreset(preset, name, label);
 }
 
 async function readConfiguration(path: string): Promise<AgentConfiguration | null> {

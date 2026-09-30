@@ -6,9 +6,9 @@ import { MemoryRouter } from "react-router-dom";
 import { type TaskDetail, toTaskDetail } from "../core/task-detail.ts";
 import type { Task } from "../types/index.ts";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
-import { apiClient } from "../web/lib/api.ts";
 import { TaskIdIndexProvider } from "../web/contexts/TaskIdIndexContext.tsx";
 import { ThemeProvider } from "../web/contexts/ThemeContext";
+import { apiClient } from "../web/lib/api.ts";
 
 const statuses = ["To Do", "In Progress", "Done"];
 
@@ -136,5 +136,4 @@ describe("task readiness badge against an optimistic edit", () => {
 			apiClient.updateTask = originalUpdateTask;
 		}
 	});
-
 });

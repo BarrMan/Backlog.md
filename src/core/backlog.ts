@@ -1,110 +1,50 @@
-import { mkdir, rename as moveFile, readFile, stat, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { stat } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import {
 	DEFAULT_DIRECTORIES,
-	DEFAULT_DONE_STATUS,
 	DEFAULT_INIT_CONFIG,
 	DEFAULT_RUNTIME_TASK_RESOLUTION_STRATEGY,
 	DEFAULT_STATUSES,
 	FALLBACK_STATUS,
 } from "../constants/index.ts";
-import {
-	type DraftFileReference,
-	DraftIdentityError,
-	DraftParseError,
-	FileSystem,
-	isConfigValueError,
-	isCreateLockError,
-	newTaskLockError,
-} from "../file-system/operations.ts";
-import { type GitBranchTip, type GitIndexEntry, GitOperations } from "../git/operations.ts";
-import { parseFrontmatter } from "../markdown/frontmatter.ts";
-import { parseTask } from "../markdown/parser.ts";
+import { type DraftFileReference, FileSystem, isConfigValueError } from "../file-system/operations.ts";
+import { type GitBranchTip, GitOperations } from "../git/operations.ts";
 import { assertValidChecklistMarks } from "../markdown/structured-sections.ts";
 import {
 	type AcceptanceCriterion,
 	type BacklogConfig,
 	type Decision,
-	DOCUMENT_TYPE_VALUES,
 	type Document,
 	type DocumentCreateInput,
-	type DocumentType,
 	type DocumentUpdateInput,
 	EntityType,
-	isLocalEditableTask,
 	type Milestone,
-	type SearchFilters,
 	type Task,
 	type TaskCreateInput,
-	type TaskListFilter,
 	type TaskUpdateInput,
 } from "../types/index.ts";
 import { normalizeAssignee } from "../utils/assignee.ts";
 import { formatStoredDate } from "../utils/date.ts";
 import { decisionIdKey } from "../utils/decision-id.ts";
-import { documentIdKey, findDocumentById, normalizeDocumentId } from "../utils/document-id.ts";
-import {
-	getDocumentSubPathFromRelativePath,
-	normalizeDocumentRelativePath,
-	normalizeDocumentSubPath,
-} from "../utils/document-path.ts";
-import { normalizeDueDate } from "../utils/due-date.ts";
+import { documentIdKey } from "../utils/document-id.ts";
+import { getDocumentSubPathFromRelativePath } from "../utils/document-path.ts";
 import {
 	type ContentIdentityReport,
 	type DraftIdentityFindings,
 	detectContentIdentityIssues,
 } from "../utils/duplicate-detection.ts";
-import { openInEditor } from "../utils/editor.ts";
-import { isAmbiguousIdError } from "../utils/entity-id.ts";
 import { findBacklogRoot } from "../utils/find-backlog-root.ts";
-import { generateNextDecisionId, generateNextDocId } from "../utils/id-generators.ts";
-import { createMilestoneFilterValueResolver } from "../utils/milestone-filter.ts";
-import {
-	buildGlobPattern,
-	buildIdRegex,
-	generateNextId as generateNextPrefixedId,
-	generateNextSubtaskId,
-	getPrefixForType,
-	normalizeId,
-} from "../utils/prefix-config.ts";
-import { formatValidPriorityValues, resolvePriorityValue } from "../utils/priority-config.ts";
-import {
-	formatValidProjectValues,
-	getProjectValues,
-	noProjectsConfiguredMessage,
-	resolveProjectValue,
-} from "../utils/project-config.ts";
+import { buildGlobPattern, buildIdRegex, normalizeId } from "../utils/prefix-config.ts";
 import { resolveRuntimeCwd } from "../utils/runtime-cwd.ts";
-import {
-	getCanonicalStatus as resolveCanonicalStatus,
-	getValidStatuses as resolveValidStatuses,
-} from "../utils/status.ts";
-import { executeStatusCallback } from "../utils/status-callback.ts";
-import {
-	buildDefinitionOfDoneItems,
-	normalizeStringList,
-	parseDelimitedStringList,
-	validateDependencies,
-} from "../utils/task-builders.ts";
-import { withoutVacatedTaskLinks } from "../utils/task-links.ts";
 import {
 	AmbiguousTaskIdError,
 	canonicalTaskId,
-	extractDraftIdFromFilename,
-	findDuplicateDraftFilenameGroups,
 	getTaskPath,
 	LOCAL_TASK_LOOKUP_HINT,
 	normalizeTaskId,
-	normalizeTaskIdentity,
-	taskIdsEqual,
 } from "../utils/task-path.ts";
-import { applyTaskFilters, createTaskSearchIndex } from "../utils/task-search.ts";
 import { sortByOrdinal } from "../utils/task-sorting.ts";
-import { attachSubtaskSummaries } from "../utils/task-subtasks.ts";
-import { formatValidTaskTypeValues, resolveTaskTypeValue } from "../utils/task-type-config.ts";
-import { upsertTaskUpdatedDate } from "../utils/task-updated-date.ts";
-import { getTerminalStatus, isTerminalStatus } from "../utils/terminal-status.ts";
-import { migrateConfig, needsMigration } from "./config-migration.ts";
+import { ensureConfigMigrated, readLegacyConfigContent } from "./config-migration-workflow.ts";
 import { ContentStore, type TaskCorpusSnapshot } from "./content-store.ts";
 import {
 	applyDuplicateTaskIdRepair,
@@ -113,59 +53,29 @@ import {
 	previewDuplicateTaskIdRepair,
 } from "./duplicate-task-repair.ts";
 import { planOrderedTaskPlacement } from "./ordered-task-move-planner.ts";
-import { migrateDraftPrefixes, needsDraftPrefixMigration } from "./prefix-migration.ts";
-import { calculateNewOrdinal, DEFAULT_ORDINAL_STEP, resolveOrdinalConflicts } from "./reorder.ts";
+import { migrateDraftPrefixes } from "./prefix-migration.ts";
+import { ProjectContentService } from "./project-content-service.ts";
+import { DEFAULT_ORDINAL_STEP, resolveOrdinalConflicts } from "./reorder.ts";
 import { SearchService } from "./search-service.ts";
 import {
-	completedTaskIdentityRecord,
-	TaskIdentityIndex,
-	type TaskIdentityRecord,
-	type TaskIdentityResolution,
-} from "./task-identity-index.ts";
+	type CreatedTaskRollbackResult,
+	type CreatedTaskWrite,
+	rollbackCreatedTask,
+} from "./task-creation-transaction.ts";
+import { TaskCreationService } from "./task-creation-workflow.ts";
+import { completedTaskIdentityRecord, TaskIdentityIndex, type TaskIdentityRecord } from "./task-identity-index.ts";
+import { TaskLifecycleService } from "./task-lifecycle-service.ts";
 import {
 	BranchTaskLoader,
 	type BranchTaskStateEntry,
 	getBranchHistoryCutoff,
 	getTaskLoadingMessage,
 } from "./task-loader.ts";
-import { applyTaskUpdate, assertSectionInputsSafe } from "./task-update/index.ts";
-
-interface BlessedScreen {
-	program: {
-		disableMouse(): void;
-		enableMouse(): void;
-		hideCursor(): void;
-		showCursor(): void;
-		input: NodeJS.EventEmitter;
-		pause?: () => (() => void) | undefined;
-		flush?: () => void;
-		put?: {
-			keypad_local?: () => void;
-			keypad_xmit?: () => void;
-		};
-	};
-	leave(): void;
-	enter(): void;
-	render(): void;
-	clearRegion(x1: number, x2: number, y1: number, y2: number): void;
-	width: number;
-	height: number;
-	emit(event: string): void;
-}
-
-interface CreatedTaskWrite {
-	filePath: string;
-	createdContent: Buffer;
-	previousPath: string | null;
-	previousContent: Buffer | null;
-	previousIndexEntries?: GitIndexEntry[];
-	generatedIndexEntries?: GitIndexEntry[];
-}
-
-interface CreatedTaskRollbackResult {
-	indexRestored: boolean;
-	workingPathRestored: boolean;
-}
+import { ProjectTaskMutations } from "./task-mutation-service.ts";
+import { type TaskQueryOptions, type TaskReadOptions, TaskReadSession } from "./task-query-workflow.ts";
+import { planTaskReorder } from "./task-reorder-plan.ts";
+import { type BlessedScreen, editTaskInTuiSession, type TuiTaskEditResult } from "./tui-task-edit-session.ts";
+import { VacatedTaskReferenceService } from "./vacated-task-reference-service.ts";
 
 interface MoveTasksPlan {
 	readonly movedTasks: Task[];
@@ -191,18 +101,9 @@ interface TaskCorpusLoadOptions {
 	forceRemoteRefresh?: boolean;
 }
 
-interface TaskQueryOptions {
-	filters?: TaskListFilter;
-	query?: string;
-	limit?: number;
-	includeCrossBranch?: boolean;
-	refreshCrossBranch?: boolean;
-}
+export type { TaskReadOptions } from "./task-query-workflow.ts";
 
-interface TaskReadOptions {
-	includeCrossBranch?: boolean;
-	refreshCrossBranch?: boolean;
-}
+class ProjectSessionDisposed extends Error {}
 
 interface ActiveBranchSnapshot {
 	branchTips: readonly GitBranchTip[];
@@ -212,68 +113,300 @@ interface ActiveBranchSnapshot {
 	settingsKey: string;
 }
 
+/** Owns all state invalidated when Core is pointed at another project root. */
+export class ProjectSession {
+	public readonly fs: FileSystem;
+	public readonly git: GitOperations;
+	public readonly branchTaskLoader: BranchTaskLoader;
+	public contentStore: ContentStore | undefined;
+	public searchService: SearchService | undefined;
+	public activeBranchFingerprint: string | null = null;
+	public activeBranchSnapshotPromise: {
+		generation: number;
+		settingsKey: string;
+		promise: Promise<ActiveBranchSnapshot>;
+	} | null = null;
+	public activeBranchRefreshPromise: Promise<void> | null = null;
+	public remoteRefRefreshPromise: Promise<void> | null = null;
+	public lastRemoteRefRefreshAt = 0;
+	private disposed = false;
+
+	constructor(
+		projectRoot: string,
+		public readonly generation: number,
+		private readonly enableWatchers: boolean,
+		private readonly loadContentStoreCorpus: (
+			progressCallback?: (message: string) => void,
+			options?: { publish?: boolean },
+		) => Promise<TaskCorpusSnapshot>,
+		private readonly loadOccupiedTaskIdsForAllocation: () => Promise<string[]>,
+	) {
+		this.fs = new FileSystem(projectRoot);
+		this.git = new GitOperations(projectRoot, null, () => this.fs.loadConfig());
+		this.branchTaskLoader = new BranchTaskLoader(this.git);
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		this.searchService?.dispose();
+		this.searchService = undefined;
+		this.disposeContentStore();
+	}
+
+	disposeContentStore(): void {
+		this.contentStore?.dispose();
+		this.contentStore = undefined;
+		this.activeBranchFingerprint = null;
+		this.activeBranchSnapshotPromise = null;
+		this.activeBranchRefreshPromise = null;
+		this.remoteRefRefreshPromise = null;
+		this.lastRemoteRefRefreshAt = 0;
+	}
+
+	/** A read belongs to this session only while it has not been disposed or repointed. */
+	isCurrent(generation: number, filesystem: FileSystem, backlogRoot: string): boolean {
+		return (
+			!this.disposed &&
+			generation === this.generation &&
+			filesystem === this.fs &&
+			backlogRoot === filesystem.backlogDir
+		);
+	}
+
+	isActiveContentStore(store: ContentStore): boolean {
+		return store === this.contentStore;
+	}
+
+	async getContentStore(progressCallback?: (message: string) => void): Promise<ContentStore> {
+		while (true) {
+			if (this.disposed) throw new ProjectSessionDisposed();
+			const { generation, fs: filesystem } = this;
+			const backlogRoot = filesystem.backlogDir;
+			let store = this.contentStore;
+			if (!store) {
+				store = new ContentStore(filesystem, this.loadContentStoreCorpus, this.enableWatchers);
+				this.contentStore = store;
+			}
+			try {
+				await store.ensureInitialized(progressCallback);
+			} catch (error) {
+				if (!this.isCurrent(generation, filesystem, backlogRoot) || store !== this.contentStore) continue;
+				throw error;
+			}
+			if (this.isCurrent(generation, filesystem, backlogRoot) && store === this.contentStore) return store;
+			if (this.disposed) throw new ProjectSessionDisposed();
+		}
+	}
+
+	async getSearchService(): Promise<SearchService> {
+		while (true) {
+			if (this.disposed) throw new ProjectSessionDisposed();
+			const { generation, fs: filesystem } = this;
+			const backlogRoot = filesystem.backlogDir;
+			const store = await this.getContentStore();
+			if (!this.isCurrent(generation, filesystem, backlogRoot) || store !== this.contentStore) continue;
+			let searchService = this.searchService;
+			if (!searchService) {
+				searchService = new SearchService(store);
+				this.searchService = searchService;
+			}
+			try {
+				await searchService.ensureInitialized();
+			} catch (error) {
+				if (
+					!this.isCurrent(generation, filesystem, backlogRoot) ||
+					store !== this.contentStore ||
+					searchService !== this.searchService
+				)
+					continue;
+				throw error;
+			}
+			if (
+				this.isCurrent(generation, filesystem, backlogRoot) &&
+				store === this.contentStore &&
+				searchService === this.searchService
+			) {
+				return searchService;
+			}
+		}
+	}
+
+	async refreshCachedTasksForCrossBranchRead(includeCrossBranch: boolean, storeAlreadyExisted: boolean): Promise<void> {
+		if (!storeAlreadyExisted || !this.enableWatchers || !includeCrossBranch || !this.contentStore) return;
+		await this.refreshTasksForTaskRead();
+	}
+
+	async getOccupiedTaskIdsForAllocation(): Promise<string[]> {
+		if (this.disposed) throw new ProjectSessionDisposed();
+		const ids = await this.loadOccupiedTaskIdsForAllocation();
+		if (this.disposed) throw new ProjectSessionDisposed();
+		return ids;
+	}
+
+	getActiveBranchSettings(config: BacklogConfig | null) {
+		const activeBranchDays = config?.activeBranchDays ?? DEFAULT_INIT_CONFIG.activeBranchDays;
+		const checkActiveBranches = config?.checkActiveBranches !== false;
+		const filesystemOnly = config?.filesystemOnly === true;
+		return {
+			checkActiveBranches,
+			activeBranchDays,
+			branchHistoryCutoff:
+				checkActiveBranches && !filesystemOnly ? (getBranchHistoryCutoff(activeBranchDays)?.getTime() ?? null) : null,
+			remoteOperations: config?.remoteOperations !== false,
+			filesystemOnly,
+			taskPrefix: config?.prefixes?.task ?? "task",
+			taskResolutionStrategy: config?.taskResolutionStrategy ?? DEFAULT_RUNTIME_TASK_RESOLUTION_STRATEGY,
+			statuses: config?.statuses ?? DEFAULT_STATUSES,
+			backlogDir: this.fs.backlogDirName,
+		};
+	}
+
+	async computeActiveBranchSnapshot(config: BacklogConfig | null): Promise<ActiveBranchSnapshot> {
+		const settings = this.getActiveBranchSettings(config);
+		const settingsKey = JSON.stringify(settings);
+		this.git.setConfig(config);
+		if (!settings.checkActiveBranches || settings.filesystemOnly) {
+			return {
+				branchTips: [],
+				currentBranch: "",
+				fingerprint: settingsKey,
+				stabilityFingerprint: settingsKey,
+				settingsKey,
+			};
+		}
+		const branchTips = Object.freeze(
+			(await this.git.listRecentBranchTips(settings.activeBranchDays))
+				.map((tip) => Object.freeze({ ...tip }))
+				.sort(
+					(left, right) =>
+						left.name.localeCompare(right.name) ||
+						left.commit.localeCompare(right.commit) ||
+						Number(left.current) - Number(right.current),
+				),
+		);
+		const currentBranch =
+			branchTips.find((tip) => tip.current && !tip.name.startsWith("origin/"))?.name ??
+			(await this.git.getCurrentBranch()).trim();
+		const fingerprintTips = branchTips.map((tip) => (tip.current ? { ...tip, commit: "working-copy" } : tip));
+		return {
+			branchTips,
+			currentBranch,
+			fingerprint: JSON.stringify({ ...settings, currentBranch, branchTips: fingerprintTips }),
+			stabilityFingerprint: JSON.stringify({ ...settings, currentBranch, branchTips }),
+			settingsKey,
+		};
+	}
+
+	async getActiveBranchSnapshot(config: BacklogConfig | null): Promise<ActiveBranchSnapshot> {
+		const settings = this.getActiveBranchSettings(config);
+		const settingsKey = JSON.stringify(settings);
+		if (this.activeBranchSnapshotPromise?.settingsKey === settingsKey)
+			return await this.activeBranchSnapshotPromise.promise;
+		const promise = this.computeActiveBranchSnapshot(config);
+		const pending = { generation: this.generation, settingsKey, promise };
+		this.activeBranchSnapshotPromise = pending;
+		const clear = () => {
+			if (this.activeBranchSnapshotPromise === pending) this.activeBranchSnapshotPromise = null;
+		};
+		void promise.then(clear, clear);
+		return await promise;
+	}
+
+	async refreshRemoteRefsForTaskRead(config: BacklogConfig | null, options?: { force?: boolean }): Promise<void> {
+		if (config?.checkActiveBranches === false || config?.remoteOperations === false || config?.filesystemOnly === true)
+			return;
+		if (!options?.force && Date.now() - this.lastRemoteRefRefreshAt < REMOTE_REF_REFRESH_INTERVAL_MS) return;
+		if (options?.force && this.remoteRefRefreshPromise) {
+			await this.remoteRefRefreshPromise;
+			if (this.disposed) return;
+		}
+		if (!this.remoteRefRefreshPromise) {
+			const git = this.git;
+			const refresh = (async () => {
+				git.setConfig(config);
+				try {
+					await git.fetch();
+				} catch (error) {
+					console.error("Failed to refresh remote refs:", error);
+				} finally {
+					if (this.git === git) this.lastRemoteRefRefreshAt = Date.now();
+				}
+			})();
+			this.remoteRefRefreshPromise = refresh;
+			const clear = () => {
+				if (this.remoteRefRefreshPromise === refresh) this.remoteRefRefreshPromise = null;
+			};
+			void refresh.then(clear, clear);
+		}
+		await this.remoteRefRefreshPromise;
+	}
+
+	/** Refreshes a warm cross-branch corpus only when its branch snapshot changed. */
+	async refreshTasksForTaskRead(): Promise<boolean> {
+		while (true) {
+			if (this.disposed) throw new ProjectSessionDisposed();
+			const { generation, fs: filesystem, git } = this;
+			const backlogRoot = filesystem.backlogDir;
+			const projectChanged = () => !this.isCurrent(generation, filesystem, backlogRoot) || git !== this.git;
+			const config = await filesystem.loadConfig();
+			if (projectChanged()) {
+				if (this.disposed) throw new ProjectSessionDisposed();
+				continue;
+			}
+			await this.refreshRemoteRefsForTaskRead(config);
+			if (projectChanged()) {
+				if (this.disposed) throw new ProjectSessionDisposed();
+				continue;
+			}
+			const snapshot = await this.getActiveBranchSnapshot(config);
+			if (projectChanged()) {
+				if (this.disposed) throw new ProjectSessionDisposed();
+				continue;
+			}
+			if (snapshot.fingerprint === this.activeBranchFingerprint) {
+				if (this.contentStore?.isInitialized()) await this.contentStore.refreshLocalTaskCorpus();
+				if (projectChanged()) continue;
+				return false;
+			}
+			const joinedExistingRefresh = this.activeBranchRefreshPromise !== null;
+			if (!this.activeBranchRefreshPromise) {
+				const refreshExistingStore = this.contentStore !== undefined;
+				const refresh = (async () => {
+					const store = await this.getContentStore();
+					if (refreshExistingStore) await store.refreshTasks();
+				})();
+				this.activeBranchRefreshPromise = refresh;
+				const clear = () => {
+					if (this.activeBranchRefreshPromise === refresh) this.activeBranchRefreshPromise = null;
+				};
+				void refresh.then(clear, clear);
+			}
+			await this.activeBranchRefreshPromise;
+			if (projectChanged()) {
+				if (this.disposed) throw new ProjectSessionDisposed();
+				continue;
+			}
+			if (joinedExistingRefresh && this.activeBranchFingerprint !== snapshot.fingerprint) continue;
+			return true;
+		}
+	}
+
+	publishTaskTransition(taskId: string, task?: Task): void {
+		this.contentStore?.transitionTask(taskId, task);
+	}
+
+	publishActiveTask(task: Task): void {
+		this.contentStore?.upsertTask(task);
+	}
+}
+
 class TaskCorpusSnapshotRetry extends Error {
 	constructor(readonly snapshot?: ActiveBranchSnapshot) {
 		super("Project root or active branch refs changed while tasks were loading");
 	}
 }
 
-export type TuiTaskEditFailureReason =
-	| "not_found"
-	| "read_only"
-	| "editor_failed"
-	| "identity_conflict"
-	| "unreadable"
-	| "ambiguous";
-
-export interface TuiTaskEditResult {
-	changed: boolean;
-	task?: Task;
-	reason?: TuiTaskEditFailureReason;
-}
-
-type TuiTaskEditSession = {
-	task: Task;
-	taskFilePath: string | null;
-	filePath: string;
-};
-
-/** Sanitized copies of the records that referenced a task ID being vacated, by corpus. */
-type VacatedIdCleanup = {
-	active: Task[];
-	completed: Task[];
-};
-
-function vacatedIdCleanupTargets(cleanup: VacatedIdCleanup): Task[] {
-	return [...cleanup.active, ...cleanup.completed];
-}
-
-function sanitizeVacatedTaskLinks(tasks: Task[], vacatedTaskId: string): Task[] {
-	return tasks
-		.map((task) => withoutVacatedTaskLinks(task, vacatedTaskId))
-		.filter((task): task is Task => task !== null);
-}
-
-/** How many times a vacating operation re-takes its locks before giving up on a stable set. */
-const VACATED_ID_CLEANUP_LOCK_ATTEMPTS = 5;
-
-/**
- * Tag a failure that happened after the record had already been moved, so callers report the state
- * the project is actually in instead of an error that reads as "nothing happened" and invites a
- * retry of a mutation that already ran.
- */
-function markRecordAlreadyMoved(
-	error: unknown,
-	state: "archiveState" | "demotionState",
-	demotionFailureCause?: "cleanup" | "commit",
-): Error {
-	const failure = error instanceof Error ? error : new Error(String(error));
-	(failure as Error & Record<string, unknown>)[state] = "moved";
-	if (state === "demotionState" && demotionFailureCause) {
-		(failure as Error & Record<string, unknown>).demotionFailureCause = demotionFailureCause;
-	}
-	return failure;
-}
+export type { TuiTaskEditResult } from "./tui-task-edit-session.ts";
 
 /**
  * Outcome of an operation that vacates a task ID. `cleanedTaskIds` names the records that lost a
@@ -287,59 +420,6 @@ export interface VacatedTaskResult {
 interface TaskEditResult {
 	task: Task;
 	cleanedTaskIds: string[];
-}
-
-function buildUpdatedDateComparableTask(task: Task): Record<string, unknown> {
-	return {
-		id: task.id,
-		title: task.title,
-		status: task.status,
-		assignee: task.assignee ?? [],
-		reporter: task.reporter,
-		createdDate: task.createdDate,
-		dueDate: task.dueDate,
-		labels: task.labels ?? [],
-		milestone: task.milestone,
-		dependencies: task.dependencies ?? [],
-		references: task.references ?? [],
-		documentation: task.documentation ?? [],
-		modifiedFiles: task.modifiedFiles ?? [],
-		rawContent: task.rawContent ?? "",
-		description: task.description,
-		implementationPlan: task.implementationPlan,
-		implementationNotes: task.implementationNotes,
-		comments: task.comments ?? [],
-		finalSummary: task.finalSummary,
-		acceptanceCriteriaItems: task.acceptanceCriteriaItems ?? [],
-		definitionOfDoneItems: task.definitionOfDoneItems ?? [],
-		parentTaskId: task.parentTaskId,
-		subtasks: task.subtasks ?? [],
-		priority: task.priority,
-		type: task.type,
-		project: task.project,
-		onStatusChange: task.onStatusChange,
-	};
-}
-
-function hasUpdatedDateRelevantChanges(originalTask: Task | null, nextTask: Task): boolean {
-	if (!originalTask) {
-		return true;
-	}
-
-	return (
-		JSON.stringify(buildUpdatedDateComparableTask(originalTask)) !==
-		JSON.stringify(buildUpdatedDateComparableTask(nextTask))
-	);
-}
-
-function normalizeDocumentTypeInput(type: unknown): DocumentType | undefined {
-	if (type === undefined) {
-		return undefined;
-	}
-	if (typeof type === "string" && (DOCUMENT_TYPE_VALUES as readonly string[]).includes(type)) {
-		return type as DocumentType;
-	}
-	throw new Error(`Document type must be one of: ${DOCUMENT_TYPE_VALUES.join(", ")}.`);
 }
 
 /** Dependencies are validated against the working copy on both the create and the edit path. */
@@ -368,41 +448,77 @@ function normalizeTargetMilestone(targetMilestone: string | null | undefined): s
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-export class TaskArchiveStatusError extends Error {
-	constructor(taskId: string, terminalStatus: string) {
-		super(
-			`Task ${taskId} is ${terminalStatus}. Use Complete to move finished work to completed storage and preserve its links. Use: backlog task complete ${taskId}`,
-		);
-		this.name = "TaskArchiveStatusError";
-	}
-}
+export { TaskArchiveStatusError } from "./task-lifecycle-service.ts";
 
 export class Core {
-	public fs: FileSystem;
-	public git: GitOperations;
-	private contentStore?: ContentStore;
-	private searchService?: SearchService;
+	private session: ProjectSession;
+	private readonly projectContent = new ProjectContentService(this);
 	private readonly enableWatchers: boolean;
-	private branchTaskLoader: BranchTaskLoader;
-	private projectGeneration = 0;
-	private activeBranchFingerprint: string | null = null;
-	private activeBranchSnapshotPromise: {
-		generation: number;
-		settingsKey: string;
-		promise: Promise<ActiveBranchSnapshot>;
-	} | null = null;
-	private activeBranchRefreshPromise: Promise<void> | null = null;
-	private remoteRefRefreshPromise: Promise<void> | null = null;
-	private lastRemoteRefRefreshAt = 0;
+	private vacatedTaskReferences: VacatedTaskReferenceService;
+	private taskMutations: ProjectTaskMutations;
+	private taskLifecycle: TaskLifecycleService;
+
+	get fs(): FileSystem {
+		return this.session.fs;
+	}
+
+	get git(): GitOperations {
+		return this.session.git;
+	}
+
+	private get contentStore(): ContentStore | undefined {
+		return this.session.contentStore;
+	}
+
+	private set contentStore(store: ContentStore | undefined) {
+		this.session.contentStore = store;
+	}
+
+	private get searchService(): SearchService | undefined {
+		return this.session.searchService;
+	}
+
+	private set searchService(service: SearchService | undefined) {
+		this.session.searchService = service;
+	}
+
+	private get branchTaskLoader(): BranchTaskLoader {
+		return this.session.branchTaskLoader;
+	}
+
+	private get projectGeneration(): number {
+		return this.session.generation;
+	}
+
+	private get activeBranchFingerprint(): string | null {
+		return this.session.activeBranchFingerprint;
+	}
+
+	private set activeBranchFingerprint(value: string | null) {
+		this.session.activeBranchFingerprint = value;
+	}
 
 	constructor(projectRoot: string, options?: { enableWatchers?: boolean }) {
-		this.fs = new FileSystem(projectRoot);
-		this.git = new GitOperations(projectRoot, null, () => this.fs.loadConfig());
-		this.branchTaskLoader = new BranchTaskLoader(this.git);
-		// Disable watchers by default for CLI commands (non-interactive)
-		// Interactive modes (TUI, browser, MCP) should explicitly pass enableWatchers: true
 		this.enableWatchers = options?.enableWatchers ?? false;
+		this.session = this.createProjectSession(projectRoot, 0);
+		this.vacatedTaskReferences = new VacatedTaskReferenceService(this.fs, () => this.contentStore);
+		this.taskMutations = new ProjectTaskMutations(this.fs, this.git, this.session);
+		this.taskLifecycle = this.createTaskLifecycleService();
 		// Note: Config is loaded lazily when needed since constructor can't be async
+	}
+
+	private createProjectSession(projectRoot: string, generation: number): ProjectSession {
+		return new ProjectSession(
+			projectRoot,
+			generation,
+			this.enableWatchers,
+			(callback, options) => this.loadContentStoreCorpus(callback, options),
+			() => this.getActiveAndCompletedTaskIds(),
+		);
+	}
+
+	private createTaskLifecycleService(): TaskLifecycleService {
+		return new TaskLifecycleService(this.fs, this.git, this.session, this.taskMutations, this.vacatedTaskReferences);
 	}
 
 	private async buildTaskIdentityIndex(
@@ -445,7 +561,7 @@ export class Core {
 	}
 
 	async withCreateLock<T>(fn: () => Promise<T>): Promise<T> {
-		return await this.fs.withCreateLock(fn);
+		return await this.taskMutations.withCreateLock(fn);
 	}
 
 	async previewDuplicateTaskIdRepair(options: { includeBranches?: boolean } = {}): Promise<DuplicateRepairPlan> {
@@ -499,7 +615,7 @@ export class Core {
 		};
 	}
 
-	private async resolveCreateOrdinal(inputOrdinal: number | undefined, isDraft: boolean): Promise<number | undefined> {
+	async resolveCreateOrdinal(inputOrdinal: number | undefined, isDraft: boolean): Promise<number | undefined> {
 		if (typeof inputOrdinal === "number") {
 			return inputOrdinal;
 		}
@@ -521,576 +637,112 @@ export class Core {
 
 	async getContentStore(progressCallback?: (message: string) => void): Promise<ContentStore> {
 		while (true) {
-			const generation = this.projectGeneration;
-			const filesystem = this.fs;
-			const backlogRoot = filesystem.backlogDir;
-			let store = this.contentStore;
-			if (!store) {
-				// Use loadTasks as the task loader to include cross-branch tasks
-				store = new ContentStore(
-					filesystem,
-					(callback, options) => this.loadContentStoreCorpus(callback, options),
-					this.enableWatchers,
-				);
-				this.contentStore = store;
-			}
-
+			const session = this.session;
 			try {
-				await store.ensureInitialized(progressCallback);
+				const store = await session.getContentStore(progressCallback);
+				if (session === this.session) return store;
 			} catch (error) {
-				if (
-					generation !== this.projectGeneration ||
-					filesystem !== this.fs ||
-					backlogRoot !== filesystem.backlogDir ||
-					store !== this.contentStore
-				) {
-					continue;
-				}
-				throw error;
-			}
-			if (
-				generation === this.projectGeneration &&
-				filesystem === this.fs &&
-				backlogRoot === filesystem.backlogDir &&
-				store === this.contentStore
-			) {
-				return store;
+				if (!(error instanceof ProjectSessionDisposed) || session === this.session) throw error;
 			}
 		}
 	}
 
 	async getSearchService(): Promise<SearchService> {
 		while (true) {
-			const generation = this.projectGeneration;
-			const filesystem = this.fs;
-			const backlogRoot = filesystem.backlogDir;
-			const store = await this.getContentStore();
-			if (
-				generation !== this.projectGeneration ||
-				filesystem !== this.fs ||
-				backlogRoot !== filesystem.backlogDir ||
-				store !== this.contentStore
-			) {
-				continue;
-			}
-			let searchService = this.searchService;
-			if (!searchService) {
-				searchService = new SearchService(store);
-				this.searchService = searchService;
-			}
+			const session = this.session;
 			try {
-				await searchService.ensureInitialized();
+				const search = await session.getSearchService();
+				if (session === this.session) return search;
 			} catch (error) {
-				if (
-					generation !== this.projectGeneration ||
-					filesystem !== this.fs ||
-					backlogRoot !== filesystem.backlogDir ||
-					store !== this.contentStore ||
-					searchService !== this.searchService
-				) {
-					continue;
-				}
-				throw error;
-			}
-			if (
-				generation === this.projectGeneration &&
-				filesystem === this.fs &&
-				backlogRoot === filesystem.backlogDir &&
-				store === this.contentStore &&
-				searchService === this.searchService
-			) {
-				return searchService;
+				if (!(error instanceof ProjectSessionDisposed) || session === this.session) throw error;
 			}
 		}
 	}
 
-	private async refreshCachedTasksForCrossBranchRead(
-		includeCrossBranch: boolean,
-		storeAlreadyExisted: boolean,
-	): Promise<void> {
-		const store = this.contentStore;
-		if (!storeAlreadyExisted || !this.enableWatchers || !includeCrossBranch || !store) {
-			return;
-		}
-
-		await this.refreshTasksForTaskRead();
+	private getActiveBranchSettings(config: BacklogConfig | null) {
+		return this.session.getActiveBranchSettings(config);
 	}
 
-	private getActiveBranchSettings(config: BacklogConfig | null, filesystem = this.fs) {
-		const activeBranchDays = config?.activeBranchDays ?? DEFAULT_INIT_CONFIG.activeBranchDays;
-		const checkActiveBranches = config?.checkActiveBranches !== false;
-		const filesystemOnly = config?.filesystemOnly === true;
-		return {
-			checkActiveBranches,
-			activeBranchDays,
-			branchHistoryCutoff:
-				checkActiveBranches && !filesystemOnly ? (getBranchHistoryCutoff(activeBranchDays)?.getTime() ?? null) : null,
-			remoteOperations: config?.remoteOperations !== false,
-			filesystemOnly,
-			taskPrefix: config?.prefixes?.task ?? "task",
-			taskResolutionStrategy: config?.taskResolutionStrategy ?? DEFAULT_RUNTIME_TASK_RESOLUTION_STRATEGY,
-			statuses: config?.statuses ?? DEFAULT_STATUSES,
-			backlogDir: filesystem.backlogDirName,
-		};
+	private async computeActiveBranchSnapshot(config: BacklogConfig | null): Promise<ActiveBranchSnapshot> {
+		return await this.session.computeActiveBranchSnapshot(config);
 	}
 
-	private async computeActiveBranchSnapshot(
-		config: BacklogConfig | null,
-		filesystem = this.fs,
-		git = this.git,
-	): Promise<ActiveBranchSnapshot> {
-		const settings = {
-			...this.getActiveBranchSettings(config, filesystem),
-		};
-		const settingsKey = JSON.stringify(settings);
-
-		git.setConfig(config);
-		if (!settings.checkActiveBranches || settings.filesystemOnly) {
-			return {
-				branchTips: [],
-				currentBranch: "",
-				fingerprint: settingsKey,
-				stabilityFingerprint: settingsKey,
-				settingsKey,
-			};
-		}
-
-		const branchTips = Object.freeze(
-			(await git.listRecentBranchTips(settings.activeBranchDays))
-				.map((tip) => Object.freeze({ ...tip }))
-				.sort(
-					(left, right) =>
-						left.name.localeCompare(right.name) ||
-						left.commit.localeCompare(right.commit) ||
-						Number(left.current) - Number(right.current),
-				),
-		);
-		const markedCurrentBranch = branchTips.find((tip) => tip.current && !tip.name.startsWith("origin/"))?.name;
-		const currentBranch = markedCurrentBranch ?? (await git.getCurrentBranch()).trim();
-		const fingerprintTips = branchTips.map((tip) => (tip.current ? { ...tip, commit: "working-copy" } : tip));
-		return {
-			branchTips,
-			currentBranch,
-			fingerprint: JSON.stringify({ ...settings, currentBranch, branchTips: fingerprintTips }),
-			stabilityFingerprint: JSON.stringify({ ...settings, currentBranch, branchTips }),
-			settingsKey,
-		};
-	}
-
-	private async getActiveBranchSnapshot(
-		config?: BacklogConfig | null,
-		generation = this.projectGeneration,
-		filesystem = this.fs,
-		git = this.git,
-	): Promise<ActiveBranchSnapshot> {
-		const loadedConfig = config === undefined ? await filesystem.loadConfig() : config;
-		const settingsKey = JSON.stringify(this.getActiveBranchSettings(loadedConfig, filesystem));
-		if (
-			this.activeBranchSnapshotPromise?.generation !== generation ||
-			this.activeBranchSnapshotPromise.settingsKey !== settingsKey
-		) {
-			const snapshotPromise = this.computeActiveBranchSnapshot(loadedConfig, filesystem, git);
-			const pending = { generation, settingsKey, promise: snapshotPromise };
-			this.activeBranchSnapshotPromise = pending;
-			const clearSnapshotPromise = () => {
-				if (this.activeBranchSnapshotPromise === pending) this.activeBranchSnapshotPromise = null;
-			};
-			void snapshotPromise.then(clearSnapshotPromise, clearSnapshotPromise);
-		}
-		return await this.activeBranchSnapshotPromise.promise;
+	private async getActiveBranchSnapshot(config?: BacklogConfig | null): Promise<ActiveBranchSnapshot> {
+		return await this.session.getActiveBranchSnapshot(config ?? (await this.fs.loadConfig()));
 	}
 
 	private async refreshRemoteRefsForTaskRead(
 		config: BacklogConfig | null,
-		git = this.git,
 		options?: { force?: boolean },
 	): Promise<void> {
-		if (git !== this.git) return;
-		if (
-			config?.checkActiveBranches === false ||
-			config?.remoteOperations === false ||
-			config?.filesystemOnly === true
-		) {
-			return;
-		}
-		// Reads may reuse a recent fetch, but task ID allocation may not: an ID that
-		// looks free only because remote refs are up to a minute old is an ID another
-		// clone has already published.
-		const force = options?.force === true;
-		if (!force && Date.now() - this.lastRemoteRefRefreshAt < REMOTE_REF_REFRESH_INTERVAL_MS) {
-			return;
-		}
-
-		// A forced request must observe refs from a fetch that started after the request
-		// arrived. Joining a refresh that was already in flight is not enough: it captured
-		// remote state before this request, so a push landing while it runs stays invisible
-		// and allocation can hand out an ID another clone already published. Waiting that
-		// refresh out first leaves the slot empty, so the fetch joined below always starts
-		// afterwards. A non-forced request keeps the plain join-or-start behavior.
-		if (force && this.remoteRefRefreshPromise) {
-			await this.remoteRefRefreshPromise;
-			// The project may have been re-pointed while we waited: reinitializeProjectRoot
-			// clears this slot and installs a new GitOperations. Starting a fetch for the old
-			// project now would publish it into the new project's slot, where a new-project
-			// read could join it and skip the refresh it actually needs.
-			if (git !== this.git) return;
-		}
-
-		if (!this.remoteRefRefreshPromise) {
-			const refreshPromise = (async () => {
-				git.setConfig(config);
-				try {
-					await git.fetch();
-				} catch (error) {
-					console.error("Failed to refresh remote refs:", error);
-				} finally {
-					if (this.git === git) this.lastRemoteRefRefreshAt = Date.now();
-				}
-			})();
-			this.remoteRefRefreshPromise = refreshPromise;
-			const clearRefreshPromise = () => {
-				if (this.remoteRefRefreshPromise === refreshPromise) this.remoteRefRefreshPromise = null;
-			};
-			void refreshPromise.then(clearRefreshPromise, clearRefreshPromise);
-		}
-
-		await this.remoteRefRefreshPromise;
+		await this.session.refreshRemoteRefsForTaskRead(config, options);
 	}
 
 	/** Refresh the existing cross-branch store only when relevant config or refs changed. */
 	async refreshTasksForTaskRead(): Promise<boolean> {
-		while (true) {
-			const generation = this.projectGeneration;
-			const filesystem = this.fs;
-			const git = this.git;
-			const backlogRoot = filesystem.backlogDir;
-			const projectChanged = () =>
-				generation !== this.projectGeneration ||
-				filesystem !== this.fs ||
-				git !== this.git ||
-				backlogRoot !== filesystem.backlogDir;
-			const config = await filesystem.loadConfig();
-			if (projectChanged()) continue;
-			await this.refreshRemoteRefsForTaskRead(config, git);
-			if (projectChanged()) continue;
-			const snapshot = await this.getActiveBranchSnapshot(config, generation, filesystem, git);
-			if (projectChanged()) continue;
-			if (snapshot.fingerprint === this.activeBranchFingerprint) {
-				const store = this.contentStore;
-				if (store?.isInitialized()) await store.refreshLocalTaskCorpus();
-				if (projectChanged()) continue;
-				return false;
-			}
-
-			const joinedExistingRefresh = this.activeBranchRefreshPromise !== null;
-			if (!this.activeBranchRefreshPromise) {
-				const refreshExistingStore = this.contentStore !== undefined;
-				const refreshPromise = (async () => {
-					const store = await this.getContentStore();
-					if (refreshExistingStore) await store.refreshTasks();
-				})();
-				this.activeBranchRefreshPromise = refreshPromise;
-				const clearRefreshPromise = () => {
-					if (this.activeBranchRefreshPromise === refreshPromise) {
-						this.activeBranchRefreshPromise = null;
-					}
-				};
-				void refreshPromise.then(clearRefreshPromise, clearRefreshPromise);
-			}
-
-			const refreshPromise = this.activeBranchRefreshPromise;
-			await refreshPromise;
-			if (projectChanged()) continue;
-			if (joinedExistingRefresh && this.activeBranchFingerprint !== snapshot.fingerprint) continue;
-			return true;
-		}
+		return await this.session.refreshTasksForTaskRead();
 	}
 
-	private filterLocalEditableTasks(tasks: Task[]): Task[] {
-		return tasks.filter(isLocalEditableTask);
+	async requireCanonicalStatus(status: string): Promise<string> {
+		return await this.taskMutations.requireCanonicalStatus(status);
 	}
 
-	private async requireCanonicalStatus(status: string): Promise<string> {
-		const canonical = await resolveCanonicalStatus(status, this);
-		if (canonical) {
-			return canonical;
-		}
-		const validStatuses = await resolveValidStatuses(this);
-		throw new Error(`Invalid status: ${status}. Valid statuses are: ${validStatuses.join(", ")}`);
+	async normalizePriority(value: string | undefined): Promise<string | undefined> {
+		return await this.taskMutations.normalizePriority(value);
 	}
 
-	private async normalizePriority(value: string | undefined): Promise<string | undefined> {
-		if (value === undefined || value.trim() === "") {
-			return undefined;
-		}
-		const config = await this.fs.loadConfig();
-		const normalized = resolvePriorityValue(value, config);
-		if (!normalized) {
-			throw new Error(`Invalid priority: ${value}. Valid values are: ${formatValidPriorityValues(config)}`);
-		}
-		return normalized;
+	async normalizeTaskType(value: string | undefined): Promise<string | undefined> {
+		return await this.taskMutations.normalizeTaskType(value);
 	}
 
-	private async normalizeTaskType(value: string | undefined): Promise<string | undefined> {
-		if (value === undefined || value === "") {
-			return undefined;
-		}
-		const config = await this.fs.loadConfig();
-		const canonical = resolveTaskTypeValue(value, config);
-		if (!canonical) {
-			throw new Error(`Invalid type: ${value}. Valid types are: ${formatValidTaskTypeValues(config)}`);
-		}
-		return canonical;
+	async normalizeProject(value: string | undefined): Promise<string | undefined> {
+		return await this.taskMutations.normalizeProject(value);
 	}
 
-	private async normalizeProject(value: string | undefined): Promise<string | undefined> {
-		if (value === undefined || value === "") {
-			return undefined;
-		}
-		const config = await this.fs.loadConfig();
-		const configuredProjects = getProjectValues(config);
-		if (configuredProjects.length === 0) {
-			throw new Error(noProjectsConfiguredMessage(this.fs.configFilePath));
-		}
-		const canonical = resolveProjectValue(value, config);
-		if (!canonical) {
-			throw new Error(`Invalid project: ${value}. Valid projects are: ${formatValidProjectValues(config)}`);
-		}
-		return canonical;
+	formatMissingDependenciesError(invalid: string[]): Error {
+		return formatMissingDependenciesError(invalid);
 	}
 
-	/**
-	 * Collect the records that name a task ID which archiving or demoting is about to vacate.
-	 *
-	 * Both operations free the numeric slot for the allocator, so a reference left behind stops
-	 * meaning what it said: once the ID is handed to the next created task, the stale reference
-	 * silently resolves to an unrelated task instead of failing closed. The scan covers the active
-	 * working copy and the completed corpus, because a completed record is still read by the
-	 * dependency graph. Drafts keep their references: they are not part of either corpus, and
-	 * archive has never touched them.
-	 */
-	private async collectVacatedIdCleanup(vacatedTaskId: string): Promise<VacatedIdCleanup> {
-		const [activeTasks, completedTasks] = await Promise.all([this.fs.listTasks(), this.fs.listCompletedTasks()]);
-		const others = (tasks: Task[]) => tasks.filter((task) => !taskIdsEqual(task.id, vacatedTaskId));
-		return {
-			active: sanitizeVacatedTaskLinks(others(activeTasks), vacatedTaskId),
-			completed: sanitizeVacatedTaskLinks(others(completedTasks), vacatedTaskId),
-		};
+	publishTaskTransition(taskId: string, task?: Task): void {
+		this.session.publishTaskTransition(taskId, task);
 	}
 
-	/**
-	 * Run a vacating operation while holding the record's lock and the lock of every task that
-	 * references the ID it is about to free.
-	 *
-	 * The set cannot be known without reading the corpus, and a set read before the locks are held
-	 * is only a guess: a dependent edited in that window would be rewritten from the pre-edit
-	 * snapshot, losing that edit, and a task that started referencing the ID in that window would
-	 * not be locked and would keep the reference the operation exists to remove. So the scan is
-	 * repeated inside the locks, and a scan naming a task the held locks do not cover releases
-	 * them and runs again over the wider set. Widening only ever adds tasks, and the locks are
-	 * always taken through {@link FileSystem.withTaskLocks}, which sorts them, so retrying
-	 * cannot deadlock against another operation. `run` therefore only ever sees a set that was
-	 * read, and is locked, as one consistent state.
-	 *
-	 * What this does not close: a task that starts referencing the ID after that final in-lock
-	 * scan cannot be locked, because it was not yet a dependent when the set was fixed, so it
-	 * keeps its reference. Locking cannot close that on its own without a corpus-wide write lock,
-	 * and vacating before the scan does not close it either: an archived ID still resolves as a
-	 * dependency target by design, so the write that adds it is still accepted after the move.
-	 * The stale reference that results is not silent - it renders as an unknown task ID until the
-	 * allocator hands the number out again.
-	 */
-	private async withVacatedIdCleanup<T>(
-		target: Pick<Task, "id" | "filePath">,
-		vacatedTaskId: string,
-		run: (cleanup: VacatedIdCleanup) => Promise<T>,
-	): Promise<T> {
-		let candidates = vacatedIdCleanupTargets(await this.collectVacatedIdCleanup(vacatedTaskId));
-
-		for (let attempt = 0; attempt < VACATED_ID_CLEANUP_LOCK_ATTEMPTS; attempt++) {
-			// Use the same identity relation as the corpus scan. In particular, a bare ID and the
-			// configured-prefix spelling it resolves against must not cause pointless widening.
-			const coversLock = (task: Task) => candidates.some((candidate) => taskIdsEqual(candidate.id, task.id));
-			const outcome = await this.fs.withTaskLocks(
-				[target, ...candidates],
-				async (): Promise<{ value: T } | { widened: Task[] }> => {
-					const cleanup = await this.collectVacatedIdCleanup(vacatedTaskId);
-					const targets = vacatedIdCleanupTargets(cleanup);
-					if (targets.some((task) => !coversLock(task))) {
-						return { widened: targets };
-					}
-					return { value: await run(cleanup) };
-				},
-			);
-			if ("value" in outcome) return outcome.value;
-			candidates = outcome.widened;
-		}
-
-		throw new Error(
-			`Could not take a stable set of task locks to clean references to ${vacatedTaskId}. Retry once the tasks referencing it stop changing.`,
-		);
+	publishActiveTask(task: Task): void {
+		this.session.publishActiveTask(task);
 	}
 
-	/**
-	 * Write the sanitized records. Callers hold the task locks for every one of them, taken with
-	 * the operation's own lock so the mutation is one span.
-	 *
-	 * Every record is written to the path it was selected from, never through {@link updateTask}:
-	 * that path re-resolves the record by ID, which throws on a contested identity and would fail
-	 * the cleanup after the target had already been vacated. The scan already chose the exact files,
-	 * and a completed record must not go through {@link updateTask} anyway - it would not be found
-	 * in the active corpus and the write would look like a brand-new task whose status just changed.
-	 */
-	private async writeVacatedIdCleanup(cleanup: VacatedIdCleanup): Promise<{
-		cleanedTaskIds: string[];
-		filePaths: string[];
-	}> {
-		const filePaths: string[] = [];
-		const updatedDate = formatStoredDate();
-		const writeAll = async () => {
-			for (const task of cleanup.active) {
-				const updated = { ...task, updatedDate };
-				const savedPath = await this.fs.saveTask(updated);
-				filePaths.push(savedPath);
-				this.contentStore?.upsertTask({ ...updated, filePath: savedPath });
-			}
-			for (const task of cleanup.completed) {
-				const updated = { ...task, updatedDate };
-				const savedPath = await this.fs.saveTask(updated);
-				filePaths.push(savedPath);
-				// The record stays completed, with the reference gone. Refresh exactly this file in any
-				// in-process ContentStore: a record elsewhere claiming the same ID is a conflict this
-				// cleanup has no business dissolving.
-				this.contentStore?.refreshCompletedTask({ ...updated, filePath: savedPath });
-			}
-		};
-		// One notification for the whole cleanup, as the bulk writer does for a batch of edits.
-		if (this.contentStore) await this.contentStore.batchTaskUpdates(writeAll);
-		else await writeAll();
-		return { cleanedTaskIds: vacatedIdCleanupTargets(cleanup).map((task) => task.id), filePaths };
-	}
-
-	private async filterTaskQueryResults(
-		collection: Task[],
-		options: TaskQueryOptions,
-		filesystem: FileSystem,
-	): Promise<Task[]> {
-		const resolveMilestoneLabel = options.filters?.milestone
-			? await Promise.all([filesystem.listMilestones(), filesystem.listArchivedMilestones()]).then(
-					([active, archived]) => createMilestoneFilterValueResolver([...active, ...archived]),
-				)
-			: undefined;
-		let tasks = options.filters
-			? applyTaskFilters(collection, { ...options.filters, resolveMilestoneLabel })
-			: [...collection];
-		if (options.includeCrossBranch === false) tasks = this.filterLocalEditableTasks(tasks);
-		return typeof options.limit === "number" && options.limit >= 0 ? tasks.slice(0, options.limit) : tasks;
-	}
-
-	private captureTaskReadContext(): { filesystem: FileSystem; projectChanged: () => boolean } {
+	private createTaskReadSession(): TaskReadSession {
 		const generation = this.projectGeneration;
 		const filesystem = this.fs;
 		const backlogRoot = filesystem.backlogDir;
-		return {
+		return new TaskReadSession(
+			this.session,
+			generation,
 			filesystem,
-			projectChanged: () =>
-				generation !== this.projectGeneration || filesystem !== this.fs || backlogRoot !== filesystem.backlogDir,
-		};
-	}
-
-	private async queryCrossBranchTasks(
-		options: TaskQueryOptions,
-		filesystem: FileSystem,
-		projectChanged: () => boolean,
-	): Promise<Task[] | null> {
-		const storeAlreadyReady = this.contentStore?.isInitialized() ?? false;
-		const store = await this.getContentStore();
-		if (projectChanged() || store !== this.contentStore) return null;
-		await this.refreshCachedTasksForCrossBranchRead(true, storeAlreadyReady && options.refreshCrossBranch !== false);
-		if (projectChanged() || store !== this.contentStore) return null;
-		const query = options.query?.trim();
-		if (!query) {
-			return projectChanged() ? null : await this.filterTaskQueryResults(store.getTasks(), options, filesystem);
-		}
-
-		const searchFilters: SearchFilters = {};
-		for (const field of ["status", "excludeStatus", "type", "project", "priority", "assignee", "labels"] as const) {
-			if (options.filters?.[field]) searchFilters[field] = options.filters[field];
-		}
-		if (options.filters?.labels) searchFilters.labelMatch = options.filters.labelMatch;
-		const seen = new Set<string>();
-		const searchResults = (await this.getSearchService()).search({
-			query,
-			limit: options.limit,
-			types: ["task"],
-			filters: Object.keys(searchFilters).length ? searchFilters : undefined,
-		});
-		const tasks: Task[] = [];
-		for (const result of searchResults) {
-			if (result.type !== "task" || seen.has(result.task.id)) continue;
-			seen.add(result.task.id);
-			tasks.push(result.task);
-		}
-		if (projectChanged() || store !== this.contentStore) return null;
-		return await this.filterTaskQueryResults(tasks, options, filesystem);
+			backlogRoot,
+			this.contentStore?.isInitialized() ?? false,
+			this.taskMutations,
+		);
 	}
 
 	async queryTasks(options: TaskQueryOptions = {}): Promise<Task[]> {
 		while (true) {
-			const { filesystem, projectChanged } = this.captureTaskReadContext();
-			if (options.includeCrossBranch === false) {
-				const localTasks = await filesystem.listTasks();
-				const query = options.query?.trim();
-				const tasks = query ? createTaskSearchIndex(localTasks).search({ query }) : localTasks;
-				const filteredTasks = await this.filterTaskQueryResults(tasks, options, filesystem);
-				if (!projectChanged()) return filteredTasks;
-				continue;
-			}
-			const tasks = await this.queryCrossBranchTasks(options, filesystem, projectChanged);
-			if (tasks && !projectChanged()) return tasks;
+			const tasks = await this.createTaskReadSession().query(options);
+			if (tasks) return tasks;
 		}
 	}
 
 	async getTask(taskId: string, options: TaskReadOptions = {}): Promise<Task | null> {
 		while (true) {
-			const { filesystem, projectChanged } = this.captureTaskReadContext();
-			const storeAlreadyReady = this.contentStore?.isInitialized() ?? false;
-			const store = await this.getContentStore();
-			if (projectChanged() || store !== this.contentStore) continue;
-			if (storeAlreadyReady && options.refreshCrossBranch !== false) {
-				await this.refreshTasksForTaskRead();
-			}
-			if (projectChanged() || store !== this.contentStore) continue;
-			const identityResolution = store.resolveTaskForRead(taskId);
-			if (identityResolution.status === "ambiguous") {
-				throw new AmbiguousTaskIdError(taskId, identityResolution.candidates);
-			}
-			if (identityResolution.status === "found") return identityResolution.task;
-			// Diagnose a file skipped during loading without bypassing the identity index's result.
-			try {
-				await filesystem.loadTask(taskId);
-			} catch (error) {
-				if (projectChanged()) continue;
-				throw error;
-			}
-			if (projectChanged()) continue;
-			return null;
+			const task = await this.createTaskReadSession().get(taskId, options);
+			if (task !== undefined) return task;
 		}
 	}
 
 	async getTaskWithSubtasks(taskId: string, localTasks?: Task[], options: TaskReadOptions = {}): Promise<Task | null> {
 		while (true) {
-			const { filesystem, projectChanged } = this.captureTaskReadContext();
-			const task =
-				options.includeCrossBranch === false
-					? await this.loadWorkingCopyTask(taskId, false, localTasks)
-					: await this.getTask(taskId, options);
-			if (projectChanged()) continue;
-			if (!task) return null;
-
-			const tasks = localTasks ?? (await filesystem.listTasks());
-			if (projectChanged()) continue;
-			return attachSubtaskSummaries(task, tasks);
+			const task = await this.createTaskReadSession().getWithSubtasks(taskId, localTasks, options);
+			if (task !== undefined) return task;
 		}
 	}
 
@@ -1100,7 +752,7 @@ export class Core {
 			: await this.getTask(taskId, options);
 	}
 
-	private async buildWorkingCopyTaskIndex(activeTasks?: Task[]): Promise<TaskIdentityIndex> {
+	async buildWorkingCopyTaskIndex(activeTasks?: Task[]): Promise<TaskIdentityIndex> {
 		let suppliedActiveTasks = activeTasks;
 		while (true) {
 			const filesystem = this.fs;
@@ -1132,28 +784,12 @@ export class Core {
 		return (await this.buildWorkingCopyTaskIndex()).getTasks(includeCompleted);
 	}
 
-	private async loadWorkingCopyTask(taskId: string, forMutation: boolean, activeTasks?: Task[]): Promise<Task | null> {
-		const index = await this.buildWorkingCopyTaskIndex(activeTasks);
-		const resolution = forMutation ? index.resolveForMutation(taskId) : index.resolveForRead(taskId);
-		return await this.loadResolvedTaskOrFilesystem(taskId, resolution);
+	async loadWorkingCopyTask(taskId: string, forMutation: boolean, activeTasks?: Task[]): Promise<Task | null> {
+		return await this.taskMutations.loadWorkingCopyTask(taskId, forMutation, activeTasks);
 	}
 
-	private async loadResolvedTaskOrFilesystem(taskId: string, resolution: TaskIdentityResolution): Promise<Task | null> {
-		if (resolution.status === "ambiguous") throw new AmbiguousTaskIdError(taskId, resolution.candidates);
-		if (resolution.status === "found") return { ...resolution.task };
-		// Lists skip damaged files; an explicit lookup must still report why its task cannot load.
-		await this.fs.loadTask(taskId);
-		return null;
-	}
-
-	private async loadTaskForMutation(taskId: string, options: TaskReadOptions = {}): Promise<Task | null> {
-		if (options.includeCrossBranch === false) {
-			return await this.loadWorkingCopyTask(taskId, true);
-		}
-		const store = await this.getContentStore();
-		await store.refreshTasks();
-		const resolution = store.resolveTaskForMutation(taskId);
-		return await this.loadResolvedTaskOrFilesystem(taskId, resolution);
+	async loadTaskForMutation(taskId: string, options: TaskReadOptions = {}): Promise<Task | null> {
+		return await this.taskMutations.loadTaskForMutation(taskId, options);
 	}
 
 	async getTaskContent(taskId: string): Promise<string | null> {
@@ -1164,20 +800,11 @@ export class Core {
 	}
 
 	async getDocument(documentId: string): Promise<Document | null> {
-		return findDocumentById(await this.fs.listDocuments(), documentId);
+		return await this.projectContent.getDocument(documentId);
 	}
 
 	async getDocumentContent(documentId: string): Promise<string | null> {
-		const document = await this.getDocument(documentId);
-		if (!document) return null;
-
-		const relativePath = normalizeDocumentRelativePath(document.path ?? `${document.id}.md`);
-		const filePath = join(this.fs.docsDir, ...relativePath.split("/"));
-		try {
-			return await Bun.file(filePath).text();
-		} catch {
-			return null;
-		}
+		return await this.projectContent.getDocumentContent(documentId);
 	}
 
 	/**
@@ -1185,31 +812,21 @@ export class Core {
 	 * Disposes caches and re-creates FileSystem / GitOperations.
 	 */
 	reinitializeProjectRoot(projectRoot: string): void {
-		this.projectGeneration += 1;
-		this.disposeSearchService();
-		this.disposeContentStore();
-		this.fs = new FileSystem(projectRoot);
-		this.git = new GitOperations(projectRoot, null, () => this.fs.loadConfig());
-		this.branchTaskLoader = new BranchTaskLoader(this.git);
+		const previous = this.session;
+		this.session = this.createProjectSession(projectRoot, previous.generation + 1);
+		this.vacatedTaskReferences = new VacatedTaskReferenceService(this.fs, () => this.contentStore);
+		this.taskMutations = new ProjectTaskMutations(this.fs, this.git, this.session);
+		this.taskLifecycle = this.createTaskLifecycleService();
+		previous.dispose();
 	}
 
 	disposeSearchService(): void {
-		if (this.searchService) {
-			this.searchService.dispose();
-			this.searchService = undefined;
-		}
+		this.searchService?.dispose();
+		this.searchService = undefined;
 	}
 
 	disposeContentStore(): void {
-		if (this.contentStore) {
-			this.contentStore.dispose();
-			this.contentStore = undefined;
-		}
-		this.activeBranchFingerprint = null;
-		this.activeBranchSnapshotPromise = null;
-		this.activeBranchRefreshPromise = null;
-		this.remoteRefRefreshPromise = null;
-		this.lastRemoteRefRefreshAt = 0;
+		this.session.disposeContentStore();
 	}
 
 	// Backward compatibility aliases
@@ -1243,17 +860,7 @@ export class Core {
 	}
 
 	async shouldAutoCommit(overrideValue?: boolean): Promise<boolean> {
-		const config = await this.fs.loadConfig();
-		this.git.setConfig(config);
-		if (config?.filesystemOnly) {
-			return false;
-		}
-		// If override is explicitly provided, use it
-		if (overrideValue !== undefined) {
-			return overrideValue;
-		}
-		// Otherwise, check config (default to false for safety)
-		return config?.autoCommit ?? false;
+		return await this.taskMutations.shouldAutoCommit(overrideValue);
 	}
 
 	async getGitOps() {
@@ -1261,193 +868,16 @@ export class Core {
 		return this.git;
 	}
 
-	// Config migration
-	private parseLegacyInlineArray(value: string): string[] {
-		const items: string[] = [];
-		let current = "";
-		this.scanYamlScalar(value, (ch) => {
-			if (ch === ",") {
-				const normalized = current.trim().replace(/\\(['"])/g, "$1");
-				if (normalized) items.push(normalized);
-				current = "";
-			} else {
-				current += ch;
-			}
-		});
-		const normalized = current.trim().replace(/\\(['"])/g, "$1");
-		if (normalized) items.push(normalized);
-		return items;
-	}
-
-	private scanYamlScalar(
-		value: string,
-		onCharacter: (character: string, index: number, quoted: boolean) => void,
-	): void {
-		let quote: '"' | "'" | null = null;
-		for (let i = 0; i < value.length; i += 1) {
-			const ch = value[i] as string;
-			const prev = i > 0 ? value[i - 1] : "";
-			if (quote) {
-				if (ch === quote && prev !== "\\") {
-					quote = null;
-					continue;
-				}
-				onCharacter(ch, i, true);
-				continue;
-			}
-			if (ch === '"' || ch === "'") {
-				quote = ch;
-				continue;
-			}
-			onCharacter(ch, i, false);
-		}
-	}
-
-	private stripYamlComment(value: string): string {
-		let commentAt = -1;
-		this.scanYamlScalar(value, (character, index, quoted) => {
-			if (!quoted && character === "#" && commentAt === -1) commentAt = index;
-		});
-		return commentAt === -1 ? value : value.slice(0, commentAt).trimEnd();
-	}
-
-	private parseLegacyYamlValue(value: string): string {
-		const trimmed = this.stripYamlComment(value).trim();
-		const singleQuoted = trimmed.match(/^'(.*)'$/);
-		if (singleQuoted?.[1] !== undefined) {
-			return singleQuoted[1].replace(/''/g, "'");
-		}
-		const doubleQuoted = trimmed.match(/^"(.*)"$/);
-		if (doubleQuoted?.[1] !== undefined) {
-			return doubleQuoted[1].replace(/\\"/g, '"').replace(/\\'/g, "'");
-		}
-		return trimmed;
-	}
-
-	private async extractLegacyConfigMilestones(): Promise<string[]> {
-		try {
-			const configPath = this.fs.configFilePath;
-			const content = await Bun.file(configPath).text();
-			const lines = content.split("\n");
-			for (let i = 0; i < lines.length; i += 1) {
-				const line = lines[i] ?? "";
-				const match = line.match(/^(\s*)milestones\s*:\s*(.*)$/);
-				if (!match) {
-					continue;
-				}
-
-				const milestoneIndent = (match[1] ?? "").length;
-				const trailing = this.stripYamlComment(match[2] ?? "").trim();
-				if (trailing.startsWith("[")) {
-					let combined = trailing;
-					let closed = trailing.endsWith("]");
-					let j = i + 1;
-					while (!closed && j < lines.length) {
-						const segment = this.stripYamlComment(lines[j] ?? "").trim();
-						combined += segment;
-						if (segment.includes("]")) {
-							closed = true;
-							break;
-						}
-						j += 1;
-					}
-					if (closed) {
-						const openIndex = combined.indexOf("[");
-						const closeIndex = combined.lastIndexOf("]");
-						if (openIndex !== -1 && closeIndex > openIndex) {
-							const parsed = this.parseLegacyInlineArray(combined.slice(openIndex + 1, closeIndex));
-							return parsed.map((item) => this.parseLegacyYamlValue(item)).filter(Boolean);
-						}
-					}
-				}
-				if (trailing.length > 0) {
-					const single = this.parseLegacyYamlValue(trailing);
-					return single ? [single] : [];
-				}
-
-				const values: string[] = [];
-				for (let j = i + 1; j < lines.length; j += 1) {
-					const nextLine = lines[j] ?? "";
-					if (!nextLine.trim()) {
-						continue;
-					}
-					const nextIndent = nextLine.match(/^\s*/)?.[0].length ?? 0;
-					if (nextIndent <= milestoneIndent) {
-						break;
-					}
-					const trimmed = nextLine.trim();
-					if (!trimmed.startsWith("-")) {
-						continue;
-					}
-					const itemValue = this.parseLegacyYamlValue(trimmed.slice(1));
-					if (itemValue) {
-						values.push(itemValue);
-					}
-				}
-				return values;
-			}
-			return [];
-		} catch {
-			return [];
-		}
-	}
-
-	private async migrateLegacyConfigMilestonesToFiles(legacyMilestones: string[]): Promise<void> {
-		if (legacyMilestones.length === 0) {
-			return;
-		}
-		const existingMilestones = await this.fs.listMilestones();
-		const existingKeys = new Set<string>();
-		for (const milestone of existingMilestones) {
-			const idKey = milestone.id.trim().toLowerCase();
-			const titleKey = milestone.title.trim().toLowerCase();
-			if (idKey) {
-				existingKeys.add(idKey);
-			}
-			if (titleKey) {
-				existingKeys.add(titleKey);
-			}
-		}
-		for (const name of legacyMilestones) {
-			const normalized = name.trim();
-			const key = normalized.toLowerCase();
-			if (!normalized || existingKeys.has(key)) {
-				continue;
-			}
-			const created = await this.fs.createMilestone(normalized);
-			const createdIdKey = created.id.trim().toLowerCase();
-			const createdTitleKey = created.title.trim().toLowerCase();
-			if (createdIdKey) {
-				existingKeys.add(createdIdKey);
-			}
-			if (createdTitleKey) {
-				existingKeys.add(createdTitleKey);
-			}
-		}
-	}
-
 	async ensureConfigMigrated(): Promise<void> {
-		await this.ensureConfigLoaded();
-		const legacyMilestones = await this.extractLegacyConfigMilestones();
-		let config = await this.fs.loadConfig();
-		const needsSchemaMigration = !config || needsMigration(config);
-
-		if (needsSchemaMigration) {
-			config = migrateConfig(config || {});
-		}
-		if (legacyMilestones.length > 0) {
-			await this.migrateLegacyConfigMilestonesToFiles(legacyMilestones);
-		}
-		if (config && (needsSchemaMigration || legacyMilestones.length > 0)) {
-			// Rewrite config to apply schema defaults and strip legacy milestones key after successful migration.
-			await this.fs.saveConfig(config);
-		}
-
-		// Run draft prefix migration if needed (one-time migration)
-		// This renames task-*.md files in drafts/ to draft-*.md
-		if (needsDraftPrefixMigration(config)) {
-			await migrateDraftPrefixes(this.fs);
-		}
+		return await ensureConfigMigrated({
+			ensureConfigLoaded: () => this.ensureConfigLoaded(),
+			loadConfig: () => this.fs.loadConfig(),
+			readConfigContent: () => readLegacyConfigContent(this.fs.configFilePath),
+			listMilestones: () => this.fs.listMilestones(),
+			createMilestone: (title) => this.fs.createMilestone(title),
+			saveConfig: (config) => this.fs.saveConfig(config),
+			migrateDraftPrefixes: () => migrateDraftPrefixes(this.fs),
+		});
 	}
 
 	// ID generation
@@ -1465,19 +895,15 @@ export class Core {
 	 * - Decision: /decisions only
 	 */
 	async generateNextId(type: EntityType = EntityType.Task, parent?: string): Promise<string> {
-		const config = await this.fs.loadConfig();
-		const prefix = getPrefixForType(type, config ?? undefined);
-
-		// Collect existing IDs based on entity type
-		const allIds = await this.getExistingIdsForType(type);
-
-		if (parent) {
-			// Subtask generation (only applicable for tasks)
-			const normalizedParent = allIds.find((id) => taskIdsEqual(parent, id)) ?? normalizeTaskId(parent);
-			return generateNextSubtaskId(allIds, normalizedParent, prefix, config?.zeroPaddedIds);
+		while (true) {
+			const mutations = this.taskMutations;
+			try {
+				const id = await mutations.generateNextId(type, parent);
+				if (mutations === this.taskMutations) return id;
+			} catch (error) {
+				if (!(error instanceof ProjectSessionDisposed) || mutations === this.taskMutations) throw error;
+			}
 		}
-
-		return generateNextPrefixedId(allIds, prefix, config?.zeroPaddedIds);
 	}
 
 	/**
@@ -1577,7 +1003,7 @@ export class Core {
 	 * Note: Archived tasks are intentionally excluded - archived IDs can be reused.
 	 * This makes archive act as a soft delete for ID purposes.
 	 */
-	private async getExistingIdsForType(type: EntityType): Promise<string[]> {
+	async getExistingIdsForType(type: EntityType): Promise<string[]> {
 		switch (type) {
 			case EntityType.Task: {
 				// Get active + completed task IDs from all branches (respects config)
@@ -1603,7 +1029,7 @@ export class Core {
 		}
 	}
 
-	private async writePreparedTask(task: Task, isDraft: boolean): Promise<string> {
+	async writePreparedTask(task: Task, isDraft: boolean): Promise<string> {
 		if (isDraft) {
 			task.status = "Draft";
 			normalizeAssignee(task);
@@ -1614,7 +1040,7 @@ export class Core {
 		return await this.fs.saveTask(task);
 	}
 
-	private async finalizeCreatedTask(
+	async finalizeCreatedTask(
 		task: Task,
 		filepath: string,
 		isDraft: boolean,
@@ -1642,237 +1068,22 @@ export class Core {
 		return savedTask;
 	}
 
-	private async readFileIfPresent(filePath: string | null): Promise<Buffer | null> {
-		if (!filePath) return null;
-		try {
-			return await readFile(filePath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-			throw error;
-		}
-	}
-
-	private async rollbackCreatedTask(write: CreatedTaskWrite): Promise<CreatedTaskRollbackResult> {
-		let indexRestored = true;
-		if (write.generatedIndexEntries) {
-			indexRestored = await this.git.restoreIndexEntriesIfMatches(
-				write.filePath,
-				write.generatedIndexEntries,
-				write.previousIndexEntries ?? [],
-			);
-		}
-
-		const currentContent = await this.readFileIfPresent(write.filePath);
-		const stillOwnsCreatedPath = currentContent?.equals(write.createdContent) ?? false;
-		let workingPathRestored = false;
-		if (currentContent === null) {
-			if (write.previousPath === write.filePath && write.previousContent) {
-				try {
-					await writeFile(write.filePath, write.previousContent, { flag: "wx" });
-					workingPathRestored = true;
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-				}
-			} else {
-				workingPathRestored = true;
-			}
-		} else if (stillOwnsCreatedPath && indexRestored) {
-			if (write.previousPath === write.filePath && write.previousContent) {
-				await writeFile(write.filePath, write.previousContent);
-			} else {
-				await unlink(write.filePath);
-			}
-			workingPathRestored = true;
-		}
-
-		if (write.previousPath && write.previousPath !== write.filePath && write.previousContent) {
-			const currentPreviousContent = await this.readFileIfPresent(write.previousPath);
-			if (currentPreviousContent === null) {
-				await writeFile(write.previousPath, write.previousContent);
-			}
-		}
-
-		if (this.contentStore) {
-			await this.contentStore.refreshTasks();
-		}
-
-		return { indexRestored, workingPathRestored };
+	async rollbackCreatedTask(write: CreatedTaskWrite): Promise<CreatedTaskRollbackResult> {
+		return await rollbackCreatedTask(write, {
+			restoreIndexEntriesIfMatches: this.git.restoreIndexEntriesIfMatches.bind(this.git),
+			refreshTasks: async () => await this.contentStore?.refreshTasks(),
+		});
 	}
 
 	async createTaskFromInput(input: TaskCreateInput, autoCommit?: boolean): Promise<{ task: Task; filePath?: string }> {
-		if (!input.title || input.title.trim().length === 0) {
-			throw new Error("Title is required to create a task.");
-		}
-		assertSectionInputsSafe(input);
-
-		// Determine if this is a draft BEFORE generating the ID
-		const requestedStatus = input.status?.trim();
-		const isDraft = requestedStatus?.toLowerCase() === "draft";
-		const requestedParentTaskId = input.parentTaskId?.trim();
-
-		// Generate ID with appropriate entity type - drafts get DRAFT-X, tasks get TASK-X
-		const entityType = isDraft ? EntityType.Draft : EntityType.Task;
-
-		const normalizedLabels = normalizeStringList(input.labels) ?? [];
-		const normalizedAssignees = normalizeStringList(input.assignee) ?? [];
-		const normalizedDependencies = parseDelimitedStringList(input.dependencies) ?? [];
-		const normalizedReferences = normalizeStringList(input.references) ?? [];
-		const normalizedDocumentation = normalizeStringList(input.documentation) ?? [];
-		const normalizedModifiedFiles = normalizeStringList(input.modifiedFiles) ?? [];
-		const dueDate = normalizeDueDate(input.dueDate, "Due date");
-
-		let status = "";
-		if (requestedStatus) {
-			if (isDraft) {
-				status = "Draft";
-			} else {
-				status = await this.requireCanonicalStatus(requestedStatus);
-			}
-		}
-
-		const priority = await this.normalizePriority(input.priority);
-		const type = await this.normalizeTaskType(input.type);
-		const project = await this.normalizeProject(input.project);
-		const createdDate = formatStoredDate();
-		if (
-			input.ordinal !== undefined &&
-			(typeof input.ordinal !== "number" || !Number.isFinite(input.ordinal) || input.ordinal < 0)
-		) {
-			throw new Error("Ordinal must be a non-negative number.");
-		}
-
-		const acceptanceCriteriaItems = Array.isArray(input.acceptanceCriteria)
-			? input.acceptanceCriteria
-					.map((criterion, index) => ({
-						index: index + 1,
-						text: String(criterion.text ?? "").trim(),
-						checked: Boolean(criterion.checked),
-					}))
-					.filter((criterion) => criterion.text.length > 0)
-			: [];
-		const config = await this.fs.loadConfig();
-		const definitionOfDoneItems = buildDefinitionOfDoneItems({
-			defaults: config?.definitionOfDone,
-			add: input.definitionOfDoneAdd,
-			disableDefaults: input.disableDefinitionOfDoneDefaults,
-		});
-		const resolvedStatus = isDraft ? "Draft" : status || config?.defaultStatus || FALLBACK_STATUS;
-		// An absent assignee means "no opinion" and takes the configured default; an explicit
-		// assignee replaces it entirely, and an explicit empty list means "unassigned".
-		const resolvedAssignees =
-			input.assignee === undefined ? (normalizeStringList(config?.defaultAssignee) ?? []) : normalizedAssignees;
-		const autoCommitEnabled = await this.shouldAutoCommit(autoCommit);
-
-		const { task, write } = await this.withCreateLock(async () => {
-			const parentTaskId = requestedParentTaskId
-				? await this.resolveParentTaskIdForCreate(requestedParentTaskId)
-				: undefined;
-			const id = await this.generateNextId(entityType, isDraft ? undefined : parentTaskId);
-			// Validated inside the create lock, against the allocated identity: a record can hold a
-			// dangling dependency on exactly this not-yet-existing ID, so materializing it with a
-			// dependency pointing back would store a cycle that no later edit could have created.
-			const { valid: validDependencies, invalid: invalidDependencies } = await validateDependencies(
-				normalizedDependencies,
-				this,
-				{
-					id,
-					title: input.title.trim(),
-					status: resolvedStatus,
-					assignee: [],
-					createdDate,
-					labels: [],
-					dependencies: [],
-				},
-			);
-			if (invalidDependencies.length > 0) {
-				throw formatMissingDependenciesError(invalidDependencies);
-			}
-			const ordinal = await this.resolveCreateOrdinal(input.ordinal, isDraft);
-			const task: Task = {
-				id,
-				title: input.title.trim(),
-				status: resolvedStatus,
-				assignee: resolvedAssignees,
-				labels: normalizedLabels,
-				dependencies: validDependencies,
-				references: normalizedReferences,
-				documentation: normalizedDocumentation,
-				modifiedFiles: normalizedModifiedFiles,
-				rawContent: input.rawContent ?? "",
-				createdDate,
-				...(dueDate && { dueDate }),
-				...(parentTaskId && { parentTaskId }),
-				...(priority && { priority }),
-				...(type && { type }),
-				...(project && { project }),
-				...(typeof ordinal === "number" && { ordinal }),
-				...(typeof input.milestone === "string" &&
-					input.milestone.trim().length > 0 && {
-						milestone: input.milestone.trim(),
-					}),
-				...(typeof input.description === "string" && { description: input.description }),
-				...(typeof input.implementationPlan === "string" && { implementationPlan: input.implementationPlan }),
-				...(typeof input.implementationNotes === "string" && { implementationNotes: input.implementationNotes }),
-				...(typeof input.finalSummary === "string" && { finalSummary: input.finalSummary }),
-				...(acceptanceCriteriaItems.length > 0 && { acceptanceCriteriaItems }),
-				...(definitionOfDoneItems && definitionOfDoneItems.length > 0 && { definitionOfDoneItems }),
-			};
-
-			const resolvedPreviousPath = isDraft
-				? await this.fs.resolveDraftFilePath(task.id)
-				: await getTaskPath(task.id, this);
-			const targetPath = await this.fs.getTaskWritePath(task, isDraft);
-			const targetContent = await this.readFileIfPresent(targetPath);
-			const previousPath = targetContent ? targetPath : resolvedPreviousPath;
-			const previousContent = targetContent ?? (await this.readFileIfPresent(resolvedPreviousPath));
-			const previousIndexEntries = autoCommitEnabled ? await this.git.getIndexEntries(targetPath) : undefined;
-			const filePath = await this.writePreparedTask(task, isDraft);
-			const createdContent = await readFile(filePath);
-			const write: CreatedTaskWrite = {
-				filePath,
-				createdContent,
-				previousPath,
-				previousContent,
-				previousIndexEntries,
-			};
-			return {
-				task,
-				write,
-			};
-		});
-
-		try {
-			const savedTask = await this.finalizeCreatedTask(task, write.filePath, isDraft, autoCommitEnabled, write);
-			return { task: savedTask ?? task, filePath: write.filePath };
-		} catch (error) {
-			let rollback: CreatedTaskRollbackResult;
-			try {
-				rollback = await this.rollbackCreatedTask(write);
-			} catch (rollbackError) {
-				const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-				throw new Error(`Task creation failed and cleanup also failed: ${message}`, { cause: error });
-			}
-			if (!rollback.workingPathRestored || !rollback.indexRestored) {
-				if (!rollback.indexRestored) {
-					throw new Error(
-						`Task creation failed, and Backlog no longer owned the staged entry for ${write.filePath}. The task file and staged Git state were preserved, ${task.id} remains in use, and manual Git review is required before retrying.`,
-						{ cause: error },
-					);
-				}
-				throw new Error(
-					`Task creation failed, and cleanup could not safely remove the changed file at ${write.filePath}. Your changes were preserved. Review or remove the preserved file before retrying because ${task.id} remains in use.`,
-					{ cause: error },
-				);
-			}
-			throw error;
-		}
+		return await new TaskCreationService(this).create(input, autoCommit);
 	}
 
 	/**
 	 * Resolve `--parent` against the working copy, the same corpus the parent filter and task reads
 	 * use, so one ID cannot be an acceptable parent for a child that no task command can then show.
 	 */
-	private async resolveParentTaskIdForCreate(parentTaskId: string): Promise<string> {
+	async resolveParentTaskIdForCreate(parentTaskId: string): Promise<string> {
 		const parentTask = await this.loadTaskById(parentTaskId, { includeCrossBranch: false });
 		if (!parentTask) {
 			const config = await this.fs.loadConfig();
@@ -1898,55 +1109,15 @@ export class Core {
 	}
 
 	async updateTask(task: Task, autoCommit?: boolean): Promise<string> {
-		normalizeAssignee(task);
-
-		// Load original task to detect status changes for callbacks
-		const cachedResolution = this.contentStore?.isInitialized()
-			? this.contentStore.resolveTaskForMutation(task.id)
-			: undefined;
-		const originalTask = cachedResolution?.status === "found" ? cachedResolution.task : await this.fs.loadTask(task.id);
-		const oldStatus = originalTask?.status ?? "";
-		const newStatus = task.status ?? "";
-		const statusChanged = oldStatus !== newStatus;
-
-		if (hasUpdatedDateRelevantChanges(originalTask, task)) {
-			task.updatedDate = formatStoredDate();
-		} else if (originalTask?.updatedDate) {
-			task.updatedDate = originalTask.updatedDate;
-		} else {
-			delete task.updatedDate;
-		}
-
-		const filePath = await this.fs.saveTask(task);
-		// Keep any in-process ContentStore in sync for immediate UI/search freshness.
-
-		if (await this.shouldAutoCommit(autoCommit)) {
-			await this.git.addAndCommitTaskFile(task.id, filePath, "update");
-		}
-
-		// Fire status change callback if status changed
-		if (statusChanged) {
-			await this.executeStatusChangeCallback(task, oldStatus, newStatus);
-		}
-
-		return filePath;
+		return await this.taskMutations.saveTask(task, autoCommit);
 	}
 
-	private async applyTaskUpdateInput(
+	async applyTaskUpdateInput(
 		task: Task,
 		input: TaskUpdateInput,
 		statusResolver: (status: string) => Promise<string>,
 	): Promise<{ task: Task; mutated: boolean }> {
-		const mutated = await applyTaskUpdate(task, input, {
-			resolveStatus: statusResolver,
-			normalizePriority: (priority) => this.normalizePriority(priority),
-			normalizeType: (type) => this.normalizeTaskType(type),
-			normalizeProject: (project) => this.normalizeProject(project),
-			validateDependencies: (dependencies, candidate) => validateDependencies(dependencies, this, candidate),
-			taskIdsEqual,
-			formatMissingDependenciesError,
-		});
-		return { task, mutated };
+		return await this.taskMutations.applyTaskUpdateInput(task, input, statusResolver);
 	}
 
 	async updateTaskFromInput(
@@ -1955,38 +1126,14 @@ export class Core {
 		autoCommit?: boolean,
 		options: TaskReadOptions = {},
 	): Promise<Task> {
-		const task = await this.loadTaskForMutation(taskId, options);
-		if (!task) {
-			throw new Error(`Task not found: ${taskId}`);
-		}
-
 		const requestedStatus = input.status?.trim().toLowerCase();
 		if (requestedStatus === "draft") {
 			// demoteTaskWithUpdates takes the task lock itself, so it must not be nested here.
+			const task = await this.loadTaskForMutation(taskId, options);
+			if (!task) throw new Error(`Task not found: ${taskId}`);
 			return (await this.demoteTaskWithUpdates(task, input, autoCommit, options)).task;
 		}
-
-		// Fail fast when another process is mid-edit, and re-read inside the lock so the whole
-		// read-modify-write is protected. Locking only the write would still lose an update
-		// whenever one writer releases before the next acquires: the second would then apply
-		// its changes to a snapshot taken before the first wrote.
-		return await this.fs.withTaskLock(task, async () => {
-			const current = await this.loadTaskForMutation(taskId, options);
-			if (!current) {
-				throw new Error(`Task not found: ${taskId}`);
-			}
-
-			const { mutated } = await this.applyTaskUpdateInput(current, input, async (status) =>
-				this.requireCanonicalStatus(status),
-			);
-
-			if (!mutated) {
-				return current;
-			}
-
-			await this.updateTask(current, autoCommit);
-			return current;
-		});
+		return await this.taskMutations.updateFromInput(taskId, input, autoCommit, options);
 	}
 
 	async updateDraft(task: Task, autoCommit?: boolean): Promise<string> {
@@ -2079,70 +1226,7 @@ export class Core {
 		input: TaskUpdateInput,
 		autoCommit?: boolean,
 	): Promise<Task> {
-		const targetStatus = input.status?.trim();
-		if (!targetStatus || targetStatus.toLowerCase() === "draft") {
-			throw new Error("Promoting a draft requires a non-draft status.");
-		}
-
-		const canonicalStatus = await this.requireCanonicalStatus(targetStatus);
-
-		// Same locked read-apply-promote discipline as edit/promote: hold the draft lock across
-		// the whole span and re-read inside it, so a concurrent editor cannot be omitted from the
-		// promoted task or left behind as a second record.
-		return await this.fs.withDraftLock(reference, async () => {
-			const current = await this.fs.draftReferenceFromPath(reference.filePath);
-			const draft = current.task;
-			draft.id = reference.canonicalId;
-
-			const { mutated } = await this.applyTaskUpdateInput(draft, { ...input, status: undefined }, async (status) => {
-				if (status.trim().toLowerCase() !== "draft") {
-					throw new Error("Drafts must use status Draft.");
-				}
-				return "Draft";
-			});
-
-			const { promotedTask, savedPath } = await this.withCreateLock(async () => {
-				const newTaskId = await this.generateNextId(EntityType.Task, draft.parentTaskId);
-				// Same guard as creation: a stored dangling reference can name exactly this allocated
-				// ID, so the record's dependencies are re-validated against its final identity. Only
-				// the self/cycle guard matters here; stored entries that no longer resolve are legacy
-				// defects doctor reports, so the stored list itself is written unchanged.
-				await validateDependencies(draft.dependencies ?? [], this, { ...draft, id: newTaskId });
-				const draftPath = current.filePath;
-
-				const promotedTask: Task = {
-					...draft,
-					id: newTaskId,
-					status: canonicalStatus,
-					filePath: undefined,
-					...(mutated || draft.status !== canonicalStatus ? { updatedDate: formatStoredDate() } : {}),
-				};
-
-				normalizeAssignee(promotedTask);
-				const savedPath = await this.fs.saveTask(promotedTask);
-
-				if (draftPath) {
-					await unlink(draftPath);
-				}
-
-				return { promotedTask, savedPath };
-			});
-
-			const savedTask = await this.fs.loadTask(promotedTask.id);
-			if (this.contentStore && savedTask) {
-				this.contentStore.upsertTask(savedTask);
-			}
-
-			if (await this.shouldAutoCommit(autoCommit)) {
-				await this.commitWrittenFile(
-					`backlog: Promote draft ${normalizeId(reference.canonicalId, "draft")}`,
-					[reference.filePath],
-					savedPath,
-				);
-			}
-
-			return savedTask ?? { ...promotedTask, filePath: savedPath };
-		});
+		return await this.taskLifecycle.promoteDraftWithUpdates(reference, input, autoCommit);
 	}
 
 	// Demotion is a read-modify-write of the task file too, reached from both updateTaskFromInput
@@ -2155,118 +1239,7 @@ export class Core {
 		autoCommit?: boolean,
 		options: TaskReadOptions = {},
 	): Promise<TaskEditResult> {
-		// Editing a task into the Draft status vacates its ID just as `task demote` does, so it
-		// runs the same cleanup rather than leaving dependents pointing at the freed ID.
-		return await this.withVacatedIdCleanup(task, task.id, async (cleanup) => {
-			const current = await this.loadTaskForMutation(task.id, options);
-			if (!current) {
-				throw new Error(`Task not found: ${task.id}`);
-			}
-
-			const { mutated } = await this.applyTaskUpdateInput(current, { ...input, status: undefined }, async (status) => {
-				if (status.trim().toLowerCase() === "draft") {
-					return "Draft";
-				}
-				return this.requireCanonicalStatus(status);
-			});
-
-			// The record keeps its own links under the new draft identity, so a link naming the task
-			// ID it is vacating would rebind to whatever task is allocated that ID next.
-			const vacating = withoutVacatedTaskLinks(current, current.id) ?? current;
-
-			const { demotedDraft, savedPath } = await this.withCreateLock(async () => {
-				const newDraftId = await this.generateNextId(EntityType.Draft);
-				// Mirrors promotion: the allocated draft ID can be named by a stored dangling
-				// reference, so the demoted record must not materialize a cycle through it.
-				await validateDependencies(vacating.dependencies ?? [], this, { ...vacating, id: newDraftId });
-				const taskPath = current.filePath;
-
-				const demotedDraft: Task = {
-					...vacating,
-					id: newDraftId,
-					status: "Draft",
-					filePath: undefined,
-					...(mutated || current.status !== "Draft" ? { updatedDate: formatStoredDate() } : {}),
-				};
-
-				normalizeAssignee(demotedDraft);
-				const savedPath = await this.fs.saveDraft(demotedDraft);
-
-				if (taskPath) {
-					await unlink(taskPath);
-				}
-
-				return { demotedDraft, savedPath };
-			});
-
-			// The draft is written and the task file is gone, so anything failing from here reports
-			// the demotion as done, the way the dedicated demote command does.
-			let cleanedTaskIds: string[] = [];
-			let cleanedPaths: string[] = [];
-			try {
-				const written = await this.writeVacatedIdCleanup(cleanup);
-				cleanedTaskIds = written.cleanedTaskIds;
-				cleanedPaths = written.filePaths;
-			} catch (error) {
-				throw markRecordAlreadyMoved(error, "demotionState", "cleanup");
-			}
-
-			try {
-				if (await this.shouldAutoCommit(autoCommit)) {
-					const previousPaths = current.filePath ? [current.filePath] : [];
-					await this.commitWrittenFile(
-						`backlog: Demote task ${normalizeTaskId(current.id)}`,
-						previousPaths,
-						savedPath,
-						cleanedPaths,
-					);
-				}
-			} catch (error) {
-				throw markRecordAlreadyMoved(error, "demotionState", "commit");
-			}
-
-			return {
-				task: (await this.fs.loadDraft(demotedDraft.id)) ?? { ...demotedDraft, filePath: savedPath },
-				cleanedTaskIds,
-			};
-		});
-	}
-
-	/**
-	 * Execute the onStatusChange callback if configured.
-	 * Per-task callback takes precedence over global config.
-	 * Failures are logged but don't block the status change.
-	 */
-	private async executeStatusChangeCallback(task: Task, oldStatus: string, newStatus: string): Promise<void> {
-		const config = await this.fs.loadConfig();
-
-		// Per-task callback takes precedence over global config
-		const callbackCommand = task.onStatusChange ?? config?.onStatusChange;
-		if (!callbackCommand) {
-			return;
-		}
-
-		try {
-			const result = await executeStatusCallback({
-				command: callbackCommand,
-				taskId: task.id,
-				oldStatus,
-				newStatus,
-				taskTitle: task.title,
-				cwd: this.fs.rootDir,
-			});
-
-			if (!result.success) {
-				console.error(`Status change callback failed for ${task.id}: ${result.error ?? "Unknown error"}`);
-				if (result.output) {
-					console.error(`Callback output: ${result.output}`);
-				}
-			} else if (process.env.DEBUG && result.output) {
-				console.log(`Status change callback output for ${task.id}: ${result.output}`);
-			}
-		} catch (error) {
-			console.error(`Failed to execute status change callback for ${task.id}:`, error);
-		}
+		return await this.taskLifecycle.demoteTaskWithUpdates(task, input, autoCommit, options);
 	}
 
 	async editTask(
@@ -2388,11 +1361,8 @@ export class Core {
 		// Tasks that couldn't be loaded (may have been moved/deleted) drop out of the ordering
 		const validTasks = resolutions.map((resolution) => resolution.task).filter((t): t is Task => t !== null);
 
-		// Verify the moved task itself exists
-		const movedTask = validTasks.find((t) => t.id === taskId);
-		if (!movedTask) {
-			throw new Error(`Task ${taskId} not found while reordering`);
-		}
+		const movedTask = validTasks.find((task) => task.id === taskId);
+		if (!movedTask) throw new Error(`Task ${taskId} not found while reordering`);
 
 		// Reject reordering tasks from other branches - they can only be modified in their source branch
 		const crossBranchReason = crossBranchMoveReason(movedTask, "reordered");
@@ -2400,58 +1370,15 @@ export class Core {
 			throw new Error(crossBranchReason);
 		}
 
-		const hasTargetMilestone = params.targetMilestone !== undefined;
-		const normalizedTargetMilestone = normalizeTargetMilestone(params.targetMilestone);
-
-		// Calculate target index within the valid tasks list
-		const validOrderedIds = orderedTaskIds.filter((id) => validTasks.some((t) => t.id === id));
-		const targetIndex = validOrderedIds.indexOf(taskId);
-
-		if (targetIndex === -1) {
-			throw new Error("Implementation error: Task found in validTasks but index missing");
-		}
-
-		const previousTask = targetIndex > 0 ? validTasks[targetIndex - 1] : null;
-		const nextTask = targetIndex < validTasks.length - 1 ? validTasks[targetIndex + 1] : null;
-
-		const { ordinal: newOrdinal, requiresRebalance } = calculateNewOrdinal({
-			previous: previousTask,
-			next: nextTask,
+		const { updatedTask, changedTasks } = planTaskReorder(
+			taskId,
+			targetStatus,
+			orderedTaskIds,
+			validTasks,
+			params.targetMilestone,
 			defaultStep,
-		});
-
-		const updatedMoved: Task = {
-			...movedTask,
-			status: targetStatus,
-			...(hasTargetMilestone ? { milestone: normalizedTargetMilestone } : {}),
-			ordinal: newOrdinal,
-		};
-
-		const tasksInOrder: Task[] = validTasks.map((task, index) => (index === targetIndex ? updatedMoved : task));
-		const resolutionUpdates = resolveOrdinalConflicts(tasksInOrder, {
-			defaultStep,
-			startOrdinal: defaultStep,
-			forceSequential: requiresRebalance,
-		});
-
-		const updatesMap = new Map<string, Task>();
-		for (const update of resolutionUpdates) {
-			updatesMap.set(update.id, update);
-		}
-		if (!updatesMap.has(updatedMoved.id)) {
-			updatesMap.set(updatedMoved.id, updatedMoved);
-		}
-
-		const originalMap = new Map(validTasks.map((task) => [task.id, task]));
-		const changedTasks = Array.from(updatesMap.values()).filter((task) => {
-			const original = originalMap.get(task.id);
-			if (!original) return true;
-			return (
-				(original.ordinal ?? null) !== (task.ordinal ?? null) ||
-				(original.status ?? "") !== (task.status ?? "") ||
-				(original.milestone ?? "") !== (task.milestone ?? "")
-			);
-		});
+			normalizeTargetMilestone,
+		);
 
 		if (changedTasks.length > 0) {
 			await this.updateTasksBulk(
@@ -2461,7 +1388,6 @@ export class Core {
 			);
 		}
 
-		const updatedTask = updatesMap.get(taskId) ?? updatedMoved;
 		return { updatedTask, changedTasks };
 	}
 
@@ -2646,118 +1572,15 @@ export class Core {
 		return { movedTasks, changedTasks };
 	}
 
-	private async commitStagedMilestoneMove(
-		sourcePath: string,
-		targetPath: string,
-		message: string,
-		rollback: () => Promise<void>,
-	): Promise<void> {
-		const repoRoot = await this.git.stageFileMove(sourcePath, targetPath);
-		const commitPaths = [sourcePath, targetPath];
-		try {
-			await this.git.commitFiles(message, commitPaths, repoRoot);
-		} catch (error) {
-			await this.git.resetPaths(commitPaths, repoRoot);
-			await rollback();
-			throw error;
-		}
-	}
-
-	private async commitMilestoneMove(
-		result: { success: boolean; sourcePath?: string; targetPath?: string; milestone?: Milestone },
-		verb: "Archive" | "Rename",
-		autoCommitEnabled: boolean,
-		rollback: () => Promise<void>,
-	): Promise<void> {
-		if (!result.success || !result.sourcePath || !result.targetPath || !autoCommitEnabled) return;
-		const label = result.milestone?.id ? ` ${result.milestone.id}` : "";
-		await this.commitStagedMilestoneMove(
-			result.sourcePath,
-			result.targetPath,
-			`backlog: ${verb} milestone${label}`,
-			rollback,
-		);
-	}
-
 	async archiveTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<VacatedTaskResult> {
-		const taskToArchive = await this.loadTaskForMutation(taskId, options);
-		if (!taskToArchive) {
-			return { success: false, cleanedTaskIds: [] };
-		}
-		const normalizedTaskId = taskToArchive.id;
-
-		return await this.withVacatedIdCleanup(taskToArchive, normalizedTaskId, async (cleanup) => {
-			// A concurrent edit may have finished the work before this lock was acquired.
-			const current = await this.loadTaskForMutation(normalizedTaskId, options);
-			if (!current) return { success: false, cleanedTaskIds: [] };
-			const config = await this.fs.loadConfig();
-			const statuses = config?.statuses ?? [...DEFAULT_STATUSES];
-			if (isTerminalStatus(current.status, statuses)) {
-				throw new TaskArchiveStatusError(current.id, getTerminalStatus(statuses) ?? DEFAULT_DONE_STATUS);
-			}
-
-			const taskPath = current.filePath ?? (await getTaskPath(normalizedTaskId, this));
-			const taskFilename = taskPath ? basename(taskPath) : null;
-			if (!taskPath || !taskFilename) return { success: false, cleanedTaskIds: [] };
-
-			const fromPath = taskPath;
-			const toPath = join(await this.fs.getArchiveTasksDir(), taskFilename);
-
-			try {
-				await mkdir(dirname(toPath), { recursive: true });
-				await moveFile(fromPath, toPath);
-			} catch {
-				return { success: false, cleanedTaskIds: [] };
-			}
-			this.contentStore?.transitionTask(normalizedTaskId);
-
-			// The file is in the archive from here on. A cleanup write or a commit that fails after
-			// this point says so, rather than letting a caller retry an archive that already ran.
-			try {
-				const { cleanedTaskIds, filePaths } = await this.writeVacatedIdCleanup(cleanup);
-
-				if (await this.shouldAutoCommit(autoCommit)) {
-					// Stage the file move for proper Git tracking
-					const repoRoot = await this.git.stageFileMove(fromPath, toPath);
-					const commitPaths = [fromPath, toPath, ...filePaths];
-					for (const cleanedPath of filePaths) {
-						await this.git.addFile(cleanedPath);
-					}
-					await this.git.commitFiles(`backlog: Archive task ${normalizedTaskId}`, commitPaths, repoRoot);
-				}
-
-				return { success: true, cleanedTaskIds };
-			} catch (error) {
-				throw markRecordAlreadyMoved(error, "archiveState");
-			}
-		});
+		return await this.taskLifecycle.archive(taskId, autoCommit, options);
 	}
 
 	async archiveMilestone(
 		identifier: string,
 		autoCommit?: boolean,
 	): Promise<{ success: boolean; sourcePath?: string; targetPath?: string; milestone?: Milestone }> {
-		// Read the config before the move, so a config Backlog refuses to read aborts the command
-		// while the milestone is still active rather than after it has been archived.
-		const autoCommitEnabled = await this.shouldAutoCommit(autoCommit);
-		const result = await this.fs.archiveMilestone(identifier);
-
-		await this.commitMilestoneMove(result, "Archive", autoCommitEnabled, async () => {
-			const sourcePath = result.sourcePath as string;
-			const targetPath = result.targetPath as string;
-			try {
-				await moveFile(targetPath, sourcePath);
-			} catch {
-				// Ignore rollback failure and propagate original commit error.
-			}
-		});
-
-		return {
-			success: result.success,
-			sourcePath: result.sourcePath,
-			targetPath: result.targetPath,
-			milestone: result.milestone,
-		};
+		return await this.projectContent.archiveMilestone(identifier, autoCommit);
 	}
 
 	async renameMilestone(
@@ -2773,220 +1596,27 @@ export class Core {
 		previousTitle?: string;
 		previousDueDate?: string;
 	}> {
-		const result = await this.fs.renameMilestone(identifier, title, dueDate);
-		if (!result.success) {
-			return result;
-		}
-
-		await this.commitMilestoneMove(result, "Rename", await this.shouldAutoCommit(autoCommit), async () => {
-			const rollbackTitle = result.previousTitle ?? title;
-			try {
-				await this.fs.renameMilestone(
-					result.milestone?.id ?? identifier,
-					rollbackTitle,
-					result.previousDueDate ?? null,
-				);
-			} catch {
-				// Ignore rollback failure and propagate original commit error.
-			}
-		});
-
-		return result;
+		return await this.projectContent.renameMilestone(identifier, title, autoCommit, dueDate);
 	}
 
 	async completeTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<boolean> {
-		const task = await this.loadTaskForMutation(taskId, options);
-		if (!task) return false;
-		// Get paths before moving the file
-		const completedDir = this.fs.completedDir;
-		const taskPath = task.filePath ?? (await getTaskPath(task.id, this));
-		const taskFilename = taskPath ? basename(taskPath) : null;
-
-		if (!taskPath || !taskFilename) return false;
-
-		const fromPath = taskPath;
-		const toPath = join(completedDir, taskFilename);
-
-		try {
-			await mkdir(dirname(toPath), { recursive: true });
-			await moveFile(fromPath, toPath);
-		} catch {
-			return false;
-		}
-		this.contentStore?.transitionTask(task.id, { ...task, filePath: toPath, source: "completed" });
-
-		if (await this.shouldAutoCommit(autoCommit)) {
-			// Stage the file move for proper Git tracking
-			const repoRoot = await this.git.stageFileMove(fromPath, toPath);
-			await this.git.commitFiles(`backlog: Complete task ${task.id}`, [fromPath, toPath], repoRoot);
-		}
-
-		return true;
+		return await this.taskLifecycle.complete(taskId, autoCommit, options);
 	}
 
 	async getTerminalStatusTasksByAge(olderThanDays: number): Promise<Task[]> {
-		const tasks = await this.fs.listTasks();
-		const config = await this.fs.loadConfig();
-		const statuses = config?.statuses ?? [...DEFAULT_STATUSES];
-		const cutoffDate = new Date();
-		cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
-
-		return tasks.filter((task) => {
-			if (!isTerminalStatus(task.status, statuses)) return false;
-
-			// Check updatedDate first, then createdDate as fallback
-			const taskDate = task.updatedDate || task.createdDate;
-			if (!taskDate) return false;
-
-			const date = new Date(taskDate);
-			return date < cutoffDate;
-		});
+		return await this.taskLifecycle.getTerminalStatusTasksByAge(olderThanDays);
 	}
 
 	async archiveDraft(draftId: string, autoCommit?: boolean): Promise<boolean> {
-		// Read the config before the move: a config Backlog refuses to read must abort the command
-		// while the draft is still where the user left it, not after it has been half-archived.
-		const autoCommitEnabled = await this.shouldAutoCommit(autoCommit);
-		const moved = await this.fs.archiveDraft(draftId);
-
-		if (moved && autoCommitEnabled) {
-			await this.commitWrittenFile(
-				`backlog: Archive draft ${normalizeId(draftId, "draft")}`,
-				[moved.sourcePath],
-				moved.targetPath,
-			);
-		}
-
-		return moved !== null;
+		return await this.taskLifecycle.archiveDraft(draftId, autoCommit);
 	}
 
 	async promoteDraft(draftId: string, autoCommit?: boolean): Promise<boolean> {
-		// Whole-file operation: filename binding decides which file is promoted, so resolution
-		// goes through the file resolver and frontmatter equivalence is not required.
-		const sourcePath = await this.fs.resolveDraftFilePath(draftId);
-		if (!sourcePath) return false;
-		const canonicalId = extractDraftIdFromFilename(basename(sourcePath));
-		if (!canonicalId) return false;
-
-		// Hold the draft lock across the read-unlink span so a concurrent edit cannot be omitted
-		// from the promoted task or leave both records on disk. Draft lock first, create lock
-		// second: nothing acquires them in the opposite order, so this cannot deadlock.
-		return await this.fs.withDraftLock({ filePath: sourcePath, canonicalId }, async () => {
-			let moved: { previousPath: string; savedPath: string } | null = null;
-			try {
-				moved = await this.withCreateLock(async () => {
-					const draft = await this.fs.loadDraftFromFile(sourcePath);
-					if (!draft) return null;
-
-					const config = await this.fs.loadConfig();
-					const newTaskId = await this.generateNextId(EntityType.Task, draft.parentTaskId);
-					const promotedStatus =
-						!draft.status || draft.status.trim().toLowerCase() === "draft"
-							? config?.defaultStatus || FALLBACK_STATUS
-							: draft.status;
-
-					const promotedTask: Task = {
-						...draft,
-						id: newTaskId,
-						status: promotedStatus,
-						filePath: undefined,
-					};
-
-					normalizeAssignee(promotedTask);
-					const savedPath = await this.fs.saveTask(promotedTask);
-					await unlink(sourcePath);
-
-					const savedTask = await this.fs.loadTask(promotedTask.id);
-					if (this.contentStore && savedTask) {
-						this.contentStore.upsertTask(savedTask);
-					}
-
-					return { previousPath: sourcePath, savedPath };
-				});
-			} catch (error) {
-				// A missing draft is the only thing "false" may mean here; a config value Backlog refuses to
-				// read must not be reported as a draft that does not exist.
-				if (isCreateLockError(error) || isConfigValueError(error)) {
-					throw error;
-				}
-				return false;
-			}
-
-			if (moved && (await this.shouldAutoCommit(autoCommit))) {
-				await this.commitWrittenFile(
-					`backlog: Promote draft ${normalizeId(draftId, "draft")}`,
-					[moved.previousPath],
-					moved.savedPath,
-				);
-			}
-
-			return moved !== null;
-		});
+		return await this.taskLifecycle.promoteDraft(draftId, autoCommit);
 	}
 
 	async demoteTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<VacatedTaskResult> {
-		const task = await this.loadTaskForMutation(taskId, options);
-		if (!task) return { success: false, cleanedTaskIds: [] };
-		// Direct demotion is a read-modify-write too. Hold the task lock across the
-		// filesystem read and move so an in-flight task update cannot recreate the
-		// active file after this operation has written the draft. The record demoted here also
-		// vacates its task ID, so the dependents are locked and cleaned in the same span.
-		const demotion = {
-			success: false,
-			moved: undefined as { previousPath: string; savedPath: string } | undefined,
-			cleanedTaskIds: [] as string[],
-			cleanedPaths: [] as string[],
-		};
-		let result: typeof demotion;
-		try {
-			result = await this.withVacatedIdCleanup(task, task.id, async (cleanup) => {
-				const movedPaths: Array<{ previousPath: string; savedPath: string }> = [];
-				const success = await this.fs.demoteTask(task.id, (previousPath, savedPath) => {
-					movedPaths.push({ previousPath, savedPath });
-				});
-				// Record the move before anything that can fail after it. A cleanup write that
-				// throws must still report the demotion as "moved", or a client is told the task
-				// is untouched and retries a demotion that already happened.
-				demotion.success = success;
-				demotion.moved = movedPaths[0];
-				if (success) {
-					this.contentStore?.transitionTask(task.id);
-					try {
-						const written = await this.writeVacatedIdCleanup(cleanup);
-						demotion.cleanedTaskIds = written.cleanedTaskIds;
-						demotion.cleanedPaths = written.filePaths;
-					} catch (error) {
-						throw markRecordAlreadyMoved(error, "demotionState", "cleanup");
-					}
-				}
-				return demotion;
-			});
-		} catch (error) {
-			// The lock wrapper can fail while releasing after the move completed. Keep
-			// the mutation outcome visible to the Web API and other clients.
-			if (demotion.success && demotion.moved) {
-				throw markRecordAlreadyMoved(error, "demotionState");
-			}
-			throw error;
-		}
-		const { success, moved, cleanedTaskIds, cleanedPaths } = result;
-
-		if (success && moved) {
-			try {
-				if (await this.shouldAutoCommit(autoCommit)) {
-					await this.commitWrittenFile(
-						`backlog: Demote task ${task.id}`,
-						[moved.previousPath],
-						moved.savedPath,
-						cleanedPaths,
-					);
-				}
-			} catch (error) {
-				throw markRecordAlreadyMoved(error, "demotionState", "commit");
-			}
-		}
-
-		return { success, cleanedTaskIds };
+		return await this.taskLifecycle.demoteTask(taskId, autoCommit, options);
 	}
 
 	/**
@@ -3090,91 +1720,29 @@ export class Core {
 	 * Stage and commit a single written file, scoped to exactly the paths this write touched
 	 * (the new file, plus any previous paths it replaced). Never sweeps in unrelated dirty state.
 	 */
-	private async commitWrittenFile(
+	async commitWrittenFile(
 		message: string,
 		previousPaths: string[],
 		newPath: string,
 		alsoWrittenPaths: string[] = [],
 	): Promise<void> {
-		for (const writtenPath of alsoWrittenPaths) {
-			await this.git.addFile(writtenPath);
-		}
-		if (previousPaths.length > 0) {
-			let repoRoot: string | null = null;
-			for (const previousPath of previousPaths) {
-				repoRoot = await this.git.stageFileMove(previousPath, newPath);
-			}
-			await this.git.commitFiles(message, [...previousPaths, newPath, ...alsoWrittenPaths], repoRoot);
-		} else {
-			await this.git.addFile(newPath);
-			await this.git.commitFiles(message, [newPath, ...alsoWrittenPaths]);
-		}
+		await this.taskMutations.commitWrittenFile(message, previousPaths, newPath, alsoWrittenPaths);
 	}
 
 	async createDecision(decision: Decision, autoCommit?: boolean): Promise<void> {
-		const { filepath, removedFilepaths } = await this.fs.saveDecision(decision);
-
-		if (await this.shouldAutoCommit(autoCommit)) {
-			await this.commitWrittenFile(`backlog: Add decision ${decision.id}`, removedFilepaths, filepath);
-		}
+		return await this.projectContent.createDecision(decision, autoCommit);
 	}
 
 	async updateDecisionFromContent(decisionId: string, content: string, autoCommit?: boolean): Promise<void> {
-		const existingDecision = await this.fs.loadDecision(decisionId);
-		if (!existingDecision) {
-			throw new Error(`Decision ${decisionId} not found`);
-		}
-
-		// Parse the markdown content to extract the decision data
-		const frontmatter = parseFrontmatter(content).data as Partial<Pick<Decision, "title" | "status" | "date">>;
-
-		const extractSection = (content: string, sectionName: string): string | undefined => {
-			const regex = new RegExp(`## ${sectionName}\\s*([\\s\\S]*?)(?=## |$)`, "i");
-			const match = content.match(regex);
-			return match ? match[1]?.trim() : undefined;
-		};
-
-		const updatedDecision = {
-			...existingDecision,
-			title: frontmatter.title || existingDecision.title,
-			status: frontmatter.status || existingDecision.status,
-			date: frontmatter.date || existingDecision.date,
-			context: extractSection(content, "Context") || existingDecision.context,
-			decision: extractSection(content, "Decision") || existingDecision.decision,
-			consequences: extractSection(content, "Consequences") || existingDecision.consequences,
-			alternatives: extractSection(content, "Alternatives") || existingDecision.alternatives,
-		};
-
-		await this.createDecision(updatedDecision, autoCommit);
+		return await this.projectContent.updateDecisionFromContent(decisionId, content, autoCommit);
 	}
 
 	async createDecisionWithTitle(title: string, autoCommit?: boolean): Promise<Decision> {
-		const id = await generateNextDecisionId(this);
-
-		const decision: Decision = {
-			id,
-			title,
-			date: formatStoredDate(),
-			status: "proposed",
-			context: "[Describe the context and problem that needs to be addressed]",
-			decision: "[Describe the decision that was made]",
-			consequences: "[Describe the consequences of this decision]",
-			rawContent: "",
-		};
-
-		await this.createDecision(decision, autoCommit);
-		return decision;
+		return await this.projectContent.createDecisionWithTitle(title, autoCommit);
 	}
 
 	async createDocument(doc: Document, autoCommit?: boolean, subPath = ""): Promise<void> {
-		const { relativePath, removedFilepaths } = await this.fs.saveDocument(doc, normalizeDocumentSubPath(subPath));
-		doc.path = relativePath;
-
-		if (await this.shouldAutoCommit(autoCommit)) {
-			const docsDir = this.fs.docsDir;
-			const absolutePath = join(docsDir, ...relativePath.split("/"));
-			await this.commitWrittenFile(`backlog: Add document ${doc.id}`, removedFilepaths, absolutePath);
-		}
+		return await this.projectContent.createDocument(doc, autoCommit, subPath);
 	}
 
 	async updateDocument(existingDoc: Document, content: string, autoCommit?: boolean): Promise<void> {
@@ -3196,61 +1764,11 @@ export class Core {
 	}
 
 	async createDocumentFromInput(input: DocumentCreateInput, autoCommit?: boolean): Promise<Document> {
-		const title = input.title.trim();
-		if (!title) {
-			throw new Error("Title is required to create a document.");
-		}
-
-		const subPath = normalizeDocumentSubPath(input.path);
-		const tags = normalizeStringList(input.tags);
-		const type = normalizeDocumentTypeInput(input.type) ?? "other";
-		const document = await this.withCreateLock(async () => {
-			const id = normalizeDocumentId(await generateNextDocId(this));
-			const document: Document = {
-				id,
-				title,
-				type,
-				createdDate: formatStoredDate(),
-				rawContent: input.content ?? "",
-				...(tags && tags.length > 0 && { tags }),
-			};
-
-			await this.createDocument(document, autoCommit, subPath);
-			return document;
-		});
-
-		return (await this.getDocument(document.id)) ?? document;
+		return await this.projectContent.createDocumentFromInput(input, autoCommit);
 	}
 
 	async updateDocumentFromInput(input: DocumentUpdateInput, autoCommit?: boolean): Promise<Document> {
-		const existingDoc = await this.getDocument(input.id);
-		if (!existingDoc) {
-			throw new Error(`Document not found: ${input.id}`);
-		}
-
-		const normalizedTitle = input.title?.trim();
-		if (input.title !== undefined && !normalizedTitle) {
-			throw new Error("Document title cannot be empty.");
-		}
-
-		const tags = input.tags !== undefined ? normalizeStringList(input.tags) : existingDoc.tags;
-		const type = normalizeDocumentTypeInput(input.type) ?? existingDoc.type;
-		const subPath =
-			input.path === undefined
-				? getDocumentSubPathFromRelativePath(existingDoc.path)
-				: normalizeDocumentSubPath(input.path);
-		const updatedDoc: Document = {
-			...existingDoc,
-			id: normalizeDocumentId(existingDoc.id),
-			title: normalizedTitle ?? existingDoc.title,
-			type,
-			rawContent: input.content,
-			updatedDate: formatStoredDate(),
-			tags: tags && tags.length > 0 ? tags : undefined,
-		};
-
-		await this.createDocument(updatedDoc, autoCommit, subPath);
-		return (await this.getDocument(existingDoc.id)) ?? updatedDoc;
+		return await this.projectContent.updateDocumentFromInput(input, autoCommit);
 	}
 
 	async listTasksWithMetadata(
@@ -3285,259 +1803,13 @@ export class Core {
 	 * @param filePath - Path to the file to edit
 	 * @param screen - Optional blessed screen to suspend (for TUI contexts)
 	 */
-	private async prepareTuiTaskEdit(
-		taskId: string,
-		selectedTask?: Task,
-	): Promise<TuiTaskEditSession | TuiTaskEditResult> {
-		const contextualTask = selectedTask && taskIdsEqual(selectedTask.id, taskId) ? selectedTask : undefined;
-
-		if (contextualTask && (!isLocalEditableTask(contextualTask) || contextualTask.branch)) {
-			return { changed: false, task: contextualTask, reason: "read_only" };
-		}
-
-		let resolvedTask: Task | null | undefined = contextualTask ?? (await this.getTask(taskId));
-		if (!resolvedTask) {
-			try {
-				resolvedTask = await this.fs.loadDraft(taskId);
-			} catch (error) {
-				if (isAmbiguousIdError(error)) {
-					return { changed: false, reason: "ambiguous" };
-				}
-				throw error;
-			}
-		}
-		if (!resolvedTask) {
-			return { changed: false, reason: "not_found" };
-		}
-		if (!isLocalEditableTask(resolvedTask) || resolvedTask.branch) {
-			return { changed: false, task: resolvedTask, reason: "read_only" };
-		}
-
-		const draftsDir = await this.fs.getDraftsDir();
-		const selectedFilePath = resolvedTask.filePath;
-
-		let taskFilePath: string | null = null;
-		let draftFilePath: string | null = null;
-		let editableTask: Task;
-
-		if (selectedFilePath !== undefined && dirname(selectedFilePath) === draftsDir) {
-			// The row's home directory decides its store before any task lookup: a project whose
-			// task prefix is "draft" can hold task ids identical to draft ids, so resolving by id
-			// first would silently target the task file instead of the selected draft row. The
-			// validated reference binds the editor session to this exact file — but a numeric
-			// identity shared with another file stays ambiguous and must fail closed here too.
-			let validated: Awaited<ReturnType<FileSystem["draftReferenceFromPath"]>>;
-			try {
-				validated = await this.fs.draftReferenceFromPath(selectedFilePath);
-			} catch (error) {
-				return {
-					changed: false,
-					task: resolvedTask,
-					reason: error instanceof DraftParseError ? "unreadable" : "identity_conflict",
-				};
-			}
-			const selectedDuplicates = findDuplicateDraftFilenameGroups(await this.fs.listDraftFilenames()).find((group) =>
-				group.includes(basename(selectedFilePath)),
-			);
-			if (selectedDuplicates) {
-				return { changed: false, task: resolvedTask, reason: "ambiguous" };
-			}
-			editableTask = validated.task;
-			draftFilePath = validated.filePath;
-		} else {
-			const localTask = await this.fs.loadTask(resolvedTask.id);
-			editableTask = localTask ?? resolvedTask;
-
-			taskFilePath = await getTaskPath(editableTask.id, this);
-			if (!taskFilePath) {
-				const rowFilePath = editableTask.filePath;
-				if (rowFilePath !== undefined && dirname(rowFilePath) === draftsDir) {
-					let validatedRow: Awaited<ReturnType<FileSystem["draftReferenceFromPath"]>>;
-					try {
-						validatedRow = await this.fs.draftReferenceFromPath(rowFilePath);
-					} catch (error) {
-						return {
-							changed: false,
-							task: editableTask,
-							reason: error instanceof DraftParseError ? "unreadable" : "identity_conflict",
-						};
-					}
-					const rowDuplicates = findDuplicateDraftFilenameGroups(await this.fs.listDraftFilenames()).find((group) =>
-						group.includes(basename(rowFilePath)),
-					);
-					if (rowDuplicates) {
-						return { changed: false, task: editableTask, reason: "ambiguous" };
-					}
-					draftFilePath = validatedRow.filePath;
-				} else {
-					const resolvedReference = await this.fs.resolveDraftReference(editableTask.id);
-					if (!resolvedReference) {
-						return { changed: false, task: editableTask, reason: "not_found" };
-					}
-					editableTask = resolvedReference.task;
-					draftFilePath = resolvedReference.filePath;
-				}
-			}
-		}
-
-		const filePath = taskFilePath ?? draftFilePath;
-		if (!filePath) {
-			return { changed: false, task: editableTask, reason: "not_found" };
-		}
-		return { task: editableTask, taskFilePath, filePath };
-	}
-
 	async editTaskInTui(taskId: string, screen: BlessedScreen, selectedTask?: Task): Promise<TuiTaskEditResult> {
-		const session = await this.prepareTuiTaskEdit(taskId, selectedTask);
-		if ("changed" in session) return session;
-		const { task: editableTask, taskFilePath, filePath } = session;
-		// Re-reading through the validation authority keeps the editor session honest. Parse or
-		// read failures and genuine identity conflicts are reported as distinct outcomes. The
-		// known on-disk path is attached to reloaded tasks so contentStore publication works.
-		const reloadTaskAfterEdit = async (path: string): Promise<{ task: Task } | { failure: "unreadable" }> => {
-			try {
-				const content = await Bun.file(path).text();
-				const reparsed = normalizeTaskIdentity(parseTask(content));
-				return { task: { ...reparsed, filePath: path } };
-			} catch {
-				return { failure: "unreadable" };
-			}
-		};
-
-		let beforeContent: string;
-		try {
-			beforeContent = await Bun.file(filePath).text();
-		} catch {
-			return { changed: false, task: editableTask, reason: "not_found" };
-		}
-
-		const opened = await this.openEditor(filePath, screen);
-		if (!opened) {
-			return { changed: false, task: editableTask, reason: "editor_failed" };
-		}
-
-		let afterContent: string;
-		try {
-			afterContent = await Bun.file(filePath).text();
-		} catch {
-			return { changed: false, task: editableTask, reason: "not_found" };
-		}
-
-		if (afterContent === beforeContent) {
-			if (!taskFilePath) {
-				try {
-					return { changed: false, task: (await this.fs.draftReferenceFromPath(filePath)).task };
-				} catch (error) {
-					return {
-						changed: false,
-						task: editableTask,
-						reason: error instanceof DraftParseError ? "unreadable" : "identity_conflict",
-					};
-				}
-			}
-			const outcome = await reloadTaskAfterEdit(taskFilePath);
-			if ("failure" in outcome) {
-				return { changed: false, task: editableTask, reason: outcome.failure };
-			}
-			return { changed: false, task: outcome.task };
-		}
-
-		const now = formatStoredDate();
-
-		if (!taskFilePath) {
-			// Draft close: hold the draft lock around the write+validate window so a concurrent
-			// edit cannot interleave with the save. The lock is never held across the interactive
-			// editor itself; contention detected inside fails fast and leaves the user's saved
-			// content on disk untouched. Identity or parse problems keep their distinct reasons.
-			const canonicalId = extractDraftIdFromFilename(basename(filePath)) ?? "";
-			try {
-				return await this.fs.withDraftLock({ filePath, canonicalId }, async () => {
-					const currentOnDisk = await Bun.file(filePath).text();
-					if (currentOnDisk !== afterContent) {
-						throw newTaskLockError(canonicalId);
-					}
-					await Bun.write(filePath, upsertTaskUpdatedDate(afterContent, now));
-					const validated = await this.fs.draftReferenceFromPath(filePath);
-					return { changed: true, task: validated.task };
-				});
-			} catch (error) {
-				if (error instanceof DraftParseError) {
-					return { changed: false, task: editableTask, reason: "unreadable" };
-				}
-				if (error instanceof DraftIdentityError) {
-					return { changed: false, task: editableTask, reason: "identity_conflict" };
-				}
-				throw error;
-			}
-		}
-
-		await Bun.write(filePath, upsertTaskUpdatedDate(afterContent, now));
-
-		const outcome = await reloadTaskAfterEdit(taskFilePath);
-		if ("failure" in outcome) {
-			return { changed: false, task: editableTask, reason: outcome.failure };
-		}
-		const refreshedTask = outcome.task;
-		if (this.contentStore && refreshedTask) {
-			this.contentStore.upsertTask(refreshedTask);
-		}
-
-		return {
-			changed: true,
-			task: refreshedTask ?? { ...editableTask, updatedDate: now },
-		};
-	}
-
-	async openEditor(filePath: string, screen?: BlessedScreen): Promise<boolean> {
-		const config = await this.fs.loadConfig();
-
-		// If no screen provided, use simple editor opening
-		if (!screen) {
-			return await openInEditor(filePath, config);
-		}
-
-		const program = screen.program;
-
-		// Leave alternate screen buffer FIRST
-		screen.leave();
-
-		// Reset keypad/cursor mode using terminfo if available
-		if (typeof program.put?.keypad_local === "function") {
-			program.put.keypad_local();
-			if (typeof program.flush === "function") {
-				program.flush();
-			}
-		}
-
-		// Send escape sequences directly as reinforcement
-		// ESC[0m   = Reset all SGR attributes (fixes white background in nano)
-		// ESC[?25h = Show cursor (ensure cursor is visible)
-		// ESC[?1l  = Reset DECCKM (cursor keys send CSI sequences)
-		// ESC>     = DECKPNM (numeric keypad mode)
-		const fs = await import("node:fs");
-		fs.writeSync(1, "\u001b[0m\u001b[?25h\u001b[?1l\u001b>");
-
-		// Pause the terminal AFTER leaving alt buffer (disables raw mode, releases terminal)
-		const resume = typeof program.pause === "function" ? program.pause() : undefined;
-		try {
-			return await openInEditor(filePath, config);
-		} finally {
-			// Resume terminal state FIRST (re-enables raw mode)
-			if (typeof resume === "function") {
-				resume();
-			}
-			// Re-enter alternate screen buffer
-			screen.enter();
-			// Restore application cursor mode
-			if (typeof program.put?.keypad_xmit === "function") {
-				program.put.keypad_xmit();
-				if (typeof program.flush === "function") {
-					program.flush();
-				}
-			}
-			// Full redraw
-			screen.render();
-		}
+		return await editTaskInTuiSession(taskId, screen, selectedTask, {
+			fs: this.fs,
+			getTask: (id) => this.getTask(id),
+			getTaskPath: (id) => getTaskPath(id, this),
+			getContentStore: () => this.contentStore,
+		});
 	}
 
 	/**
@@ -3712,13 +1984,11 @@ export class Core {
 		git.setConfig(config);
 		// A cancelled load must not wait out the fetch timeout before noticing.
 		this.assertTaskLoadNotCancelled(abortSignal);
-		await this.refreshRemoteRefsForTaskRead(config, git, { force: options.forceRemoteRefresh });
+		await this.refreshRemoteRefsForTaskRead(config, { force: options.forceRemoteRefresh });
 		assertCurrentProject();
-		const settingsKey = JSON.stringify(this.getActiveBranchSettings(config, filesystem));
+		const settingsKey = JSON.stringify(this.getActiveBranchSettings(config));
 		const snapshotBefore =
-			retrySnapshot?.settingsKey === settingsKey
-				? retrySnapshot
-				: await this.getActiveBranchSnapshot(config, generation, filesystem, git);
+			retrySnapshot?.settingsKey === settingsKey ? retrySnapshot : await this.getActiveBranchSnapshot(config);
 		assertCurrentProject();
 		const statuses = config?.statuses || [...DEFAULT_STATUSES];
 		const resolutionStrategy = config?.taskResolutionStrategy || "most_progressed";
@@ -3768,7 +2038,7 @@ export class Core {
 		// This read must begin after this scan finishes. Reusing an unrelated
 		// in-flight pre-scan snapshot could otherwise publish a generation that
 		// moved while immutable commit trees were still being indexed.
-		const snapshotAfter = await this.computeActiveBranchSnapshot(await filesystem.loadConfig(), filesystem, git);
+		const snapshotAfter = await this.computeActiveBranchSnapshot(await filesystem.loadConfig());
 		assertCurrentProject();
 		if (snapshotBefore.stabilityFingerprint !== snapshotAfter.stabilityFingerprint) {
 			throw new TaskCorpusSnapshotRetry(snapshotAfter);

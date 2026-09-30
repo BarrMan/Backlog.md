@@ -133,16 +133,26 @@ function assignTaskLists(updateInput: TaskUpdateInput, args: TaskEditArgs): void
 }
 
 function assignTaskSections(updateInput: TaskUpdateInput, args: TaskEditArgs): void {
-	const planSet = args.planSet ?? args.implementationPlan;
-	if (typeof planSet === "string") updateInput.implementationPlan = planSet;
-	const planAppends = sanitizeAppend(args.planAppend);
-	if (planAppends) updateInput.appendImplementationPlan = planAppends;
-	if (args.planClear) updateInput.clearImplementationPlan = true;
-	const notesSet = args.notesSet ?? args.implementationNotes;
-	if (typeof notesSet === "string") updateInput.implementationNotes = notesSet;
-	const notesAppends = sanitizeAppend(args.notesAppend);
-	if (notesAppends) updateInput.appendImplementationNotes = notesAppends;
-	if (args.notesClear) updateInput.clearImplementationNotes = true;
+	assignTextSection(
+		updateInput,
+		args,
+		"planSet",
+		"implementationPlan",
+		"planAppend",
+		"appendImplementationPlan",
+		"planClear",
+		"clearImplementationPlan",
+	);
+	assignTextSection(
+		updateInput,
+		args,
+		"notesSet",
+		"implementationNotes",
+		"notesAppend",
+		"appendImplementationNotes",
+		"notesClear",
+		"clearImplementationNotes",
+	);
 	const commentsAppends = sanitizeAppend(args.commentsAppend);
 	if (commentsAppends) {
 		const author =
@@ -157,6 +167,23 @@ function assignTaskSections(updateInput: TaskUpdateInput, args: TaskEditArgs): v
 	if (args.finalSummaryClear) updateInput.clearFinalSummary = true;
 	const criteriaSet = toAcceptanceCriteriaEntries(args.acceptanceCriteriaSet);
 	if (criteriaSet) updateInput.acceptanceCriteria = criteriaSet;
+}
+
+function assignTextSection(
+	updateInput: TaskUpdateInput,
+	args: TaskEditArgs,
+	setField: "planSet" | "notesSet",
+	legacySetField: "implementationPlan" | "implementationNotes",
+	appendField: "planAppend" | "notesAppend",
+	outputAppendField: "appendImplementationPlan" | "appendImplementationNotes",
+	clearField: "planClear" | "notesClear",
+	outputClearField: "clearImplementationPlan" | "clearImplementationNotes",
+): void {
+	const setValue = args[setField] ?? args[legacySetField];
+	if (typeof setValue === "string") updateInput[legacySetField] = setValue;
+	const appends = sanitizeAppend(args[appendField]);
+	if (appends) updateInput[outputAppendField] = appends;
+	if (args[clearField]) updateInput[outputClearField] = true;
 }
 
 export function buildTaskUpdateInput(args: TaskEditArgs): TaskUpdateInput {

@@ -81,46 +81,39 @@ function stripGuidelineSection(
 	let result = content;
 	let firstIndex: number | undefined;
 
-	while (true) {
-		const startIndex = result.indexOf(start);
-		if (startIndex === -1) {
-			break;
-		}
-
-		const endIndex = result.indexOf(end, startIndex);
-		if (endIndex === -1) {
-			break;
-		}
-
-		let removalStart = startIndex;
-		while (removalStart > 0 && (result[removalStart - 1] === " " || result[removalStart - 1] === "\t")) {
-			removalStart -= 1;
-		}
-		if (removalStart > 0 && result[removalStart - 1] === "\n") {
-			removalStart -= 1;
-			if (removalStart > 0 && result[removalStart - 1] === "\r") {
-				removalStart -= 1;
-			}
-		} else if (removalStart > 0 && result[removalStart - 1] === "\r") {
-			removalStart -= 1;
-		}
-
-		let removalEnd = endIndex + end.length;
-		if (removalEnd < result.length && result[removalEnd] === "\r") {
-			removalEnd += 1;
-		}
-		if (removalEnd < result.length && result[removalEnd] === "\n") {
-			removalEnd += 1;
-		}
-
-		if (firstIndex === undefined) {
-			firstIndex = removalStart;
-		}
-		result = result.slice(0, removalStart) + result.slice(removalEnd);
+	for (let block = findGuidelineBlock(result, start, end); block; block = findGuidelineBlock(result, start, end)) {
+		if (firstIndex === undefined) firstIndex = block.start;
+		result = result.slice(0, block.start) + result.slice(block.end);
 		removed = true;
 	}
 
 	return { content: result, removed, firstIndex };
+}
+
+function findGuidelineBlock(content: string, start: string, end: string): { start: number; end: number } | undefined {
+	const startIndex = content.indexOf(start);
+	if (startIndex === -1) return undefined;
+	const endIndex = content.indexOf(end, startIndex);
+	if (endIndex === -1) return undefined;
+	return {
+		start: trimGuidelineStart(content, startIndex),
+		end: consumeGuidelineEnd(content, endIndex + end.length),
+	};
+}
+
+function trimGuidelineStart(content: string, index: number): number {
+	let start = index;
+	while (start > 0 && (content[start - 1] === " " || content[start - 1] === "\t")) start -= 1;
+	if (content[start - 1] === "\n") start -= 1;
+	if (content[start - 1] === "\r") start -= 1;
+	return start;
+}
+
+function consumeGuidelineEnd(content: string, index: number): number {
+	let end = index;
+	if (content[end] === "\r") end += 1;
+	if (content[end] === "\n") end += 1;
+	return end;
 }
 
 export async function addAgentInstructions(
@@ -138,68 +131,11 @@ export async function addAgentInstructions(
 	};
 
 	const version = await getVersion();
-	const paths: string[] = [];
 	const results: AgentInstructionWriteResult[] = [];
-	for (const name of files) {
-		const content = await loadContent(mapping[name]);
-		const filePath = join(projectRoot, name);
-		let finalContent = "";
-		const fileExists = existsSync(filePath);
-		const action: AgentInstructionWriteAction = fileExists ? "updated" : "created";
-
-		// Check if file exists first to avoid Windows hanging issue
-		if (fileExists) {
-			try {
-				// On Windows, use synchronous read to avoid hanging
-				let existing: string;
-				if (process.platform === "win32") {
-					existing = readFileSync(filePath, "utf-8");
-				} else {
-					existing = await Bun.file(filePath).text();
-				}
-
-				const originalExisting = existing;
-				const mcpStripped = stripGuidelineSection(existing, "mcp");
-				if (mcpStripped.removed) {
-					existing = mcpStripped.content;
-				}
-
-				const defaultStripped = stripGuidelineSection(existing, "default");
-				if (defaultStripped.removed) {
-					const insertAt = defaultStripped.firstIndex ?? defaultStripped.content.length;
-					finalContent =
-						defaultStripped.content.slice(0, insertAt) +
-						wrapWithMarkers(content, version) +
-						defaultStripped.content.slice(insertAt);
-				} else if (hasBacklogGuidelines(existing)) {
-					// Guidelines already exist but could not be parsed, skip this file.
-					results.push({ action: "unchanged", fileName: name, filePath });
-					continue;
-				} else {
-					// Append Backlog.md guidelines with markers
-					if (!existing.endsWith("\n")) existing += "\n";
-					finalContent = existing + wrapWithMarkers(content, version);
-				}
-
-				if (finalContent === originalExisting) {
-					results.push({ action: "unchanged", fileName: name, filePath });
-					continue;
-				}
-			} catch (error) {
-				console.error(`Error reading existing file ${filePath}:`, error);
-				// If we can't read it, just use the new content with markers
-				finalContent = wrapWithMarkers(content, version);
-			}
-		} else {
-			// File doesn't exist, create with markers
-			finalContent = wrapWithMarkers(content, version);
-		}
-
-		await mkdir(dirname(filePath), { recursive: true });
-		await Bun.write(filePath, finalContent);
-		paths.push(filePath);
-		results.push({ action, fileName: name, filePath });
+	for (const fileName of files) {
+		results.push(await updateAgentInstructionFile(projectRoot, fileName, mapping[fileName], version));
 	}
+	const paths = results.filter((result) => result.action !== "unchanged").map((result) => result.filePath);
 
 	if (git && paths.length > 0 && autoCommit) {
 		await git.addFiles(paths);
@@ -207,6 +143,40 @@ export async function addAgentInstructions(
 	}
 
 	return results;
+}
+
+async function updateAgentInstructionFile(
+	projectRoot: string,
+	fileName: AgentInstructionFile,
+	guidelines: string,
+	version: string,
+): Promise<AgentInstructionWriteResult> {
+	const filePath = join(projectRoot, fileName);
+	const fileExists = existsSync(filePath);
+	const action: AgentInstructionWriteAction = fileExists ? "updated" : "created";
+	const content = await loadContent(guidelines);
+	let existing = "";
+	try {
+		if (fileExists) existing = await readExistingFile(filePath);
+	} catch (error) {
+		console.error(`Error reading existing file ${filePath}:`, error);
+	}
+	const nextContent = replaceCliGuidelines(existing, content, version);
+	if (nextContent === undefined || nextContent === existing) return { action: "unchanged", fileName, filePath };
+	await mkdir(dirname(filePath), { recursive: true });
+	await Bun.write(filePath, nextContent);
+	return { action, fileName, filePath };
+}
+
+function replaceCliGuidelines(existing: string, content: string, version: string): string | undefined {
+	const withoutMcp = stripGuidelineSection(existing, "mcp").content;
+	const stripped = stripGuidelineSection(withoutMcp, "default");
+	if (!stripped.removed && hasBacklogGuidelines(withoutMcp)) return undefined;
+	if (stripped.removed) {
+		const index = stripped.firstIndex ?? stripped.content.length;
+		return stripped.content.slice(0, index) + wrapWithMarkers(content, version) + stripped.content.slice(index);
+	}
+	return `${withoutMcp}${withoutMcp && !withoutMcp.endsWith("\n") ? "\n" : ""}${wrapWithMarkers(content, version)}`;
 }
 
 export { loadContent as _loadAgentGuideline };
@@ -231,44 +201,8 @@ export async function ensureMcpGuidelines(
 ): Promise<EnsureMcpGuidelinesResult> {
 	const filePath = join(projectRoot, fileName);
 	const fileExists = existsSync(filePath);
-	let existing = "";
-	let original = "";
-	let insertIndex: number | null = null;
-
-	if (fileExists) {
-		try {
-			existing = await readExistingFile(filePath);
-			original = existing;
-			const cliStripped = stripGuidelineSection(existing, "default");
-			if (cliStripped.removed && cliStripped.firstIndex !== undefined) {
-				insertIndex = cliStripped.firstIndex;
-			}
-			existing = cliStripped.content;
-			const mcpStripped = stripGuidelineSection(existing, "mcp");
-			if (mcpStripped.removed && mcpStripped.firstIndex !== undefined) {
-				insertIndex = mcpStripped.firstIndex;
-			}
-			existing = mcpStripped.content;
-		} catch (error) {
-			console.error(`Error reading existing file ${filePath}:`, error);
-			existing = "";
-		}
-	}
-
-	const nudgeBlock = wrapWithMarkers(MCP_AGENT_NUDGE, await getVersion(), "mcp");
-	let nextContent: string;
-	if (insertIndex !== null) {
-		const normalizedIndex = Math.max(0, Math.min(insertIndex, existing.length));
-		nextContent = existing.slice(0, normalizedIndex) + nudgeBlock + existing.slice(normalizedIndex);
-	} else {
-		nextContent = existing;
-		if (nextContent && !nextContent.endsWith("\n")) {
-			nextContent += "\n";
-		}
-		nextContent += nudgeBlock;
-	}
-
-	const finalContent = nextContent;
+	const original = fileExists ? await readMcpInstructionFile(filePath) : "";
+	const finalContent = replaceMcpGuidelines(original, wrapWithMarkers(MCP_AGENT_NUDGE, await getVersion(), "mcp"));
 	const changed = !fileExists || finalContent !== original;
 
 	await mkdir(dirname(filePath), { recursive: true });
@@ -277,6 +211,25 @@ export async function ensureMcpGuidelines(
 	}
 
 	return { changed, created: !fileExists, fileName, filePath };
+}
+
+async function readMcpInstructionFile(filePath: string): Promise<string> {
+	try {
+		return await readExistingFile(filePath);
+	} catch (error) {
+		console.error(`Error reading existing file ${filePath}:`, error);
+		return "";
+	}
+}
+
+function replaceMcpGuidelines(original: string, nudgeBlock: string): string {
+	const cliStripped = stripGuidelineSection(original, "default");
+	const mcpStripped = stripGuidelineSection(cliStripped.content, "mcp");
+	const insertIndex = mcpStripped.firstIndex ?? cliStripped.firstIndex;
+	const existing = mcpStripped.content;
+	if (insertIndex === undefined) return `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${nudgeBlock}`;
+	const index = Math.max(0, Math.min(insertIndex, existing.length));
+	return existing.slice(0, index) + nudgeBlock + existing.slice(index);
 }
 
 /**

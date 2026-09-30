@@ -19,7 +19,7 @@ let TEST_DIR: string;
 let mcpServer: McpServer;
 
 async function loadConfig(server: McpServer) {
-	const config = await server.filesystem.loadConfig();
+	const config = await server.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load backlog configuration for tests");
 	}
@@ -31,17 +31,17 @@ async function enableGitTestProject(): Promise<void> {
 
 	const config = await loadConfig(mcpServer);
 	config.filesystemOnly = false;
-	await mcpServer.filesystem.saveConfig(config);
-	await mcpServer.ensureConfigLoaded();
+	await mcpServer.application.filesystem.saveConfig(config);
+	await mcpServer.application.ensureConfigLoaded();
 }
 
 describe("MCP document tools", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-documents");
 		mcpServer = new McpServer(TEST_DIR, "Test instructions");
-		await mcpServer.filesystem.ensureBacklogStructure();
+		await mcpServer.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(mcpServer, "Docs Project");
+		await initializeFilesystemTestProject(mcpServer.application, "Docs Project");
 		const config = await loadConfig(mcpServer);
 		registerDocumentTools(mcpServer, config);
 	});
@@ -296,8 +296,8 @@ describe("MCP document tools", () => {
 		await enableGitTestProject();
 		const config = await loadConfig(mcpServer);
 		config.autoCommit = true;
-		await mcpServer.filesystem.saveConfig(config);
-		await mcpServer.ensureConfigLoaded();
+		await mcpServer.application.filesystem.saveConfig(config);
+		await mcpServer.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
@@ -309,7 +309,7 @@ describe("MCP document tools", () => {
 		await $`git rm --quiet UNRELATED.txt`.cwd(TEST_DIR).quiet();
 
 		// A peer's untracked, unreviewed file sitting inside the backlog directory.
-		const peerPlanPath = join(mcpServer.filesystem.backlogDir, "plans", "peer-plan.md");
+		const peerPlanPath = join(mcpServer.application.filesystem.backlogDir, "plans", "peer-plan.md");
 		await Bun.write(peerPlanPath, "# Peer's in-progress plan\n");
 
 		const createResult = await mcpServer.testInterface.callTool({
@@ -320,7 +320,7 @@ describe("MCP document tools", () => {
 		});
 		expect(getText(createResult.content)).toContain("Document created successfully.");
 
-		const lastCommit = await mcpServer.git.getLastCommitMessage();
+		const lastCommit = await mcpServer.application.git.getLastCommitMessage();
 		expect(lastCommit).toContain("backlog: Add document doc-1");
 
 		const { stdout: committedFilesRaw } = await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).quiet();
@@ -328,7 +328,7 @@ describe("MCP document tools", () => {
 		expect(committedFiles).not.toContain("UNRELATED.txt");
 		expect(committedFiles).not.toContain("peer-plan.md");
 
-		const status = await mcpServer.git.getStatus();
+		const status = await mcpServer.application.git.getStatus();
 		expect(status).toContain("D  UNRELATED.txt");
 		expect(status).toContain("?? backlog/plans/");
 	});
@@ -344,8 +344,8 @@ describe("MCP document tools", () => {
 
 		const config = await loadConfig(mcpServer);
 		config.autoCommit = true;
-		await mcpServer.filesystem.saveConfig(config);
-		await mcpServer.ensureConfigLoaded();
+		await mcpServer.application.filesystem.saveConfig(config);
+		await mcpServer.application.ensureConfigLoaded();
 
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
@@ -355,7 +355,7 @@ describe("MCP document tools", () => {
 		await $`git commit -m "add unrelated file"`.cwd(TEST_DIR).quiet();
 		await $`git rm --quiet UNRELATED.txt`.cwd(TEST_DIR).quiet();
 
-		const peerPlanPath = join(mcpServer.filesystem.backlogDir, "plans", "peer-plan.md");
+		const peerPlanPath = join(mcpServer.application.filesystem.backlogDir, "plans", "peer-plan.md");
 		await Bun.write(peerPlanPath, "# Peer's in-progress plan\n");
 
 		const updateResult = await mcpServer.testInterface.callTool({
@@ -371,7 +371,7 @@ describe("MCP document tools", () => {
 		});
 		expect(getText(updateResult.content)).toContain("Document updated successfully.");
 
-		const lastCommit = await mcpServer.git.getLastCommitMessage();
+		const lastCommit = await mcpServer.application.git.getLastCommitMessage();
 		expect(lastCommit).toContain("backlog: Add document doc-1");
 
 		const { stdout: committedFilesRaw } = await $`git show --name-only --pretty=format:`.cwd(TEST_DIR).quiet();
@@ -382,7 +382,7 @@ describe("MCP document tools", () => {
 		expect(committedFiles).toContain("backlog/docs/doc-1 - Incident-Response.md");
 		expect(committedFiles).toContain("backlog/docs/runbooks/doc-1 - Incident-Response-Handbook.md");
 
-		const status = await mcpServer.git.getStatus();
+		const status = await mcpServer.application.git.getStatus();
 		expect(status).toContain("D  UNRELATED.txt");
 		expect(status).toContain("?? backlog/plans/");
 	});
@@ -396,8 +396,8 @@ describe("MCP document tools", () => {
 			},
 		});
 
-		const duplicatePath = join(mcpServer.filesystem.docsDir, "duplicates", "doc-01 - ZZZ-Duplicate.md");
-		await mkdir(join(mcpServer.filesystem.docsDir, "duplicates"), { recursive: true });
+		const duplicatePath = join(mcpServer.application.filesystem.docsDir, "duplicates", "doc-01 - ZZZ-Duplicate.md");
+		await mkdir(join(mcpServer.application.filesystem.docsDir, "duplicates"), { recursive: true });
 		await Bun.write(
 			duplicatePath,
 			serializeDocument({
@@ -413,10 +413,10 @@ describe("MCP document tools", () => {
 
 		const config = await loadConfig(mcpServer);
 		config.autoCommit = true;
-		await mcpServer.filesystem.saveConfig(config);
-		await mcpServer.ensureConfigLoaded();
+		await mcpServer.application.filesystem.saveConfig(config);
+		await mcpServer.application.ensureConfigLoaded();
 
-		const primaryPath = join(mcpServer.filesystem.docsDir, "doc-1 - Primary-document.md");
+		const primaryPath = join(mcpServer.application.filesystem.docsDir, "doc-1 - Primary-document.md");
 		const primaryBefore = await Bun.file(primaryPath).text();
 		const duplicateBefore = await Bun.file(duplicatePath).text();
 

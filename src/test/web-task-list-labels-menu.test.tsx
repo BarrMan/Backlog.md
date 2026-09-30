@@ -195,10 +195,7 @@ describe("TaskList labels filter menu", () => {
 	it("renders label filter options alphabetically", async () => {
 		const container = renderTaskList(undefined, {
 			availableLabels: ["zeta", "Alpha"],
-			tasks: [
-				createTask({ id: "task-101", labels: ["beta"] }),
-				createTask({ id: "task-102", labels: ["delta"] }),
-			],
+			tasks: [createTask({ id: "task-101", labels: ["beta"] }), createTask({ id: "task-102", labels: ["delta"] })],
 		});
 
 		await clickElement(getLabelsButton(container));
@@ -217,7 +214,9 @@ describe("TaskList labels filter menu", () => {
 			],
 		});
 
-		const idButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("ID"));
+		const idButton = Array.from(container.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("ID"),
+		);
 		expect(idButton).toBeTruthy();
 
 		await clickElement(idButton as HTMLButtonElement);
@@ -248,7 +247,9 @@ describe("TaskList labels filter menu", () => {
 			],
 		});
 
-		const idButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("ID"));
+		const idButton = Array.from(container.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("ID"),
+		);
 		expect(idButton).toBeTruthy();
 
 		await clickElement(idButton as HTMLButtonElement);
@@ -356,9 +357,7 @@ describe("TaskList labels filter menu", () => {
 		});
 		await waitFor(() => fetchCalls.length === 1 && getRenderedTaskIds(container).join(",") === "task-201");
 
-		expect(new URL(fetchCalls[0] ?? "", "http://localhost").searchParams.getAll("status")).toEqual([
-			"In Progress",
-		]);
+		expect(new URL(fetchCalls[0] ?? "", "http://localhost").searchParams.getAll("status")).toEqual(["In Progress"]);
 		expect(new URLSearchParams(getLocationSearch(container)).getAll("status")).toEqual(["In Progress"]);
 		expect(getStatusButton(container).textContent).toContain("In Progress");
 	});
@@ -547,10 +546,11 @@ describe("TaskList labels filter menu", () => {
 			tasks: [],
 			availablePriorities: ["Very High", "High", "Medium", "Low"],
 		});
-		await waitFor(() =>
-			fetchCalls.length === 1 &&
-			new URLSearchParams(getLocationSearch(container)).get("priority") === "very high" &&
-			(container.textContent ?? "").includes("Escalate incident"),
+		await waitFor(
+			() =>
+				fetchCalls.length === 1 &&
+				new URLSearchParams(getLocationSearch(container)).get("priority") === "very high" &&
+				(container.textContent ?? "").includes("Escalate incident"),
 		);
 
 		expect(new URL(fetchCalls[0] ?? "", "http://localhost").searchParams.get("priority")).toBe("very high");

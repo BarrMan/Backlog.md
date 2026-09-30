@@ -1,31 +1,74 @@
 import { DEFAULT_FRESH_INIT_POLICY, DEFAULT_STATUSES } from "../constants/index.ts";
-import { parseFrontmatter } from "../markdown/frontmatter.ts";
 import type { BacklogConfig } from "../types/index.ts";
 
 type ConfigListKey = "statuses" | "labels" | "types" | "priorities" | "projects" | "default_assignee";
 
-const CONFIG_KEY_LINE_PATTERN = /^\s*(?!-\s)[^\s#][^:]*:/;
+const CONFIG_LIST_KEYS: ConfigListKey[] = ["statuses", "labels", "types", "priorities", "projects", "default_assignee"];
+
 const CONFIG_VALUE_ERROR_NAME = "ConfigValueError";
 
-function extractConfigKeyYaml(content: string, key: string): string | undefined {
+function configKeyIndent(line: string, key: string): number | undefined {
+	const indent = line.length - line.trimStart().length;
+	const trimmed = line.trimStart();
+	if (!trimmed.startsWith(key)) return undefined;
+	const separator = trimmed.substring(key.length);
+	const colon = separator.indexOf(":");
+	return colon !== -1 && separator.substring(0, colon).trim() === "" ? indent : undefined;
+}
+
+function isYamlMappingLine(line: string): boolean {
+	const trimmed = line.trimStart();
+	if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("- ")) return false;
+	const colon = trimmed.indexOf(":");
+	return colon > 0 && !/\s/.test(trimmed.substring(0, colon));
+}
+
+function configKeyYaml(content: string, key: string): string | undefined {
 	const lines = content.split(/\r?\n/);
-	const keyPattern = new RegExp(`^(\\s*)${key}\\s*:`);
-	const keyIndent = (line: string) => line.match(keyPattern)?.[1]?.length;
-	const startIndex = lines.some((line) => keyIndent(line) === 0)
-		? lines.findLastIndex((line) => keyIndent(line) === 0)
-		: lines.findLastIndex((line) => keyIndent(line) !== undefined);
+	const startIndex = lines.some((line) => configKeyIndent(line, key) === 0)
+		? lines.findLastIndex((line) => configKeyIndent(line, key) === 0)
+		: lines.findLastIndex((line) => configKeyIndent(line, key) !== undefined);
 	if (startIndex === -1) return undefined;
 
-	const startIndent = keyIndent(lines[startIndex] ?? "") ?? 0;
+	const startIndent = configKeyIndent(lines[startIndex] ?? "", key) ?? 0;
 	const collected: string[] = [];
 	for (let index = startIndex; index < lines.length; index++) {
 		const line = lines[index] ?? "";
 		const trimmed = line.trim();
 		const indent = line.length - line.trimStart().length;
-		if (index > startIndex && trimmed.length > 0 && indent <= startIndent && CONFIG_KEY_LINE_PATTERN.test(line)) break;
+		if (index > startIndex && trimmed.length > 0 && indent <= startIndent && isYamlMappingLine(line)) break;
 		collected.push(line);
 	}
 	return collected.join("\n");
+}
+
+type YamlDecodeResult<Value> = { value: Value | undefined } | { error: unknown };
+
+function isYamlMapping(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function yamlValue(document: string, key: string): YamlDecodeResult<unknown> {
+	try {
+		const parsed: unknown = Bun.YAML.parse(document);
+		if (!isYamlMapping(parsed)) return { value: undefined };
+		return { value: Object.hasOwn(parsed, key) ? parsed[key] : undefined };
+	} catch (error) {
+		return { error };
+	}
+}
+
+/**
+ * Synchronously decodes one config key without letting malformed unrelated YAML hide it.
+ * A full-document retry preserves aliases that refer to values under another key.
+ */
+export function decodeConfigYaml(content: string, key: string): YamlDecodeResult<unknown> {
+	const block = configKeyYaml(content, key);
+	if (block === undefined) return { value: undefined };
+	const decodedBlock = yamlValue(block, key);
+	if ("value" in decodedBlock) return decodedBlock;
+	const decodedDocument = yamlValue(content, key);
+	return "value" in decodedDocument ? decodedDocument : decodedBlock;
 }
 
 function configValueError(configPath: string, key: string, problem: string, remedy: string): Error {
@@ -74,26 +117,11 @@ export function isConfigValueError(error: unknown): error is Error {
 	return error instanceof Error && error.name === CONFIG_VALUE_ERROR_NAME;
 }
 
-function readYamlKey(document: string, key: string): { value: unknown } | { error: unknown } {
-	try {
-		return { value: (Bun.YAML.parse(document) as Record<string, unknown> | null)?.[key] };
-	} catch (error) {
-		return { error };
-	}
-}
-
 function parseConfigListValue(content: string, key: ConfigListKey, configPath: string): string[] | undefined {
-	const block = extractConfigKeyYaml(content, key);
-	if (block === undefined) return undefined;
-	const fromBlock = readYamlKey(block, key);
-	const parsed =
-		"value" in fromBlock
-			? fromBlock.value
-			: (() => {
-					const fromDocument = readYamlKey(content, key);
-					if (!("value" in fromDocument)) throw configSyntaxError(configPath, key, fromBlock.error);
-					return fromDocument.value;
-				})();
+	const decoded = decodeConfigYaml(content, key);
+	if (!("value" in decoded)) throw configSyntaxError(configPath, key, decoded.error);
+	const parsed = decoded.value;
+	if (parsed === undefined) return undefined;
 	if (parsed === null) return key === "default_assignee" ? [] : undefined;
 	if (Array.isArray(parsed)) return parsed.map((item) => String(item).trim()).filter(Boolean);
 	if (typeof parsed === "string" && key === "default_assignee") {
@@ -112,13 +140,9 @@ function normalizeDefinitionOfDone(definitionOfDone: unknown): string[] | undefi
 }
 
 function parseDefinitionOfDoneFromYaml(content: string): string[] | undefined {
-	try {
-		const { data } = parseFrontmatter(`---\n${content.trimEnd()}\n---\n`);
-		if (!Object.hasOwn(data, "definition_of_done")) return undefined;
-		return data.definition_of_done === null ? [] : normalizeDefinitionOfDone(data.definition_of_done);
-	} catch {
-		return undefined;
-	}
+	const decoded = decodeConfigYaml(content, "definition_of_done");
+	if (!("value" in decoded) || decoded.value === undefined) return undefined;
+	return decoded.value === null ? [] : normalizeDefinitionOfDone(decoded.value);
 }
 
 function escapeLegacyDefinitionOfDoneBackslashes(content: string): string | undefined {
@@ -129,18 +153,10 @@ function escapeLegacyDefinitionOfDoneBackslashes(content: string): string | unde
 		const char = content[index];
 		if (quote) {
 			if (quote === '"' && char === "\\") {
-				let slashCount = 1;
-				while (content[index + slashCount] === "\\") slashCount++;
-				const nextChar = content[index + slashCount];
-				if (nextChar === '"' && slashCount % 2 === 1) {
-					escaped += "\\".repeat(slashCount) + nextChar;
-					index += slashCount;
-					continue;
-				}
-				const escapedSlashCount = slashCount % 2 === 1 ? slashCount + 1 : slashCount;
-				escaped += "\\".repeat(escapedSlashCount);
-				changed ||= escapedSlashCount !== slashCount;
-				index += slashCount - 1;
+				const run = escapeBackslashRun(content, index);
+				escaped += run.text;
+				changed ||= run.changed;
+				index = run.endIndex;
 				continue;
 			}
 			if (char === quote) quote = undefined;
@@ -153,99 +169,91 @@ function escapeLegacyDefinitionOfDoneBackslashes(content: string): string | unde
 	return changed ? escaped : undefined;
 }
 
-function parseDefinitionOfDone(content: string): string[] | undefined {
-	const yaml = extractConfigKeyYaml(content, "definition_of_done");
-	const escaped = yaml ? escapeLegacyDefinitionOfDoneBackslashes(yaml) : undefined;
-	return (
-		(escaped ? parseDefinitionOfDoneFromYaml(escaped) : undefined) ??
-		parseDefinitionOfDoneFromYaml(content) ??
-		(yaml ? parseDefinitionOfDoneFromYaml(yaml) : undefined)
-	);
+function escapeBackslashRun(content: string, start: number): { text: string; endIndex: number; changed: boolean } {
+	let slashCount = 1;
+	while (content[start + slashCount] === "\\") slashCount++;
+	const nextChar = content[start + slashCount];
+	const preservesClosingQuote = nextChar === '"' && slashCount % 2 === 1;
+	const escapedCount = preservesClosingQuote ? slashCount : slashCount + (slashCount % 2);
+	return {
+		text: `${"\\".repeat(escapedCount)}${preservesClosingQuote ? nextChar : ""}`,
+		endIndex: start + slashCount - (preservesClosingQuote ? 0 : 1),
+		changed: escapedCount !== slashCount,
+	};
 }
 
-export function parseConfig(content: string, configPath: string): BacklogConfig {
+type ConfigScalarPolicy = (
+	config: Partial<BacklogConfig>,
+	value: string,
+	definitionOfDone: string[] | undefined,
+) => void;
+
+function scalarValue(value: string): string {
+	return value.replace(/['"]/g, "");
+}
+function booleanValue(value: string): boolean {
+	return value.toLowerCase() === "true";
+}
+function numberValue(value: string): number {
+	return Number.parseInt(value, 10);
+}
+function assignScalar<Key extends keyof BacklogConfig>(
+	key: Key,
+	read: (value: string) => BacklogConfig[Key],
+): ConfigScalarPolicy {
+	return (config, value) => {
+		config[key] = read(value);
+	};
+}
+
+const CONFIG_SCALAR_POLICIES: Record<string, ConfigScalarPolicy> = {
+	project_name: assignScalar("projectName", scalarValue),
+	default_reporter: assignScalar("defaultReporter", scalarValue),
+	default_status: assignScalar("defaultStatus", scalarValue),
+	date_format: assignScalar("dateFormat", scalarValue),
+	max_column_width: assignScalar("maxColumnWidth", numberValue),
+	default_editor: assignScalar("defaultEditor", scalarValue),
+	auto_open_browser: assignScalar("autoOpenBrowser", booleanValue),
+	hide_empty_columns: assignScalar("hideEmptyColumns", booleanValue),
+	default_port: assignScalar("defaultPort", numberValue),
+	remote_operations: assignScalar("remoteOperations", booleanValue),
+	auto_commit: assignScalar("autoCommit", booleanValue),
+	filesystem_only: assignScalar("filesystemOnly", booleanValue),
+	filesystemOnly: assignScalar("filesystemOnly", booleanValue),
+	zero_padded_ids: assignScalar("zeroPaddedIds", numberValue),
+	bypass_git_hooks: assignScalar("bypassGitHooks", booleanValue),
+	check_active_branches: assignScalar("checkActiveBranches", booleanValue),
+	active_branch_days: assignScalar("activeBranchDays", numberValue),
+	task_prefix: (config, value) => {
+		config.prefixes = { task: scalarValue(value) };
+	},
+	backlog_directory: assignScalar("backlogDirectory", scalarValue),
+	backlogDirectory: assignScalar("backlogDirectory", scalarValue),
+	onStatusChange: (config, value) => {
+		config.onStatusChange = value.replace(/^['"]|['"]$/g, "");
+	},
+	on_status_change: (config, value) => {
+		config.onStatusChange = value.replace(/^['"]|['"]$/g, "");
+	},
+	definition_of_done: (config, _value, definitionOfDone) => {
+		config.definitionOfDone = definitionOfDone;
+	},
+};
+
+function configScalars(content: string, definitionOfDone: string[] | undefined): Partial<BacklogConfig> {
 	const config: Partial<BacklogConfig> = {};
-	const parseListValue = (key: ConfigListKey) => parseConfigListValue(content, key, configPath);
-	config.statuses = parseListValue("statuses");
-	config.labels = parseListValue("labels");
-	config.types = parseListValue("types");
-	config.priorities = parseListValue("priorities");
-	config.projects = parseListValue("projects");
-	config.defaultAssignee = parseListValue("default_assignee");
-	const definitionOfDone = parseDefinitionOfDone(content);
 	for (const line of content.split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
 		const colonIndex = trimmed.indexOf(":");
 		if (colonIndex === -1) continue;
-		const key = trimmed.substring(0, colonIndex).trim();
-		const value = trimmed.substring(colonIndex + 1).trim();
-		switch (key) {
-			case "project_name":
-				config.projectName = value.replace(/['"]/g, "");
-				break;
-			case "default_reporter":
-				config.defaultReporter = value.replace(/['"]/g, "");
-				break;
-			case "default_status":
-				config.defaultStatus = value.replace(/['"]/g, "");
-				break;
-			case "definition_of_done":
-				config.definitionOfDone = definitionOfDone;
-				break;
-			case "date_format":
-				config.dateFormat = value.replace(/['"]/g, "");
-				break;
-			case "max_column_width":
-				config.maxColumnWidth = Number.parseInt(value, 10);
-				break;
-			case "default_editor":
-				config.defaultEditor = value.replace(/["']/g, "");
-				break;
-			case "auto_open_browser":
-				config.autoOpenBrowser = value.toLowerCase() === "true";
-				break;
-			case "hide_empty_columns":
-				config.hideEmptyColumns = value.toLowerCase() === "true";
-				break;
-			case "default_port":
-				config.defaultPort = Number.parseInt(value, 10);
-				break;
-			case "remote_operations":
-				config.remoteOperations = value.toLowerCase() === "true";
-				break;
-			case "auto_commit":
-				config.autoCommit = value.toLowerCase() === "true";
-				break;
-			case "filesystem_only":
-			case "filesystemOnly":
-				config.filesystemOnly = value.toLowerCase() === "true";
-				break;
-			case "zero_padded_ids":
-				config.zeroPaddedIds = Number.parseInt(value, 10);
-				break;
-			case "bypass_git_hooks":
-				config.bypassGitHooks = value.toLowerCase() === "true";
-				break;
-			case "check_active_branches":
-				config.checkActiveBranches = value.toLowerCase() === "true";
-				break;
-			case "active_branch_days":
-				config.activeBranchDays = Number.parseInt(value, 10);
-				break;
-			case "onStatusChange":
-			case "on_status_change":
-				config.onStatusChange = value.replace(/^['"]|['"]$/g, "");
-				break;
-			case "task_prefix":
-				config.prefixes = { task: value.replace(/['"]/g, "") };
-				break;
-			case "backlog_directory":
-			case "backlogDirectory":
-				config.backlogDirectory = value.replace(/['"]/g, "");
-				break;
-		}
+		const policy = CONFIG_SCALAR_POLICIES[trimmed.substring(0, colonIndex).trim()];
+		policy?.(config, trimmed.substring(colonIndex + 1).trim(), definitionOfDone);
 	}
+	return config;
+}
+
+function completeConfig(config: Partial<BacklogConfig>): BacklogConfig {
 	return {
 		projectName: config.projectName || "",
 		defaultAssignee: config.defaultAssignee,
@@ -276,25 +284,62 @@ export function parseConfig(content: string, configPath: string): BacklogConfig 
 	};
 }
 
+function parseDefinitionOfDone(content: string): string[] | undefined {
+	const yaml = configKeyYaml(content, "definition_of_done");
+	const escaped = yaml ? escapeLegacyDefinitionOfDoneBackslashes(yaml) : undefined;
+	return (
+		(escaped ? parseDefinitionOfDoneFromYaml(escaped) : undefined) ??
+		parseDefinitionOfDoneFromYaml(content) ??
+		(yaml ? parseDefinitionOfDoneFromYaml(yaml) : undefined)
+	);
+}
+
+export function parseConfig(content: string, configPath: string): BacklogConfig {
+	const definitionOfDone = parseDefinitionOfDone(content);
+	const config = configScalars(content, definitionOfDone);
+	for (const key of CONFIG_LIST_KEYS) {
+		const value = parseConfigListValue(content, key, configPath);
+		if (key === "default_assignee") config.defaultAssignee = value;
+		else if (key === "statuses") config.statuses = value;
+		else
+			config[
+				{ labels: "labels", types: "types", priorities: "priorities", projects: "projects" }[key] as
+					| "labels"
+					| "types"
+					| "priorities"
+					| "projects"
+			] = value;
+	}
+	config.definitionOfDone = definitionOfDone;
+	return completeConfig(config);
+}
+
+function serializeList(key: string, values: string[] | undefined, required = false): string[] {
+	return values?.length || required
+		? [`${key}: [${(values ?? []).map((value) => JSON.stringify(value)).join(", ")}]`]
+		: [];
+}
+
+function serializeOptional(key: string, value: string | number | boolean | undefined, quote = false): string[] {
+	return value === undefined || value === "" ? [] : [`${key}: ${quote ? JSON.stringify(value) : value}`];
+}
+
 export function serializeConfig(config: BacklogConfig): string {
 	const definitionOfDone = normalizeDefinitionOfDone(config.definitionOfDone);
-	const quote = (value: string) => JSON.stringify(value);
 	const lines = [
-		`project_name: "${config.projectName}"`,
-		...(config.defaultAssignee?.length ? [`default_assignee: [${config.defaultAssignee.map(quote).join(", ")}]`] : []),
-		...(config.defaultReporter ? [`default_reporter: "${config.defaultReporter}"`] : []),
-		...(config.defaultStatus ? [`default_status: "${config.defaultStatus}"`] : []),
-		`statuses: [${config.statuses.map((value) => `"${value}"`).join(", ")}]`,
-		`labels: [${config.labels.map((value) => `"${value}"`).join(", ")}]`,
-		...(config.types?.length ? [`types: [${config.types.map((value) => `"${value}"`).join(", ")}]`] : []),
-		...(config.priorities?.length
-			? [`priorities: [${config.priorities.map((value) => `"${value}"`).join(", ")}]`]
-			: []),
-		...(config.projects?.length ? [`projects: [${config.projects.map((value) => `"${value}"`).join(", ")}]`] : []),
-		...(definitionOfDone ? [`definition_of_done: [${definitionOfDone.map(quote).join(", ")}]`] : []),
+		...serializeOptional("project_name", config.projectName, true),
+		...serializeList("default_assignee", config.defaultAssignee),
+		...serializeOptional("default_reporter", config.defaultReporter, true),
+		...serializeOptional("default_status", config.defaultStatus, true),
+		...serializeList("statuses", config.statuses, true),
+		...serializeList("labels", config.labels, true),
+		...serializeList("types", config.types),
+		...serializeList("priorities", config.priorities),
+		...serializeList("projects", config.projects),
+		...serializeList("definition_of_done", definitionOfDone),
 		`date_format: ${config.dateFormat}`,
-		...(config.maxColumnWidth ? [`max_column_width: ${config.maxColumnWidth}`] : []),
-		...(config.defaultEditor ? [`default_editor: "${config.defaultEditor}"`] : []),
+		...serializeOptional("max_column_width", config.maxColumnWidth || undefined),
+		...serializeOptional("default_editor", config.defaultEditor, true),
 		...(typeof config.autoOpenBrowser === "boolean" ? [`auto_open_browser: ${config.autoOpenBrowser}`] : []),
 		...(typeof config.hideEmptyColumns === "boolean" ? [`hide_empty_columns: ${config.hideEmptyColumns}`] : []),
 		...(config.defaultPort ? [`default_port: ${config.defaultPort}`] : []),

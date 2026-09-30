@@ -15,9 +15,9 @@ async function createProject(projectRoot: string, projectName: string): Promise<
 	await $`mkdir -p ${projectRoot}`.quiet();
 
 	const bootstrap = new McpServer(projectRoot, "Bootstrap");
-	await bootstrap.filesystem.ensureBacklogStructure();
+	await bootstrap.application.filesystem.ensureBacklogStructure();
 	await $`git init -b main`.cwd(projectRoot).quiet();
-	await initializeTestProject(bootstrap, projectName);
+	await initializeTestProject(bootstrap.application, projectName);
 	await bootstrap.stop();
 }
 
@@ -78,7 +78,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Lands in workspace" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(workspaceProject);
+			expect(server.application.filesystem.rootDir).toBe(workspaceProject);
 			expect(await listTaskFiles(workspaceProject)).toHaveLength(1);
 			expect(await listTaskFiles(startupProject)).toHaveLength(0);
 		} finally {
@@ -104,7 +104,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Lands in startup" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(startupProject);
+			expect(server.application.filesystem.rootDir).toBe(startupProject);
 			expect(getRootsRequestCount()).toBe(1);
 			expect(await listTaskFiles(startupProject)).toHaveLength(1);
 		} finally {
@@ -130,7 +130,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Lands in pinned" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(pinnedProject);
+			expect(server.application.filesystem.rootDir).toBe(pinnedProject);
 			expect(getRootsRequestCount()).toBe(0);
 			expect(await listTaskFiles(pinnedProject)).toHaveLength(1);
 			expect(await listTaskFiles(workspaceProject)).toHaveLength(0);
@@ -159,7 +159,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Lands in package" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(packageProject);
+			expect(server.application.filesystem.rootDir).toBe(packageProject);
 			expect(await listTaskFiles(packageProject)).toHaveLength(1);
 		} finally {
 			await client.close();
@@ -186,7 +186,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Lands in startup" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(startupProject);
+			expect(server.application.filesystem.rootDir).toBe(startupProject);
 			expect(await listTaskFiles(startupProject)).toHaveLength(1);
 			expect(await listTaskFiles(emptyWorkspace)).toHaveLength(0);
 		} finally {
@@ -214,7 +214,7 @@ describe("MCP workspace root resolution", () => {
 				name: "task_create",
 				arguments: { title: "In workspace" },
 			});
-			expect(server.filesystem.rootDir).toBe(workspaceProject);
+			expect(server.application.filesystem.rootDir).toBe(workspaceProject);
 
 			// Workspace switches to a folder with no backlog (e.g. the worktree was
 			// removed). A launch-directory project must return to the launch project,
@@ -226,7 +226,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Back home" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(startupProject);
+			expect(server.application.filesystem.rootDir).toBe(startupProject);
 			expect(await listTaskFiles(startupProject)).toHaveLength(1);
 			expect(await listTaskFiles(workspaceProject)).toHaveLength(1);
 		} finally {
@@ -256,7 +256,7 @@ describe("MCP workspace root resolution", () => {
 				arguments: { title: "Worktree task" },
 			});
 
-			expect(server.filesystem.rootDir).toBe(worktree);
+			expect(server.application.filesystem.rootDir).toBe(worktree);
 			expect(await listTaskFiles(worktree)).toHaveLength(1);
 			expect(await listTaskFiles(mainRepo)).toHaveLength(0);
 		} finally {

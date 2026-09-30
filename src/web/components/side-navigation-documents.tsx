@@ -7,19 +7,37 @@ import { sanitizeUrlTitle } from "../utils/urlHelpers";
 const stripIdPrefix = (id: string): string => id.replace(/^[a-zA-Z]+-/, "");
 
 const DocumentPageIcon = () => (
-	<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-		<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+	<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<path
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			strokeWidth={2}
+			d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+		/>
 	</svg>
 );
 
 const FolderIcon = () => (
-	<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-		<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+	<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<path
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			strokeWidth={2}
+			d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+		/>
 	</svg>
 );
 
-const ChevronDownIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>;
-const ChevronRightIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>;
+const ChevronDownIcon = () => (
+	<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+	</svg>
+);
+const ChevronRightIcon = () => (
+	<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+	</svg>
+);
 
 export const SideNavigationDocumentLink = ({ doc, depth = 0 }: { doc: Document; depth?: number }) => (
 	<NavLink
@@ -33,7 +51,9 @@ export const SideNavigationDocumentLink = ({ doc, depth = 0 }: { doc: Document; 
 		}
 		style={depth > 0 ? { paddingLeft: `${12 + depth * 12}px` } : undefined}
 	>
-		<span className="text-gray-400 dark:text-gray-500"><DocumentPageIcon /></span>
+		<span className="text-gray-400 dark:text-gray-500">
+			<DocumentPageIcon />
+		</span>
 		<span className="truncate">{doc.title}</span>
 	</NavLink>
 );
@@ -56,6 +76,7 @@ export const SideNavigationFolderNode = memo(function SideNavigationFolderNode({
 	return (
 		<div>
 			<button
+				type="button"
 				onClick={() => onToggleFolder(node.path)}
 				aria-label={`${node.name} folder`}
 				aria-expanded={isExpanded}
@@ -64,7 +85,9 @@ export const SideNavigationFolderNode = memo(function SideNavigationFolderNode({
 				style={{ paddingLeft: `${12 + depth * 12}px` }}
 			>
 				<span className="shrink-0">{isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
-				<span className="text-gray-500 dark:text-gray-400 ml-1 shrink-0"><FolderIcon /></span>
+				<span className="text-gray-500 dark:text-gray-400 ml-1 shrink-0">
+					<FolderIcon />
+				</span>
 				<span className="ml-2 font-medium truncate">{node.name}</span>
 			</button>
 			{isExpanded && (
@@ -78,7 +101,9 @@ export const SideNavigationFolderNode = memo(function SideNavigationFolderNode({
 							onToggleFolder={onToggleFolder}
 						/>
 					))}
-					{node.docs.map((doc) => <SideNavigationDocumentLink key={doc.id} doc={doc} depth={depth + 1} />)}
+					{node.docs.map((doc) => (
+						<SideNavigationDocumentLink key={doc.id} doc={doc} depth={depth + 1} />
+					))}
 				</div>
 			)}
 		</div>

@@ -24,7 +24,7 @@ let TEST_DIR: string;
 let mcpServer: McpServer;
 
 async function loadConfig(server: McpServer) {
-	const config = await server.filesystem.loadConfig();
+	const config = await server.application.filesystem.loadConfig();
 	if (!config) {
 		throw new Error("Failed to load backlog configuration for tests");
 	}
@@ -36,21 +36,23 @@ async function enableGitTestProject(): Promise<void> {
 
 	const config = await loadConfig(mcpServer);
 	config.filesystemOnly = false;
-	await mcpServer.filesystem.saveConfig(config);
-	await mcpServer.ensureConfigLoaded();
+	await mcpServer.application.filesystem.saveConfig(config);
+	await mcpServer.application.ensureConfigLoaded();
 }
 
 function installCrossBranchTripwires(server: McpServer) {
 	const error = new Error("MCP task search crossed the branch-loading boundary");
-	const loadTasks = spyOn(server, "loadTasks").mockRejectedValue(error);
-	const fetch = spyOn(server.gitOps, "fetch").mockRejectedValue(error);
-	const listRecentBranchTips = spyOn(server.gitOps, "listRecentBranchTips").mockRejectedValue(error);
-	const listRecentBranches = spyOn(server.gitOps, "listRecentBranches").mockRejectedValue(error);
-	const listRecentRemoteBranches = spyOn(server.gitOps, "listRecentRemoteBranches").mockRejectedValue(error);
-	const listFilesInTree = spyOn(server.gitOps, "listFilesInTree").mockRejectedValue(error);
-	const showFile = spyOn(server.gitOps, "showFile").mockRejectedValue(error);
-	const getRepositoryRoot = spyOn(server.gitOps, "getRepositoryRoot").mockRejectedValue(error);
-	const resolveCommit = spyOn(server.gitOps, "resolveCommit").mockRejectedValue(error);
+	const loadTasks = spyOn(server.application, "loadTasks").mockRejectedValue(error);
+	const fetch = spyOn(server.application.gitOps, "fetch").mockRejectedValue(error);
+	const listRecentBranchTips = spyOn(server.application.gitOps, "listRecentBranchTips").mockRejectedValue(error);
+	const listRecentBranches = spyOn(server.application.gitOps, "listRecentBranches").mockRejectedValue(error);
+	const listRecentRemoteBranches = spyOn(server.application.gitOps, "listRecentRemoteBranches").mockRejectedValue(
+		error,
+	);
+	const listFilesInTree = spyOn(server.application.gitOps, "listFilesInTree").mockRejectedValue(error);
+	const showFile = spyOn(server.application.gitOps, "showFile").mockRejectedValue(error);
+	const getRepositoryRoot = spyOn(server.application.gitOps, "getRepositoryRoot").mockRejectedValue(error);
+	const resolveCommit = spyOn(server.application.gitOps, "resolveCommit").mockRejectedValue(error);
 
 	return {
 		expectUntouched() {
@@ -82,9 +84,9 @@ describe("MCP task tools (MVP)", () => {
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("mcp-tasks");
 		mcpServer = new McpServer(TEST_DIR, "Test instructions");
-		await mcpServer.filesystem.ensureBacklogStructure();
+		await mcpServer.application.filesystem.ensureBacklogStructure();
 
-		await initializeFilesystemTestProject(mcpServer, "Test Project");
+		await initializeFilesystemTestProject(mcpServer.application, "Test Project");
 
 		const config = await loadConfig(mcpServer);
 		registerTaskTools(mcpServer, config);
@@ -217,7 +219,7 @@ describe("MCP task tools (MVP)", () => {
 			},
 		});
 		expect(getText(createResult.content)).toContain("Due: 2026-08-10");
-		expect((await mcpServer.getTask("task-1"))?.dueDate).toBe("2026-08-10");
+		expect((await mcpServer.application.getTask("task-1"))?.dueDate).toBe("2026-08-10");
 
 		const listResult = await mcpServer.testInterface.callTool({
 			params: { name: "task_list", arguments: {} },
@@ -228,7 +230,7 @@ describe("MCP task tools (MVP)", () => {
 			params: { name: "task_edit", arguments: { id: "task-1", dueDate: null } },
 		});
 		expect(editResult.isError).not.toBe(true);
-		expect((await mcpServer.getTask("task-1"))?.dueDate).toBeUndefined();
+		expect((await mcpServer.application.getTask("task-1"))?.dueDate).toBeUndefined();
 
 		const invalidResult = await mcpServer.testInterface.callTool({
 			params: { name: "task_edit", arguments: { id: "task-1", dueDate: "10/08/2026" } },
@@ -249,11 +251,11 @@ describe("MCP task tools (MVP)", () => {
 			rawContent: `## Description\n\n${title}`,
 		});
 		await Bun.write(
-			join(mcpServer.filesystem.tasksDir, "task-1 - Alpha.md"),
+			join(mcpServer.application.filesystem.tasksDir, "task-1 - Alpha.md"),
 			serializeTask(makeTask("TASK-1", "Alpha")),
 		);
 		await Bun.write(
-			join(mcpServer.filesystem.tasksDir, "task-01 - Beta.md"),
+			join(mcpServer.application.filesystem.tasksDir, "task-01 - Beta.md"),
 			serializeTask(makeTask("TASK-01", "Beta")),
 		);
 
@@ -277,7 +279,7 @@ describe("MCP task tools (MVP)", () => {
 	it("archives the local task when merge policy selects a same-path padded ID variant", async () => {
 		await enableGitTestProject();
 		const config = await loadConfig(mcpServer);
-		await mcpServer.filesystem.saveConfig({
+		await mcpServer.application.filesystem.saveConfig({
 			...config,
 			checkActiveBranches: true,
 			remoteOperations: false,
@@ -295,7 +297,7 @@ describe("MCP task tools (MVP)", () => {
 			dependencies: [],
 			description: "Local task version",
 		};
-		await commitSamePathBranchTaskVariant(mcpServer, localTask, {
+		await commitSamePathBranchTaskVariant(mcpServer.application, localTask, {
 			...localTask,
 			id: "BACK-001",
 			title: "Progressed branch version",
@@ -307,15 +309,15 @@ describe("MCP task tools (MVP)", () => {
 		});
 
 		expect(archiveResult.isError).not.toBe(true);
-		expect(await mcpServer.filesystem.loadTask("BACK-1")).toBeNull();
-		const archivedTasks = await mcpServer.filesystem.listArchivedTasks();
+		expect(await mcpServer.application.filesystem.loadTask("BACK-1")).toBeNull();
+		const archivedTasks = await mcpServer.application.filesystem.listArchivedTasks();
 		expect(archivedTasks.map((task) => task.id)).toContain("BACK-1");
 	});
 
 	it("refreshes branch identities before a long-lived MCP mutation", async () => {
 		await enableGitTestProject();
 		const config = await loadConfig(mcpServer);
-		await mcpServer.filesystem.saveConfig({
+		await mcpServer.application.filesystem.saveConfig({
 			...config,
 			checkActiveBranches: true,
 			remoteOperations: false,
@@ -330,7 +332,7 @@ describe("MCP task tools (MVP)", () => {
 			labels: [],
 			dependencies: [],
 		};
-		await mcpServer.filesystem.saveTask(localTask);
+		await mcpServer.application.filesystem.saveTask(localTask);
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "Add local identity"`.cwd(TEST_DIR).quiet();
 
@@ -341,7 +343,7 @@ describe("MCP task tools (MVP)", () => {
 
 		await $`git switch -c late-mcp-collision`.cwd(TEST_DIR).quiet();
 		await Bun.write(
-			join(mcpServer.filesystem.tasksDir, "back-1 - Late-MCP-collision.md"),
+			join(mcpServer.application.filesystem.tasksDir, "back-1 - Late-MCP-collision.md"),
 			serializeTask({ ...localTask, title: "Late MCP collision" }),
 		);
 		await $`git add .`.cwd(TEST_DIR).quiet();
@@ -359,7 +361,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 		expect(editResult.isError).toBe(true);
 		expect(getText(editResult.content)).toContain("is ambiguous");
-		expect((await mcpServer.filesystem.loadTask("BACK-1"))?.title).toBe("Local identity");
+		expect((await mcpServer.application.filesystem.loadTask("BACK-1"))?.title).toBe("Local identity");
 	});
 
 	it("assigns default tail ordinals for task_create and preserves explicit ordinals", async () => {
@@ -426,23 +428,23 @@ describe("MCP task tools (MVP)", () => {
 
 	it("treats an explicit empty assignee as unassigned in task_create and task_edit", async () => {
 		const config = await loadConfig(mcpServer);
-		await mcpServer.filesystem.saveConfig({ ...config, defaultAssignee: ["@alice"] });
-		await mcpServer.ensureConfigLoaded();
+		await mcpServer.application.filesystem.saveConfig({ ...config, defaultAssignee: ["@alice"] });
+		await mcpServer.application.ensureConfigLoaded();
 
 		await mcpServer.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Default assignee applies" } },
 		});
-		expect((await mcpServer.filesystem.loadTask("task-1"))?.assignee).toEqual(["@alice"]);
+		expect((await mcpServer.application.filesystem.loadTask("task-1"))?.assignee).toEqual(["@alice"]);
 
 		await mcpServer.testInterface.callTool({
 			params: { name: "task_create", arguments: { title: "Explicitly unassigned", assignee: [] } },
 		});
-		expect((await mcpServer.filesystem.loadTask("task-2"))?.assignee).toEqual([]);
+		expect((await mcpServer.application.filesystem.loadTask("task-2"))?.assignee).toEqual([]);
 
 		await mcpServer.testInterface.callTool({
 			params: { name: "task_edit", arguments: { id: "task-1", assignee: [] } },
 		});
-		expect((await mcpServer.filesystem.loadTask("task-1"))?.assignee).toEqual([]);
+		expect((await mcpServer.application.filesystem.loadTask("task-1"))?.assignee).toEqual([]);
 	});
 
 	it("appends and renders task comments through task_edit and task_view", async () => {
@@ -758,7 +760,7 @@ describe("MCP task tools (MVP)", () => {
 
 		// The setup mutations above moved task files; dispose the content store so
 		// pending fs-watcher reconciles can't fire inside the tripwire window.
-		mcpServer.disposeContentStore();
+		mcpServer.application.disposeContentStore();
 
 		const tripwires = installCrossBranchTripwires(mcpServer);
 		try {
@@ -800,9 +802,9 @@ describe("MCP task tools (MVP)", () => {
 			labels: [],
 			dependencies: [],
 		};
-		const activePath = await mcpServer.filesystem.saveTask(activeTask);
+		const activePath = await mcpServer.application.filesystem.saveTask(activeTask);
 		await Bun.write(
-			join(mcpServer.filesystem.completedDir, basename(activePath)),
+			join(mcpServer.application.filesystem.completedDir, basename(activePath)),
 			serializeTask({ ...activeTask, title: "Completed lifecycle identity", status: "Done" }),
 		);
 
@@ -844,7 +846,7 @@ describe("MCP task tools (MVP)", () => {
 	it("exposes configured priority enums and accepts custom priority values", async () => {
 		const config = await loadConfig(mcpServer);
 		config.priorities = ["Very High", "High", "Medium", "Low", "Very Low"];
-		await mcpServer.filesystem.saveConfig(config);
+		await mcpServer.application.filesystem.saveConfig(config);
 
 		const customServer = new McpServer(TEST_DIR, "Test instructions");
 		let primaryError: unknown;
@@ -878,7 +880,7 @@ describe("MCP task tools (MVP)", () => {
 				},
 			});
 			expect(createResult.isError).not.toBe(true);
-			const task = await customServer.getTask("task-1");
+			const task = await customServer.application.getTask("task-1");
 			expect(task?.priority).toBe("very high");
 		} catch (error) {
 			primaryError = error;
@@ -954,7 +956,7 @@ describe("MCP task tools (MVP)", () => {
 		const createText = getText(createResult.content);
 		expect(createText).toContain("Task TASK-1 - Status normalization");
 
-		const createdTask = await mcpServer.getTask("task-1");
+		const createdTask = await mcpServer.application.getTask("task-1");
 		expect(createdTask?.status).toBe("Done");
 
 		const editResult = await mcpServer.testInterface.callTool({
@@ -970,7 +972,7 @@ describe("MCP task tools (MVP)", () => {
 		const editText = getText(editResult.content);
 		expect(editText).toContain("Task TASK-1 - Status normalization");
 
-		const updatedTask = await mcpServer.getTask("task-1");
+		const updatedTask = await mcpServer.application.getTask("task-1");
 		expect(updatedTask?.status).toBe("In Progress");
 	});
 
@@ -1094,7 +1096,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 
 		expect(getText(blankEdit.content)).toContain("Labels: docs, workflow");
-		expect((await mcpServer.getTask("task-1"))?.labels).toEqual(["docs", "workflow"]);
+		expect((await mcpServer.application.getTask("task-1"))?.labels).toEqual(["docs", "workflow"]);
 
 		const clearEdit = await mcpServer.testInterface.callTool({
 			params: {
@@ -1107,7 +1109,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 
 		expect(getText(clearEdit.content)).not.toContain("Labels:");
-		expect((await mcpServer.getTask("task-1"))?.labels).toEqual([]);
+		expect((await mcpServer.application.getTask("task-1"))?.labels).toEqual([]);
 	});
 
 	it("does not clear dependencies from blank-only task_edit dependency arrays", async () => {
@@ -1141,7 +1143,7 @@ describe("MCP task tools (MVP)", () => {
 
 		expect(getText(blankEdit.content)).toContain("Dependency Graph:");
 		expect(getText(blankEdit.content)).toContain("TASK-1");
-		expect((await mcpServer.getTask("task-2"))?.dependencies).toEqual(["TASK-1"]);
+		expect((await mcpServer.application.getTask("task-2"))?.dependencies).toEqual(["TASK-1"]);
 
 		const clearEdit = await mcpServer.testInterface.callTool({
 			params: {
@@ -1154,7 +1156,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 
 		expect(getText(clearEdit.content)).not.toContain("Depends on (");
-		expect((await mcpServer.getTask("task-2"))?.dependencies).toEqual([]);
+		expect((await mcpServer.application.getTask("task-2"))?.dependencies).toEqual([]);
 	});
 
 	it("creates, edits, lists, and views tasks with ordinal", async () => {
@@ -1212,7 +1214,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 		expect(getText(editResult.content)).toContain("Ordinal: 5");
 
-		const updatedTask = await mcpServer.getTask("task-3");
+		const updatedTask = await mcpServer.application.getTask("task-3");
 		expect(updatedTask?.ordinal).toBe(5);
 
 		const viewResult = await mcpServer.testInterface.callTool({
@@ -1321,7 +1323,7 @@ describe("MCP task tools (MVP)", () => {
 	it("creates and edits Definition of Done items", async () => {
 		const config = await loadConfig(mcpServer);
 		config.definitionOfDone = ["Run tests", "Update docs"];
-		await mcpServer.filesystem.saveConfig(config);
+		await mcpServer.application.filesystem.saveConfig(config);
 
 		const createResult = await mcpServer.testInterface.callTool({
 			params: {
@@ -1481,7 +1483,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 		expect(getText(createResult.content)).toContain("Type: bug");
 
-		const createdTask = await mcpServer.getTask("task-1");
+		const createdTask = await mcpServer.application.getTask("task-1");
 		expect(createdTask?.type).toBe("bug");
 
 		await mcpServer.testInterface.callTool({
@@ -1511,7 +1513,7 @@ describe("MCP task tools (MVP)", () => {
 		});
 		expect(getText(editResult.content)).toContain("Type: feature");
 
-		const editedTask = await mcpServer.getTask("task-1");
+		const editedTask = await mcpServer.application.getTask("task-1");
 		expect(editedTask?.type).toBe("feature");
 
 		const untypedView = await mcpServer.testInterface.callTool({
@@ -1554,7 +1556,7 @@ describe("MCP task tools (MVP)", () => {
 		expect(editResult.isError).toBe(true);
 		expect(getText(editResult.content)).toContain(`must be one of: ${DEFAULT_TASK_TYPES.join(", ")}`);
 
-		const task = await mcpServer.getTask("task-1");
+		const task = await mcpServer.application.getTask("task-1");
 		expect(task?.type).toBeUndefined();
 	});
 
@@ -1575,7 +1577,7 @@ describe("MCP task tools (MVP)", () => {
 
 		const config = await loadConfig(mcpServer);
 		config.types = ["Bug", "Epic"];
-		await mcpServer.filesystem.saveConfig(config);
+		await mcpServer.application.filesystem.saveConfig(config);
 
 		const customServer = new McpServer(TEST_DIR, "Test instructions");
 		let primaryError: unknown;
@@ -1650,7 +1652,7 @@ describe("MCP task tools (MVP)", () => {
 	it("creates and edits tasks with a project when configured and shows it in view and list output", async () => {
 		const config = await loadConfig(mcpServer);
 		config.projects = ["Web", "API"];
-		await mcpServer.filesystem.saveConfig(config);
+		await mcpServer.application.filesystem.saveConfig(config);
 
 		const customServer = new McpServer(TEST_DIR, "Test instructions");
 		let primaryError: unknown;
@@ -1672,7 +1674,7 @@ describe("MCP task tools (MVP)", () => {
 			});
 			expect(getText(createResult.content)).toContain("Project: Web");
 
-			const createdTask = await customServer.getTask("task-1");
+			const createdTask = await customServer.application.getTask("task-1");
 			expect(createdTask?.project).toBe("Web");
 
 			await customServer.testInterface.callTool({
@@ -1691,7 +1693,7 @@ describe("MCP task tools (MVP)", () => {
 			});
 			expect(getText(editResult.content)).toContain("Project: API");
 
-			const editedTask = await customServer.getTask("task-1");
+			const editedTask = await customServer.application.getTask("task-1");
 			expect(editedTask?.project).toBe("API");
 
 			const unprojectedView = await customServer.testInterface.callTool({

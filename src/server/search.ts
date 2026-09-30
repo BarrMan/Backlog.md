@@ -56,41 +56,71 @@ async function parseConfiguredFilters(url: URL, core: Core): Promise<SearchError
 	const filters: SearchFilters = {};
 	const statuses = collect(url, ["status"]);
 	if (statuses.length > 0) filters.status = statuses.length === 1 ? statuses[0] : statuses;
-	const excluded = collect(url, EXCLUDE_STATUS_PARAMS, true)
-		.map((value) => value.trim())
-		.filter(Boolean);
-	if (excluded.length > 0) {
-		const { values, invalid, validStatuses } = await getCanonicalStatuses(excluded, core);
-		if (invalid.length > 0)
-			return {
-				error: `Invalid excludeStatus filter: ${invalid.join(", ")}. Valid statuses are: ${formatValidStatuses(validStatuses)}`,
-			};
-		filters.excludeStatus = values.length === 1 ? values[0] : values;
-	}
-	const priorities = collect(url, ["priority"]);
-	const projects = collect(url, ["project"]);
-	if (priorities.length > 0 || projects.length > 0) {
-		const config = await core.filesystem.loadConfig();
-		if (priorities.length > 0) {
-			const values = priorities.map((value) => resolvePriorityValue(value, config));
-			const invalid = priorities[values.findIndex((value) => !value)];
-			if (invalid) return { error: `Unsupported priority '${invalid}'. Use ${formatValidPriorityValues(config)}.` };
-			const resolved = values.filter((value): value is SearchPriorityFilter => Boolean(value));
-			filters.priority = resolved.length === 1 ? resolved[0] : resolved;
-		}
-		if (projects.length > 0) {
-			if (getProjectValues(config).length === 0)
-				return { error: noProjectsConfiguredMessage(core.filesystem.configFilePath) };
-			const { values, invalid } = resolveProjectValues(projects, config);
-			if (invalid.length > 0)
-				return { error: `Unsupported project '${invalid[0]}'. Use ${formatValidProjectValues(config)}.` };
-			filters.project = values.length === 1 ? values[0] : values;
-		}
-	}
+	const configured = await parseConfiguredValues(url, core);
+	if ("error" in configured) return configured;
+	Object.assign(filters, configured.value);
 	filters.assignee = oneOrMany(collect(url, ["assignee", "assignees"], true));
 	filters.labels = oneOrMany(collect(url, ["label", "labels"], true));
 	filters.modifiedFiles = oneOrMany(collect(url, ["modifiedFile", "modifiedFiles"], true));
 	return { value: filters };
+}
+
+async function parseConfiguredValues(url: URL, core: Core): Promise<SearchError | { value: SearchFilters }> {
+	const excluded = await parseExcludedStatuses(url, core);
+	if ("error" in excluded) return excluded;
+	const configured = await parsePriorityAndProject(url, core);
+	if ("error" in configured) return configured;
+	return { value: { ...excluded.value, ...configured.value } };
+}
+
+async function parseExcludedStatuses(url: URL, core: Core): Promise<SearchError | { value: SearchFilters }> {
+	const excluded = collect(url, EXCLUDE_STATUS_PARAMS, true)
+		.map((value) => value.trim())
+		.filter(Boolean);
+	if (excluded.length === 0) return { value: {} };
+	const { values, invalid, validStatuses } = await getCanonicalStatuses(excluded, core);
+	if (invalid.length > 0)
+		return {
+			error: `Invalid excludeStatus filter: ${invalid.join(", ")}. Valid statuses are: ${formatValidStatuses(validStatuses)}`,
+		};
+	return { value: { excludeStatus: values.length === 1 ? values[0] : values } };
+}
+
+async function parsePriorityAndProject(url: URL, core: Core): Promise<SearchError | { value: SearchFilters }> {
+	const priorities = collect(url, ["priority"]);
+	const projects = collect(url, ["project"]);
+	if (priorities.length === 0 && projects.length === 0) return { value: {} };
+	const config = await core.filesystem.loadConfig();
+	const priority = parsePriorities(priorities, config);
+	if ("error" in priority) return priority;
+	const project = parseProjects(projects, config, core.filesystem.configFilePath);
+	if ("error" in project) return project;
+	return { value: { ...priority.value, ...project.value } };
+}
+
+function parsePriorities(
+	values: string[],
+	config: Parameters<typeof resolvePriorityValue>[1],
+): SearchError | { value: SearchFilters } {
+	if (values.length === 0) return { value: {} };
+	const resolved = values.map((value) => resolvePriorityValue(value, config));
+	const invalid = values[resolved.findIndex((value) => !value)];
+	if (invalid) return { error: `Unsupported priority '${invalid}'. Use ${formatValidPriorityValues(config)}.` };
+	const priority = resolved.filter((value): value is SearchPriorityFilter => Boolean(value));
+	return { value: { priority: priority.length === 1 ? priority[0] : priority } };
+}
+
+function parseProjects(
+	values: string[],
+	config: Parameters<typeof resolveProjectValues>[1],
+	configPath: string,
+): SearchError | { value: SearchFilters } {
+	if (values.length === 0) return { value: {} };
+	if (getProjectValues(config).length === 0) return { error: noProjectsConfiguredMessage(configPath) };
+	const { values: resolved, invalid } = resolveProjectValues(values, config);
+	if (invalid.length > 0)
+		return { error: `Unsupported project '${invalid[0]}'. Use ${formatValidProjectValues(config)}.` };
+	return { value: { project: resolved.length === 1 ? resolved[0] : resolved } };
 }
 
 export async function parseSearchRequest(url: URL, core: Core): Promise<SearchParseResult> {

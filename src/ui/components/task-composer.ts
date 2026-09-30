@@ -473,19 +473,37 @@ export type TaskComposerOptions = {
 	persist: (input: TaskCreateInput) => Promise<Task>;
 };
 
+type ComposerFieldSets = {
+	hasProjects: boolean;
+	fieldOrder: readonly TaskComposerField[];
+	selectorFields: readonly ("status" | "type" | "priority" | "project")[];
+	clickFields: readonly TaskComposerField[];
+	navFields: readonly TaskComposerField[];
+};
+
+function getComposerFieldSets(projects: readonly string[] | undefined): ComposerFieldSets {
+	const hasProjects = getProjectValues(projects).length > 0;
+	if (hasProjects) {
+		return {
+			hasProjects,
+			fieldOrder: FIELD_ORDER_WITH_PROJECT,
+			selectorFields: ["status", "type", "priority", "project"],
+			clickFields: ["title", "description", "dueDate", "status", "type", "priority", "project"],
+			navFields: ["status", "type", "priority", "project", "create", "cancel"],
+		};
+	}
+	return {
+		hasProjects,
+		fieldOrder: FIELD_ORDER,
+		selectorFields: ["status", "type", "priority"],
+		clickFields: ["title", "description", "dueDate", "status", "type", "priority"],
+		navFields: ["status", "type", "priority", "create", "cancel"],
+	};
+}
+
 export async function openTaskComposer(options: TaskComposerOptions): Promise<Task | null> {
 	return new Promise<Task | null>((resolve) => {
-		const hasProjects = getProjectValues(options.projects).length > 0;
-		const fieldOrder: readonly TaskComposerField[] = hasProjects ? FIELD_ORDER_WITH_PROJECT : FIELD_ORDER;
-		const selectorFields = hasProjects
-			? (["status", "type", "priority", "project"] as const)
-			: (["status", "type", "priority"] as const);
-		const clickFields = hasProjects
-			? (["title", "description", "dueDate", "status", "type", "priority", "project"] as const)
-			: (["title", "description", "dueDate", "status", "type", "priority"] as const);
-		const navFields = hasProjects
-			? (["status", "type", "priority", "project", "create", "cancel"] as const)
-			: (["status", "type", "priority", "create", "cancel"] as const);
+		const { hasProjects, fieldOrder, selectorFields, clickFields, navFields } = getComposerFieldSets(options.projects);
 		const controller = new TaskComposerController(options.statuses);
 		let settled = false;
 		let pickerOpen = false;

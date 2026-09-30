@@ -30,8 +30,10 @@ export function isAmbiguousIdError(error: unknown): error is AmbiguousIdError {
 
 function entityIdBody(prefix: string, value: string): string {
 	const trimmed = value.trim();
-	const match = trimmed.match(new RegExp(`^${prefix}-(.*)$`, "i"));
-	return match?.[1] ?? trimmed;
+	const prefixWithSeparator = `${prefix}-`;
+	return trimmed.toLowerCase().startsWith(prefixWithSeparator.toLowerCase())
+		? trimmed.substring(prefixWithSeparator.length)
+		: trimmed;
 }
 
 /** Canonical comparison key, or null when the ID carries no addressable value. */

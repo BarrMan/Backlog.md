@@ -2,7 +2,7 @@
 	"$schema": "./node_modules/fallow/schema.json",
 	"minimumVersion": "3.30.0",
 	"entry": [
-		"src/cli.ts",
+		"src/cli/index.ts",
 		"src/web/index.html",
 		"src/mcp/tools/**/index.ts",
 		"src/mcp/resources/**/index.ts",

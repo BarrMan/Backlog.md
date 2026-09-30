@@ -58,25 +58,23 @@ function applyList(
 		current = next;
 	}
 	const additionsList = normalizeStringList(additions) ?? [];
-	if (additionsList.length > 0) {
-		const seen = new Set(current.map(key));
-		for (const value of additionsList) {
-			if (!seen.has(key(value))) {
-				current.push(value);
-				seen.add(key(value));
-				mutated = true;
-			}
-		}
+	const seen = new Set(current.map(key));
+	const added = additionsList.filter((value) => {
+		const valueKey = key(value);
+		if (seen.has(valueKey)) return false;
+		seen.add(valueKey);
+		return true;
+	});
+	if (added.length) {
+		current = [...current, ...added];
 		task[field] = current;
+		mutated = true;
 	}
-	const removalsList = normalizeStringList(removals) ?? [];
-	if (removalsList.length > 0) {
-		const removed = new Set(removalsList.map(key));
-		const next = current.filter((value) => !removed.has(key(value)));
-		if (!stringArraysEqual(next, current)) {
-			task[field] = next;
-			mutated = true;
-		}
+	const removed = new Set((normalizeStringList(removals) ?? []).map(key));
+	const next = removed.size ? current.filter((value) => !removed.has(key(value))) : current;
+	if (!stringArraysEqual(next, current)) {
+		task[field] = next;
+		mutated = true;
 	}
 	return mutated;
 }
@@ -89,30 +87,17 @@ async function applyDependencies(
 	let current = [...(task.dependencies ?? [])];
 	let mutated = false;
 	if (input.dependencies !== undefined) {
-		const { valid, invalid } = await context.validateDependencies(
-			parseDelimitedStringList(input.dependencies) ?? [],
-			task,
-		);
-		if (invalid.length > 0) throw context.formatMissingDependenciesError(invalid);
+		const valid = await validatedDependencies(input.dependencies, task, context);
 		if (!stringArraysEqual(valid, current)) {
 			current = valid;
 			mutated = true;
 		}
 	}
 	if (input.addDependencies && input.addDependencies.length > 0) {
-		const { valid, invalid } = await context.validateDependencies(
-			parseDelimitedStringList(input.addDependencies) ?? [],
-			task,
-		);
-		if (invalid.length > 0) throw context.formatMissingDependenciesError(invalid);
-		const seen = new Set(current);
-		for (const dependency of valid) {
-			if (!seen.has(dependency)) {
-				current.push(dependency);
-				seen.add(dependency);
-				mutated = true;
-			}
-		}
+		const valid = await validatedDependencies(input.addDependencies, task, context);
+		const next = appendDependencies(current, valid);
+		mutated = !stringArraysEqual(next, current) || mutated;
+		current = next;
 	}
 	if (input.removeDependencies && input.removeDependencies.length > 0) {
 		const removals = parseDelimitedStringList(input.removeDependencies) ?? [];
@@ -124,4 +109,20 @@ async function applyDependencies(
 	}
 	task.dependencies = current;
 	return mutated;
+}
+
+async function validatedDependencies(input: string[], task: Task, context: CollectionUpdateContext): Promise<string[]> {
+	const { valid, invalid } = await context.validateDependencies(parseDelimitedStringList(input) ?? [], task);
+	if (invalid.length > 0) throw context.formatMissingDependenciesError(invalid);
+	return valid;
+}
+
+function appendDependencies(current: string[], additions: string[]): string[] {
+	const seen = new Set(current);
+	const added = additions.filter((dependency) => {
+		if (seen.has(dependency)) return false;
+		seen.add(dependency);
+		return true;
+	});
+	return added.length === 0 ? current : [...current, ...added];
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { box } from "neo-neo-bblessed";
-import { createStartupWarningBar } from "../ui/task-viewer-with-search.ts";
+import { createStartupWarningBar } from "../ui/task-viewer/rendering.ts";
 import { createScreen } from "../ui/tui.ts";
 
 describe("TUI startup warning bar", () => {

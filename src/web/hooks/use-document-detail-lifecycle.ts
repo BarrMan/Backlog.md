@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { isAmbiguousIdConflict } from "../lib/api";
 
 type DetailEntity = { id: string; title?: string; rawContent?: string };
@@ -14,18 +15,15 @@ interface DetailAdapter<T extends DetailEntity> {
 }
 
 export function useDocumentDetailLifecycle<T extends DetailEntity>({
-	id,
 	items,
 	adapter,
-	editRequested,
-	consumeEditRequest,
 }: {
-	id?: string;
 	items: T[];
 	adapter: DetailAdapter<T>;
-	editRequested: boolean;
-	consumeEditRequest: () => void;
 }) {
+	const { id, title } = useParams<{ id: string; title: string }>();
+	const navigate = useNavigate();
+	const [searchParams, setSearchParams] = useSearchParams();
 	const [entity, setEntity] = useState<T | null>(null);
 	const [isLoading, setIsLoading] = useState(true);
 	const [isEditing, setIsEditing] = useState(false);
@@ -81,10 +79,26 @@ export function useDocumentDetailLifecycle<T extends DetailEntity>({
 	}, [adapter, id, items]);
 
 	useEffect(() => {
-		if (!editRequested) return;
+		if (searchParams.get("edit") !== "true") return;
 		setIsEditing(true);
-		consumeEditRequest();
-	}, [consumeEditRequest, editRequested]);
+		setSearchParams((params) => {
+			params.delete("edit");
+			return params;
+		});
+	}, [searchParams, setSearchParams]);
 
-	return { entity, setEntity, isLoading, isEditing, setIsEditing, isNew, setIsNew, error, setError };
+	return {
+		id,
+		title,
+		navigate,
+		entity,
+		setEntity,
+		isLoading,
+		isEditing,
+		setIsEditing,
+		isNew,
+		setIsNew,
+		error,
+		setError,
+	};
 }

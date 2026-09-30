@@ -5,7 +5,7 @@ import { type DefinitionOfDoneDefaultsUpsertArgs, DefinitionOfDoneHandlers } fro
 import { definitionOfDoneDefaultsGetSchema, definitionOfDoneDefaultsUpsertSchema } from "./schemas.ts";
 
 export function registerDefinitionOfDoneTools(server: McpServer): void {
-	const handlers = new DefinitionOfDoneHandlers(server);
+	const handlers = new DefinitionOfDoneHandlers(server.application);
 
 	const getDefaultsTool: McpToolHandler = createSimpleValidatedTool(
 		{

@@ -291,36 +291,7 @@ const clackPromptRunner: TaskWizardPromptRunner = async (question) => {
 			initialValue: question.initial,
 			validate: question.validate,
 			render() {
-				const withGuide = clack.settings.withGuide;
-				const header = `${withGuide ? `${picocolors.gray(clack.S_BAR)}\n` : ""}${clack.symbol(this.state)}  ${question.message}\n`;
-				const placeholder = picocolors.inverse(picocolors.hidden("_"));
-				const inputValue = this.userInput.length > 0 ? this.userInputWithCursor : placeholder;
-				const submittedValue = String(this.value ?? "");
-
-				switch (this.state) {
-					case "error": {
-						const linePrefix = withGuide ? `${picocolors.yellow(clack.S_BAR)}  ` : "";
-						const footer = withGuide ? picocolors.yellow(clack.S_BAR_END) : "";
-						const errorMessage = this.error.length > 0 ? `  ${picocolors.yellow(this.error)}` : "";
-						return `${header.trimEnd()}\n${linePrefix}${inputValue}\n${footer}${errorMessage}\n`;
-					}
-					case "submit": {
-						const linePrefix = withGuide ? picocolors.gray(clack.S_BAR) : "";
-						const value = submittedValue.length > 0 ? `  ${picocolors.dim(submittedValue)}` : "";
-						return `${header}${linePrefix}${value}`;
-					}
-					case "cancel": {
-						const linePrefix = withGuide ? picocolors.gray(clack.S_BAR) : "";
-						const value =
-							submittedValue.length > 0 ? `  ${picocolors.strikethrough(picocolors.dim(submittedValue))}` : "";
-						return `${header}${linePrefix}${value}${submittedValue.trim().length > 0 ? `\n${linePrefix}` : ""}`;
-					}
-					default: {
-						const linePrefix = withGuide ? `${picocolors.cyan(clack.S_BAR)}  ` : "";
-						const footer = withGuide ? picocolors.cyan(clack.S_BAR_END) : "";
-						return `${header}${linePrefix}${inputValue}\n${footer}\n`;
-					}
-				}
+				return renderTextPrompt(question, this);
 			},
 		});
 		let previousInput = question.initial ?? "";
@@ -366,6 +337,44 @@ const clackPromptRunner: TaskWizardPromptRunner = async (question) => {
 	}
 	return { [question.name]: String(result ?? "") };
 };
+
+function renderTextPrompt(
+	question: TaskWizardQuestion,
+	prompt: Pick<TextPrompt, "state" | "userInput" | "userInputWithCursor" | "value" | "error">,
+): string {
+	const withGuide = clack.settings.withGuide;
+	const header = `${withGuide ? `${picocolors.gray(clack.S_BAR)}\n` : ""}${clack.symbol(prompt.state)}  ${question.message}\n`;
+	const input = prompt.userInput.length > 0 ? prompt.userInputWithCursor : picocolors.inverse(picocolors.hidden("_"));
+	const value = String(prompt.value ?? "");
+	if (prompt.state === "error") return renderTextPromptError(header, input, prompt.error, withGuide);
+	if (prompt.state === "submit") return renderTextPromptSubmit(header, value, withGuide);
+	if (prompt.state === "cancel") return renderTextPromptCancel(header, value, withGuide);
+	return renderTextPromptActive(header, input, withGuide);
+}
+
+function renderTextPromptError(header: string, input: string, error: string, withGuide: boolean): string {
+	const linePrefix = withGuide ? `${picocolors.yellow(clack.S_BAR)}  ` : "";
+	const footer = withGuide ? picocolors.yellow(clack.S_BAR_END) : "";
+	const errorMessage = error.length > 0 ? `  ${picocolors.yellow(error)}` : "";
+	return `${header.trimEnd()}\n${linePrefix}${input}\n${footer}${errorMessage}\n`;
+}
+
+function renderTextPromptSubmit(header: string, value: string, withGuide: boolean): string {
+	const linePrefix = withGuide ? picocolors.gray(clack.S_BAR) : "";
+	return `${header}${linePrefix}${value.length > 0 ? `  ${picocolors.dim(value)}` : ""}`;
+}
+
+function renderTextPromptCancel(header: string, value: string, withGuide: boolean): string {
+	const linePrefix = withGuide ? picocolors.gray(clack.S_BAR) : "";
+	const displayed = value.length > 0 ? `  ${picocolors.strikethrough(picocolors.dim(value))}` : "";
+	return `${header}${linePrefix}${displayed}${value.trim().length > 0 ? `\n${linePrefix}` : ""}`;
+}
+
+function renderTextPromptActive(header: string, input: string, withGuide: boolean): string {
+	const linePrefix = withGuide ? `${picocolors.cyan(clack.S_BAR)}  ` : "";
+	const footer = withGuide ? picocolors.cyan(clack.S_BAR_END) : "";
+	return `${header}${linePrefix}${input}\n${footer}\n`;
+}
 
 async function promptText(
 	prompt: TaskWizardPromptRunner,
@@ -419,211 +428,137 @@ async function runTaskWizardValues(params: {
 	initialValues: TaskWizardValues;
 	promptImpl?: TaskWizardPromptRunner;
 }): Promise<TaskWizardValues | null> {
-	const prompt = params.promptImpl ?? clackPromptRunner;
-	const statuses = params.statuses;
-	const initial = params.initialValues;
-	const statusPrompt = buildStatusPromptValues({
-		statuses,
-		mode: params.mode,
-		initialStatus: initial.status,
-	});
-	const priorityPrompt = buildPriorityPromptValues(initial.priority, params.priorities);
-	const taskTypePrompt = buildTaskTypePromptValues(initial.type, params.types);
-	const projectPrompt = buildProjectPromptValues(initial.project, params.projects);
-	const hasProjects = getProjectValues(params.projects).length > 0;
-
 	try {
-		const values: TaskWizardValues = {
-			...initial,
-			status: statusPrompt.initial,
-			priority: priorityPrompt.initial,
-			type: taskTypePrompt.initial,
-			project: projectPrompt.initial,
-		};
-		const questions: TaskWizardValueQuestion[] = [
-			{
-				type: "text",
-				name: "title",
-				message: "Title",
-				validate: (value) => {
-					const normalized = String(value ?? "");
-					if (normalized.trim().length === 0) {
-						return "Title is required.";
-					}
-					return undefined;
-				},
-			},
-			{
-				type: "text",
-				name: "description",
-				message: `Description (${SINGLE_LINE_PROMPT_GUIDANCE})`,
-			},
-			{
-				type: "select",
-				name: "status",
-				message: "Status",
-				options: statusPrompt.options,
-			},
-			{
-				type: "select",
-				name: "priority",
-				message: "Priority",
-				options: priorityPrompt.options,
-			},
-			{
-				type: "select",
-				name: "type",
-				message: "Type",
-				options: taskTypePrompt.options,
-			},
-			...(hasProjects
-				? [
-						{
-							type: "select" as const,
-							name: "project" as const,
-							message: "Project",
-							options: projectPrompt.options,
-						},
-					]
-				: []),
-			{
-				type: "text",
-				name: "dueDate",
-				message: "Due date (YYYY-MM-DD; blank for none)",
-				validate: (value) => {
-					try {
-						normalizeDueDate(value, "Due date");
-						return undefined;
-					} catch (error) {
-						return error instanceof Error ? error.message : "Invalid due date.";
-					}
-				},
-			},
-			{
-				type: "text",
-				name: "assignee",
-				message:
-					params.mode === "create"
-						? "Assignee (comma-separated)"
-						: "Assignee (comma-separated; blank keeps current value)",
-			},
-			{
-				type: "text",
-				name: "labels",
-				message:
-					params.mode === "create" ? "Labels (comma-separated)" : "Labels (comma-separated; blank keeps current value)",
-			},
-			{
-				type: "text",
-				name: "acceptanceCriteria",
-				message: "Acceptance Criteria (comma/newline-separated; optional [x]/[ ] prefix per item)",
-			},
-			{
-				type: "text",
-				name: "definitionOfDone",
-				message:
-					"Task Definition of Done (per-task; project-level DoD configured elsewhere; comma/newline-separated; optional [x]/[ ] prefix per item)",
-			},
-			{
-				type: "text",
-				name: "implementationPlan",
-				message:
-					params.mode === "create"
-						? `Implementation Plan (${SINGLE_LINE_PROMPT_GUIDANCE})`
-						: `Implementation Plan (${SINGLE_LINE_PROMPT_GUIDANCE}; blank keeps current value)`,
-			},
-			{
-				type: "text",
-				name: "implementationNotes",
-				message:
-					params.mode === "create"
-						? `Implementation Notes (${SINGLE_LINE_PROMPT_GUIDANCE})`
-						: `Implementation Notes (${SINGLE_LINE_PROMPT_GUIDANCE}; blank keeps current value)`,
-			},
-			{
-				type: "text",
-				name: "references",
-				message:
-					params.mode === "create"
-						? "References (comma-separated)"
-						: "References (comma-separated; blank keeps current value)",
-			},
-			{
-				type: "text",
-				name: "documentation",
-				message:
-					params.mode === "create"
-						? "Documentation (comma-separated)"
-						: "Documentation (comma-separated; blank keeps current value)",
-			},
-			{
-				type: "text",
-				name: "dependencies",
-				message:
-					params.mode === "create"
-						? "Dependencies (comma-separated task IDs)"
-						: "Dependencies (comma-separated task IDs; blank keeps current value)",
-			},
-		];
-
-		let questionIndex = 0;
-		while (questionIndex < questions.length) {
-			const question = questions[questionIndex];
-			if (!question) {
-				break;
-			}
-			if (question.type === "text") {
-				const response = await promptText(prompt, {
-					name: question.name,
-					message: question.message,
-					initial: values[question.name],
-					validate: question.validate,
-					allowBackspaceNavigation: questionIndex > 0,
-				});
-				if (response === WIZARD_BACKSPACE_NAVIGATION) {
-					questionIndex = Math.max(0, questionIndex - 1);
-					continue;
-				}
-				values[question.name] = response;
-				questionIndex += 1;
-				continue;
-			}
-			values[question.name] = await promptSelect(prompt, {
-				name: question.name,
-				message: question.message,
-				initial: values[question.name],
-				choices: question.options ?? [],
-			});
-			questionIndex += 1;
-		}
-
-		const canonicalStatus =
-			values.status.trim().length > 0 ? (findCanonicalStatus(values.status, statuses) ?? values.status.trim()) : "";
-
-		return {
-			title: values.title.trim(),
-			description: values.description,
-			status: canonicalStatus,
-			priority: normalizePriorityValue(values.priority) ?? "",
-			type: resolveTaskTypeValue(values.type, params.types) ?? values.type.trim(),
-			project: resolveProjectValue(values.project, params.projects) ?? values.project.trim(),
-			dueDate: normalizeDueDate(values.dueDate, "Due date") ?? "",
-			assignee: values.assignee,
-			labels: values.labels,
-			acceptanceCriteria: values.acceptanceCriteria,
-			definitionOfDone: values.definitionOfDone,
-			implementationPlan: values.implementationPlan,
-			implementationNotes: values.implementationNotes,
-			references: values.references,
-			documentation: values.documentation,
-			dependencies: values.dependencies,
-		};
+		const form = buildWizardForm(params);
+		await answerWizardQuestions(form.values, form.questions, params.promptImpl ?? clackPromptRunner);
+		return normalizeWizardValues(form.values, params);
 	} catch (error) {
 		if (error instanceof TaskWizardCancelledError) {
 			return null;
 		}
 		throw error;
 	}
+}
+
+function buildWizardForm(params: Parameters<typeof runTaskWizardValues>[0]) {
+	const status = buildStatusPromptValues({
+		statuses: params.statuses,
+		mode: params.mode,
+		initialStatus: params.initialValues.status,
+	});
+	const priority = buildPriorityPromptValues(params.initialValues.priority, params.priorities);
+	const type = buildTaskTypePromptValues(params.initialValues.type, params.types);
+	const project = buildProjectPromptValues(params.initialValues.project, params.projects);
+	const field = (
+		name: keyof TaskWizardValues,
+		message: string,
+		validate?: TaskWizardQuestion["validate"],
+	): TaskWizardValueQuestion => ({ type: "text", name, message, validate });
+	const unchanged = (label: string) =>
+		params.mode === "create" ? `${label} (comma-separated)` : `${label} (comma-separated; blank keeps current value)`;
+	return {
+		values: {
+			...params.initialValues,
+			status: status.initial,
+			priority: priority.initial,
+			type: type.initial,
+			project: project.initial,
+		},
+		questions: [
+			field("title", "Title", (value) => (String(value ?? "").trim() ? undefined : "Title is required.")),
+			field("description", `Description (${SINGLE_LINE_PROMPT_GUIDANCE})`),
+			{ type: "select", name: "status", message: "Status", options: status.options },
+			{ type: "select", name: "priority", message: "Priority", options: priority.options },
+			{ type: "select", name: "type", message: "Type", options: type.options },
+			...(getProjectValues(params.projects).length
+				? [{ type: "select" as const, name: "project" as const, message: "Project", options: project.options }]
+				: []),
+			field("dueDate", "Due date (YYYY-MM-DD; blank for none)", validateWizardDueDate),
+			field("assignee", unchanged("Assignee")),
+			field("labels", unchanged("Labels")),
+			field("acceptanceCriteria", "Acceptance Criteria (comma/newline-separated; optional [x]/[ ] prefix per item)"),
+			field(
+				"definitionOfDone",
+				"Task Definition of Done (per-task; project-level DoD configured elsewhere; comma/newline-separated; optional [x]/[ ] prefix per item)",
+			),
+			field(
+				"implementationPlan",
+				params.mode === "create"
+					? `Implementation Plan (${SINGLE_LINE_PROMPT_GUIDANCE})`
+					: `Implementation Plan (${SINGLE_LINE_PROMPT_GUIDANCE}; blank keeps current value)`,
+			),
+			field(
+				"implementationNotes",
+				params.mode === "create"
+					? `Implementation Notes (${SINGLE_LINE_PROMPT_GUIDANCE})`
+					: `Implementation Notes (${SINGLE_LINE_PROMPT_GUIDANCE}; blank keeps current value)`,
+			),
+			field("references", unchanged("References")),
+			field("documentation", unchanged("Documentation")),
+			field(
+				"dependencies",
+				params.mode === "create"
+					? "Dependencies (comma-separated task IDs)"
+					: "Dependencies (comma-separated task IDs; blank keeps current value)",
+			),
+		] as TaskWizardValueQuestion[],
+	};
+}
+
+function validateWizardDueDate(value: string | undefined): string | undefined {
+	try {
+		normalizeDueDate(value, "Due date");
+	} catch (error) {
+		return error instanceof Error ? error.message : "Invalid due date.";
+	}
+}
+
+async function answerWizardQuestions(
+	values: TaskWizardValues,
+	questions: TaskWizardValueQuestion[],
+	prompt: TaskWizardPromptRunner,
+): Promise<void> {
+	for (let index = 0; index < questions.length; ) {
+		const question = questions[index];
+		if (!question) break;
+		const answer =
+			question.type === "text"
+				? await promptText(prompt, {
+						name: question.name,
+						message: question.message,
+						initial: values[question.name],
+						validate: question.validate,
+						allowBackspaceNavigation: index > 0,
+					})
+				: await promptSelect(prompt, {
+						name: question.name,
+						message: question.message,
+						initial: values[question.name],
+						choices: question.options ?? [],
+					});
+		if (answer === WIZARD_BACKSPACE_NAVIGATION) index = Math.max(0, index - 1);
+		else {
+			values[question.name] = answer;
+			index += 1;
+		}
+	}
+}
+
+function normalizeWizardValues(
+	values: TaskWizardValues,
+	params: Parameters<typeof runTaskWizardValues>[0],
+): TaskWizardValues {
+	return {
+		...values,
+		title: values.title.trim(),
+		status: values.status.trim().length
+			? (findCanonicalStatus(values.status, params.statuses) ?? values.status.trim())
+			: "",
+		priority: normalizePriorityValue(values.priority) ?? "",
+		type: resolveTaskTypeValue(values.type, params.types) ?? values.type.trim(),
+		project: resolveProjectValue(values.project, params.projects) ?? values.project.trim(),
+		dueDate: normalizeDueDate(values.dueDate, "Due date") ?? "",
+	};
 }
 
 export async function pickTaskForEditWizard(params: {
@@ -696,43 +631,47 @@ export async function runTaskCreateWizard(
 		return null;
 	}
 
-	const priority = values.priority.trim();
-	const parsedPriority = priority.length > 0 ? priority : undefined;
-	const type = values.type.trim();
-	const parsedType = type.length > 0 ? type : undefined;
-	const project = values.project.trim();
-	const parsedProject = project.length > 0 ? project : undefined;
-	const dueDate = normalizeDueDate(values.dueDate, "Due date");
-	const assignee = parseListInput(values.assignee);
-	const labels = parseListInput(values.labels);
-	const references = parseListInput(values.references);
-	const documentation = parseListInput(values.documentation);
-	const dependencies = parseListInput(values.dependencies);
-	const acceptanceCriteria = parseChecklistInput(values.acceptanceCriteria).map((entry) => ({
-		text: entry.text,
-		checked: false,
-	}));
-	const definitionOfDoneAdd = parseChecklistInput(values.definitionOfDone).map((entry) => entry.text);
+	return buildTaskCreateInput(values);
+}
 
-	const input: TaskCreateInput = {
-		title: values.title,
-		...(values.description.trim().length > 0 && { description: values.description }),
-		...(values.status.trim().length > 0 && { status: values.status }),
-		...(parsedPriority && { priority: parsedPriority }),
-		...(parsedType && { type: parsedType }),
-		...(parsedProject && { project: parsedProject }),
-		...(dueDate && { dueDate }),
-		...(assignee.length > 0 && { assignee }),
-		...(labels.length > 0 && { labels }),
-		...(dependencies.length > 0 && { dependencies }),
-		...(references.length > 0 && { references }),
-		...(documentation.length > 0 && { documentation }),
-		...(acceptanceCriteria.length > 0 && { acceptanceCriteria }),
-		...(definitionOfDoneAdd.length > 0 && { definitionOfDoneAdd }),
-		...(values.implementationPlan.trim().length > 0 && { implementationPlan: values.implementationPlan }),
-		...(values.implementationNotes.trim().length > 0 && { implementationNotes: values.implementationNotes }),
-	};
+function buildTaskCreateInput(values: TaskWizardValues): TaskCreateInput {
+	const input: TaskCreateInput = { title: values.title };
+	setCreateText(input, "description", values.description);
+	setCreateText(input, "status", values.status);
+	setCreateText(input, "priority", values.priority);
+	setCreateText(input, "type", values.type);
+	setCreateText(input, "project", values.project);
+	setCreateText(input, "implementationPlan", values.implementationPlan);
+	setCreateText(input, "implementationNotes", values.implementationNotes);
+	setCreateValue(input, "dueDate", normalizeDueDate(values.dueDate, "Due date"));
+	setCreateList(input, "assignee", values.assignee);
+	setCreateList(input, "labels", values.labels);
+	setCreateList(input, "dependencies", values.dependencies);
+	setCreateList(input, "references", values.references);
+	setCreateList(input, "documentation", values.documentation);
+	setCreateValue(
+		input,
+		"acceptanceCriteria",
+		parseChecklistInput(values.acceptanceCriteria).map((entry) => ({ text: entry.text, checked: false })),
+	);
+	setCreateValue(
+		input,
+		"definitionOfDoneAdd",
+		parseChecklistInput(values.definitionOfDone).map((entry) => entry.text),
+	);
 	return input;
+}
+
+function setCreateText(input: TaskCreateInput, key: string, value: string): void {
+	if (value.trim().length > 0) Object.assign(input, { [key]: value });
+}
+
+function setCreateList(input: TaskCreateInput, key: string, value: string): void {
+	setCreateValue(input, key, parseListInput(value));
+}
+
+function setCreateValue(input: TaskCreateInput, key: string, value: unknown): void {
+	if (Array.isArray(value) ? value.length > 0 : value) Object.assign(input, { [key]: value });
 }
 
 export async function runTaskEditWizard(
@@ -754,80 +693,55 @@ export async function runTaskEditWizard(
 		return null;
 	}
 
-	const updateInput: TaskUpdateInput = {};
-	if (values.title !== initial.title) {
-		updateInput.title = values.title;
-	}
-	if (values.description !== initial.description) {
-		updateInput.description = values.description;
-	}
-	if (values.status !== initial.status && values.status.trim().length > 0) {
-		updateInput.status = values.status;
-	}
-	if (values.priority !== initial.priority && values.priority.trim().length > 0) {
-		updateInput.priority = values.priority;
-	}
-	if (values.type !== initial.type) {
-		updateInput.type = values.type;
-	}
-	if (values.project !== initial.project) {
-		updateInput.project = values.project;
-	}
-	if (values.dueDate !== initial.dueDate) {
-		updateInput.dueDate = values.dueDate || null;
-	}
+	return buildTaskUpdateInput(options.task, initial, values);
+}
 
-	applyChangedList(initial.assignee, values.assignee, (assignee) => {
-		updateInput.assignee = assignee;
-	});
-	applyChangedList(initial.labels, values.labels, (labels) => {
-		updateInput.labels = labels;
-	});
-	applyChangedList(initial.dependencies, values.dependencies, (dependencies) => {
-		updateInput.dependencies = dependencies;
-	});
-	applyChangedList(initial.references, values.references, (references) => {
-		updateInput.references = references;
-	});
-	applyChangedList(initial.documentation, values.documentation, (documentation) => {
-		updateInput.documentation = documentation;
-	});
+function buildTaskUpdateInput(task: Task, initial: TaskWizardValues, values: TaskWizardValues): TaskUpdateInput {
+	const input: TaskUpdateInput = {};
+	applyChangedValue(input, "title", initial.title, values.title);
+	applyChangedValue(input, "description", initial.description, values.description);
+	applyChangedNonBlankValue(input, "status", initial.status, values.status);
+	applyChangedNonBlankValue(input, "priority", initial.priority, values.priority);
+	applyChangedValue(input, "type", initial.type, values.type);
+	applyChangedValue(input, "project", initial.project, values.project);
+	if (values.dueDate !== initial.dueDate) input.dueDate = values.dueDate || null;
+	applyChangedListValues(input, initial, values);
+	applyChangedValue(input, "implementationPlan", initial.implementationPlan, values.implementationPlan);
+	applyChangedValue(input, "implementationNotes", initial.implementationNotes, values.implementationNotes);
+	applyChangedAcceptanceCriteria(input, task, values.acceptanceCriteria);
+	applyChangedDefinitionOfDone(input, task, values.definitionOfDone);
+	return input;
+}
 
-	if (values.implementationPlan !== initial.implementationPlan) {
-		updateInput.implementationPlan = values.implementationPlan;
-	}
-	if (values.implementationNotes !== initial.implementationNotes) {
-		updateInput.implementationNotes = values.implementationNotes;
-	}
+function applyChangedValue(input: TaskUpdateInput, key: string, initial: string, next: string): void {
+	if (next !== initial) Object.assign(input, { [key]: next });
+}
 
-	const existingCriteria = checklistSnapshot(options.task.acceptanceCriteriaItems);
-	const targetCriteria = parseChecklistInput(values.acceptanceCriteria);
-	if (!areChecklistEntriesEqual(existingCriteria, targetCriteria)) {
-		updateInput.acceptanceCriteria = targetCriteria.map((entry) => ({
-			text: entry.text,
-			checked: entry.checked,
-		}));
-	}
+function applyChangedNonBlankValue(input: TaskUpdateInput, key: string, initial: string, next: string): void {
+	if (next !== initial && next.trim().length > 0) Object.assign(input, { [key]: next });
+}
 
-	const existingDod = checklistSnapshot(options.task.definitionOfDoneItems);
-	const targetDod = parseChecklistInput(values.definitionOfDone);
-	if (!areChecklistEntriesEqual(existingDod, targetDod)) {
-		const existingIndices = (options.task.definitionOfDoneItems ?? []).map((entry) => entry.index);
-		if (existingIndices.length > 0) {
-			updateInput.removeDefinitionOfDone = existingIndices;
-		}
-		if (targetDod.length > 0) {
-			updateInput.addDefinitionOfDone = targetDod.map((entry) => entry.text);
-			const checkOffset = existingIndices.length;
-			const checkedIndices = targetDod
-				.map((entry, index) => ({ checked: entry.checked, index: index + 1 + checkOffset }))
-				.filter((entry) => entry.checked)
-				.map((entry) => entry.index);
-			if (checkedIndices.length > 0) {
-				updateInput.checkDefinitionOfDone = checkedIndices;
-			}
-		}
-	}
+function applyChangedListValues(input: TaskUpdateInput, initial: TaskWizardValues, values: TaskWizardValues): void {
+	for (const key of ["assignee", "labels", "dependencies", "references", "documentation"] as const)
+		applyChangedList(initial[key], values[key], (items) => Object.assign(input, { [key]: items }));
+}
 
-	return updateInput;
+function applyChangedAcceptanceCriteria(input: TaskUpdateInput, task: Task, value: string): void {
+	const target = parseChecklistInput(value);
+	if (!areChecklistEntriesEqual(checklistSnapshot(task.acceptanceCriteriaItems), target))
+		input.acceptanceCriteria = target.map((entry) => ({ text: entry.text, checked: entry.checked }));
+}
+
+function applyChangedDefinitionOfDone(input: TaskUpdateInput, task: Task, value: string): void {
+	const target = parseChecklistInput(value);
+	if (areChecklistEntriesEqual(checklistSnapshot(task.definitionOfDoneItems), target)) return;
+	const existingIndices = (task.definitionOfDoneItems ?? []).map((entry) => entry.index);
+	if (existingIndices.length > 0) input.removeDefinitionOfDone = existingIndices;
+	if (target.length === 0) return;
+	input.addDefinitionOfDone = target.map((entry) => entry.text);
+	const checkedIndices = target
+		.map((entry, index) => ({ checked: entry.checked, index: index + 1 + existingIndices.length }))
+		.filter((entry) => entry.checked)
+		.map((entry) => entry.index);
+	if (checkedIndices.length > 0) input.checkDefinitionOfDone = checkedIndices;
 }

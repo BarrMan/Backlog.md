@@ -46,6 +46,23 @@ const RECOGNIZED_CONFIG_KEYS = new Set([
 	"backlogDirectory",
 ]);
 
+function hasValidConfigValue(key: string, value: string, config: BacklogConfig): boolean {
+	if (ARRAY_CONFIG_KEYS.has(key)) return value.startsWith("[") && value.endsWith("]");
+	if (key === "definition_of_done")
+		return (!value.startsWith("[") || value.endsWith("]")) && config.definitionOfDone !== undefined;
+	if (key === "project_name" || key === "date_format") return Boolean(value.replace(/['"]/g, "").trim());
+	if (BOOLEAN_CONFIG_KEYS.has(key)) return /^(?:true|false)$/i.test(value);
+	if (INTEGER_CONFIG_KEYS.has(key)) return hasValidIntegerConfigValue(key, value);
+	return key !== "task_prefix" || /^[a-zA-Z]+$/.test(value.replace(/['"]/g, ""));
+}
+
+function hasValidIntegerConfigValue(key: string, value: string): boolean {
+	const number = Number(value);
+	if (!/^\d+$/.test(value) || !Number.isSafeInteger(number)) return false;
+	if (key === "max_column_width") return number >= 1;
+	return key !== "default_port" || (number >= 1 && number <= 65_535);
+}
+
 function hasValidExplicitValues(content: string, config: BacklogConfig): boolean {
 	for (const rawLine of content.split(/\r?\n/)) {
 		const line = rawLine.trim();
@@ -59,21 +76,10 @@ function hasValidExplicitValues(content: string, config: BacklogConfig): boolean
 		const key = line.slice(0, colonIndex).trim();
 		const value = line.slice(colonIndex + 1).trim();
 		if (!RECOGNIZED_CONFIG_KEYS.has(key)) continue;
-		if (ARRAY_CONFIG_KEYS.has(key) && !(value.startsWith("[") && value.endsWith("]"))) return false;
 		// default_assignee is not in ARRAY_CONFIG_KEYS because it also accepts scalars and block
 		// sequences; the config parser rejects every value it cannot hold, malformed or wrong-typed,
 		// before this check runs, so the last good config stays cached without a rule repeated here.
-		if (key === "definition_of_done" && value.startsWith("[") && !value.endsWith("]")) return false;
-		if (key === "definition_of_done" && config.definitionOfDone === undefined) return false;
-		if ((key === "project_name" || key === "date_format") && !value.replace(/['"]/g, "").trim()) return false;
-		if (BOOLEAN_CONFIG_KEYS.has(key) && !/^(?:true|false)$/i.test(value)) return false;
-		if (INTEGER_CONFIG_KEYS.has(key)) {
-			const number = Number(value);
-			if (!/^\d+$/.test(value) || !Number.isSafeInteger(number)) return false;
-			if (key === "max_column_width" && number < 1) return false;
-			if (key === "default_port" && (number < 1 || number > 65_535)) return false;
-		}
-		if (key === "task_prefix" && !/^[a-zA-Z]+$/.test(value.replace(/['"]/g, ""))) return false;
+		if (!hasValidConfigValue(key, value, config)) return false;
 	}
 	return true;
 }
@@ -92,6 +98,35 @@ async function delay(ms: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readStableConfig(path: string, isCurrent: () => boolean): Promise<string | null> {
+	const firstContent = await Bun.file(path).text();
+	await delay(CONFIG_STABILITY_DELAY_MS);
+	if (!isCurrent()) return null;
+	const secondContent = await Bun.file(path).text();
+	return firstContent === secondContent ? secondContent : null;
+}
+
+async function publishStableConfig(
+	filesystem: FileSystem,
+	callbacks: ConfigWatcherCallbacks,
+	configPath: string,
+	content: string,
+	isCurrent: () => boolean,
+): Promise<boolean> {
+	const config = filesystem.parseConfig(content);
+	if (!isUsableConfig(config, content) || !isCurrent() || !filesystem.publishConfig(config, configPath, content))
+		return false;
+	while (isCurrent()) {
+		try {
+			await callbacks.onConfigChanged?.(config);
+			return true;
+		} catch {
+			await delay(CONFIG_STABILITY_DELAY_MS);
+		}
+	}
+	return false;
+}
+
 export function watchConfigFile(filesystem: FileSystem, callbacks: ConfigWatcherCallbacks): ConfigWatcherHandle {
 	const configPath = filesystem.configFilePath;
 	const configDirectory = dirname(configPath);
@@ -106,44 +141,21 @@ export function watchConfigFile(filesystem: FileSystem, callbacks: ConfigWatcher
 	const notifyAfterStableRead = async (eventGeneration: number): Promise<void> => {
 		for (let attempt = 0; attempt < CONFIG_READ_ATTEMPTS; attempt++) {
 			await delay(attempt === 0 ? CONFIG_SETTLE_DELAY_MS : CONFIG_STABILITY_DELAY_MS);
-			if (stopped || eventGeneration !== generation) {
-				return;
-			}
+			const isCurrent = () => !stopped && eventGeneration === generation;
+			if (!isCurrent()) return;
 
 			try {
-				const firstContent = await Bun.file(configPath).text();
-				await delay(CONFIG_STABILITY_DELAY_MS);
-				if (stopped || eventGeneration !== generation) {
-					return;
-				}
-				const secondContent = await Bun.file(configPath).text();
-				if (firstContent !== secondContent) {
-					continue;
-				}
+				const secondContent = await readStableConfig(configPath, isCurrent);
+				if (secondContent === null) continue;
 				if (secondContent === lastPublishedContent) {
 					return;
 				}
 
-				const config = filesystem.parseConfig(secondContent);
-				if (!isUsableConfig(config, secondContent)) {
-					continue;
-				}
-				if (stopped || eventGeneration !== generation) {
+				if (!isCurrent()) return;
+				if (await publishStableConfig(filesystem, callbacks, configPath, secondContent, isCurrent)) {
+					lastPublishedContent = secondContent;
 					return;
 				}
-				if (!filesystem.publishConfig(config, configPath, secondContent)) {
-					continue;
-				}
-				while (!stopped && eventGeneration === generation) {
-					try {
-						await callbacks.onConfigChanged?.(config);
-						lastPublishedContent = secondContent;
-						break;
-					} catch {
-						await delay(CONFIG_STABILITY_DELAY_MS);
-					}
-				}
-				return;
 			} catch {
 				// Atomic writes can temporarily remove or lock the watched path on Windows, and the
 				// parser rejects values it cannot read; either way the last good config stays cached.

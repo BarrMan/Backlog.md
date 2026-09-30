@@ -28,19 +28,20 @@ async function parseTaskListFilters(
 	options: OptionValues,
 	normalize: TaskListNormalizers,
 ): Promise<Pick<TaskListRequest, "filters" | "labels"> | null> {
-	if (options.assignee && options.unassigned) {
-		console.error("--unassigned cannot be combined with --assignee.");
-		process.exitCode = 1;
-		return null;
-	}
+	if (!validateAssigneeFilter(options)) return null;
 	const filters: TaskListFilter = {};
 	if (options.status) filters.status = parseDelimitedStringList(options.status) ?? options.status;
-	const excluded = parseDelimitedStringList(options.excludeStatus) ?? [];
-	if (excluded.length > 0) {
-		const statuses = await normalize.statusList(core, excluded, "exclude-status");
-		if (!statuses) return null;
-		filters.excludeStatus = statuses;
-	}
+	if (
+		!(await addNormalizedListFilter(
+			filters,
+			core,
+			options.excludeStatus,
+			"exclude-status",
+			"excludeStatus",
+			normalize.statusList,
+		))
+	)
+		return null;
 	if (options.assignee) filters.assignee = options.assignee;
 	if (options.unassigned) filters.unassigned = true;
 	if (options.milestone) filters.milestone = options.milestone;
@@ -49,24 +50,38 @@ async function parseTaskListFilters(
 		if (!priority) return null;
 		filters.priority = priority;
 	}
-	const types = parseDelimitedStringList(options.type) ?? [];
-	if (types.length > 0) {
-		const canonicalTypes = await normalize.types(core, types, "type");
-		if (!canonicalTypes) return null;
-		filters.type = canonicalTypes;
-	}
-	const projects = parseDelimitedStringList(options.project) ?? [];
-	if (projects.length > 0) {
-		const canonicalProjects = await normalize.projects(core, projects, "project");
-		if (!canonicalProjects) return null;
-		filters.project = canonicalProjects;
-	}
+	if (!(await addNormalizedListFilter(filters, core, options.type, "type", "type", normalize.types))) return null;
+	if (!(await addNormalizedListFilter(filters, core, options.project, "project", "project", normalize.projects)))
+		return null;
 	const labels = parseDelimitedStringList(options.labels) ?? [];
 	if (labels.length > 0) {
 		filters.labels = labels;
 		filters.labelMatch = "all";
 	}
 	return { filters, labels };
+}
+
+function validateAssigneeFilter(options: OptionValues): boolean {
+	if (!(options.assignee && options.unassigned)) return true;
+	console.error("--unassigned cannot be combined with --assignee.");
+	process.exitCode = 1;
+	return false;
+}
+
+async function addNormalizedListFilter(
+	filters: TaskListFilter,
+	core: Core,
+	value: unknown,
+	optionName: string,
+	field: "excludeStatus" | "type" | "project",
+	normalize: (core: Core, values: string[], optionName: string) => Promise<string[] | null>,
+): Promise<boolean> {
+	const values = parseDelimitedStringList(value) ?? [];
+	if (values.length === 0) return true;
+	const normalized = await normalize(core, values, optionName);
+	if (!normalized) return false;
+	filters[field] = normalized;
+	return true;
 }
 
 export async function parseTaskListRequest(

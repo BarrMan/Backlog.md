@@ -235,25 +235,27 @@ export class TaskIdentityIndex {
 	}
 
 	getTasks(includeCompleted = false): Task[] {
-		const tasks: Task[] = [];
 		// Task ids are hierarchical numbers, so the shared comparator decides their order here.
 		// Comparing them as strings puts task-1.10 before task-1.2 for every consumer that
 		// renders this corpus without re-sorting it, which is what the board's task list does.
 		const groups = [...this.groups.values()].sort((left, right) => compareTaskIds(left.id, right.id));
-		for (const group of groups) {
-			const identities = [...group.identities.values()].sort((left, right) => left.path.localeCompare(right.path));
-			for (const identity of identities) {
-				const lifecycle = selectLifecycleRecord(identity.records);
-				if (!lifecycle || (lifecycle.type !== "task" && lifecycle.type !== "completed")) continue;
-				if (lifecycle.type === "completed" && !includeCompleted) continue;
-				const selected = selectTaskRecord(
-					identity.records.filter((record) => record.type === lifecycle.type),
-					this.statuses,
-					this.resolutionStrategy,
-				);
-				if (!selected?.task) continue;
+		return groups.flatMap((group) => this.tasksForGroup(group, includeCompleted));
+	}
+
+	private tasksForGroup(group: TaskIdentityGroup, includeCompleted: boolean): Task[] {
+		const tasks: Task[] = [];
+		const identities = [...group.identities.values()].sort((left, right) => left.path.localeCompare(right.path));
+		for (const identity of identities) {
+			const lifecycle = selectLifecycleRecord(identity.records);
+			if (!lifecycle || (lifecycle.type !== "task" && lifecycle.type !== "completed")) continue;
+			if (lifecycle.type === "completed" && !includeCompleted) continue;
+			const selected = selectTaskRecord(
+				identity.records.filter((record) => record.type === lifecycle.type),
+				this.statuses,
+				this.resolutionStrategy,
+			);
+			if (selected?.task)
 				tasks.push(lifecycle.type === "completed" ? { ...selected.task, source: "completed" } : selected.task);
-			}
 		}
 		return tasks;
 	}

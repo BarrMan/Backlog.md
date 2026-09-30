@@ -33,15 +33,16 @@ export function TaskDetailStringList({
 			{values.length > 0 ? (
 				<ul className={listClassName}>
 					{values.map((value, index) => (
-						<li key={index} className="flex items-start gap-3 group">
+						<li key={value} className="flex items-start gap-3 group">
 							<span className="flex-1 min-w-0">{renderValue(value)}</span>
 							{canRemove ? (
 								<button
+									type="button"
 									onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}
 									className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0 mt-0.5"
 									title={removeLabel}
 								>
-									<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
 									</svg>
 								</button>

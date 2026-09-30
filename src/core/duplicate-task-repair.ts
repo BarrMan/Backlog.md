@@ -108,6 +108,51 @@ function logicalBranchTaskPath(path: string, id: string): string {
 	return `${canonicalTaskId(id).toLowerCase()}${filename.slice(separatorIndex)}`;
 }
 
+function appendCurrentBranchEntries(
+	entries: BranchTaskStateEntry[],
+	tasks: Task[],
+	type: "task" | "completed",
+	branch: string,
+	rootDir: string,
+): void {
+	for (const task of tasks) {
+		if (!task.filePath) continue;
+		entries.push({
+			id: task.id,
+			type,
+			branch,
+			path: normalizeRelativePath(rootDir, task.filePath),
+			lastModified: task.updatedDate ? new Date(task.updatedDate) : new Date(0),
+		});
+	}
+}
+
+function groupBranchEntries(entries: BranchTaskStateEntry[]): Map<string, BranchTaskStateEntry[]> {
+	const byId = new Map<string, BranchTaskStateEntry[]>();
+	for (const entry of entries) {
+		if (entry.type !== "task" && entry.type !== "completed") continue;
+		const id = canonicalTaskId(entry.id);
+		byId.set(id, [...(byId.get(id) ?? []), entry]);
+	}
+	return byId;
+}
+
+function classifyCrossBranchDuplicate(
+	id: string,
+	entries: BranchTaskStateEntry[],
+): CrossBranchDuplicateFinding | undefined {
+	const logicalPaths = new Set(entries.map((entry) => logicalBranchTaskPath(entry.path, entry.id)));
+	if (logicalPaths.size < 2 || new Set(entries.map((entry) => entry.branch)).size < 2) return undefined;
+	const locations = entries
+		.map((entry) => ({
+			branch: entry.branch,
+			path: entry.path.split(sep).join("/"),
+			state: entry.type === "completed" ? ("completed" as const) : ("active" as const),
+		}))
+		.sort((left, right) => `${left.branch}:${left.path}`.localeCompare(`${right.branch}:${right.path}`));
+	return { id, locations };
+}
+
 async function findCrossBranchDuplicateTaskIds(
 	core: Core,
 	snapshot?: TaskCorpusSnapshot,
@@ -115,56 +160,16 @@ async function findCrossBranchDuplicateTaskIds(
 	const corpus = snapshot ?? (await core.getContentStore()).getTaskCorpusSnapshot();
 	const config = corpus.config ?? (await core.filesystem.loadConfig());
 	if (config?.checkActiveBranches === false) return [];
-	const { activeTasks, completedTasks } = corpus;
-	const currentBranch = await core.gitOps.getCurrentBranch();
 	const stateEntries: BranchTaskStateEntry[] = corpus.branchStateEntries?.slice() ?? [];
-
-	const current = currentBranch ?? "current";
-	for (const task of activeTasks) {
-		if (!task.filePath) continue;
-		stateEntries.push({
-			id: task.id,
-			type: "task",
-			branch: current,
-			path: normalizeRelativePath(core.filesystem.rootDir, task.filePath),
-			lastModified: task.updatedDate ? new Date(task.updatedDate) : new Date(0),
-		});
-	}
-	for (const task of completedTasks) {
-		if (!task.filePath) continue;
-		stateEntries.push({
-			id: task.id,
-			type: "completed",
-			branch: current,
-			path: normalizeRelativePath(core.filesystem.rootDir, task.filePath),
-			lastModified: task.updatedDate ? new Date(task.updatedDate) : new Date(0),
-		});
-	}
-
-	const byId = new Map<string, BranchTaskStateEntry[]>();
-	for (const entry of stateEntries) {
-		if (entry.type !== "task" && entry.type !== "completed") continue;
-		const id = canonicalTaskId(entry.id);
-		const entries = byId.get(id) ?? [];
-		entries.push(entry);
-		byId.set(id, entries);
-	}
-
-	const findings: CrossBranchDuplicateFinding[] = [];
-	for (const [id, entries] of byId) {
-		const logicalPaths = new Set(entries.map((entry) => logicalBranchTaskPath(entry.path, entry.id)));
-		const branches = new Set(entries.map((entry) => entry.branch));
-		if (logicalPaths.size < 2 || branches.size < 2) continue;
-		const locations = entries
-			.map((entry) => ({
-				branch: entry.branch,
-				path: entry.path.split(sep).join("/"),
-				state: entry.type === "completed" ? ("completed" as const) : ("active" as const),
-			}))
-			.sort((left, right) => `${left.branch}:${left.path}`.localeCompare(`${right.branch}:${right.path}`));
-		findings.push({ id, locations });
-	}
-	return findings.sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }));
+	const current = (await core.gitOps.getCurrentBranch()) ?? "current";
+	appendCurrentBranchEntries(stateEntries, corpus.activeTasks, "task", current, core.filesystem.rootDir);
+	appendCurrentBranchEntries(stateEntries, corpus.completedTasks, "completed", current, core.filesystem.rootDir);
+	return [...groupBranchEntries(stateEntries)]
+		.flatMap(([id, entries]) => {
+			const finding = classifyCrossBranchDuplicate(id, entries);
+			return finding ? [finding] : [];
+		})
+		.sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }));
 }
 
 function getTaskLocation(task: Task): DuplicateTaskLocation {
@@ -253,46 +258,50 @@ function absoluteProjectPath(rootDir: string, projectPath: string): string {
 	return absolute;
 }
 
-function replaceFrontmatterTaskId(content: string, expectedId: string, newId: string): string {
+function frontmatterRange(content: string): { start: number; end: number } {
 	const delimiters = Array.from(content.matchAll(/^---(?:\r?\n|$)/gm));
 	const opening = delimiters[0];
 	const closing = delimiters[1];
-	if (opening?.index !== 0) {
-		throw new Error("Task file has no YAML frontmatter.");
-	}
-	if (!closing || closing.index === undefined) {
-		throw new Error("Task file has unterminated YAML frontmatter.");
-	}
-	const frontmatterStart = opening[0].length;
-	const frontmatter = content.slice(frontmatterStart, closing.index);
+	if (opening?.index !== 0) throw new Error("Task file has no YAML frontmatter.");
+	if (!closing || closing.index === undefined) throw new Error("Task file has unterminated YAML frontmatter.");
+	return { start: opening[0].length, end: closing.index };
+}
+
+function frontmatterIdLine(content: string, range: { start: number; end: number }): { line: string; index: number } {
+	const frontmatter = content.slice(range.start, range.end);
 	const idLines = Array.from(frontmatter.matchAll(/^id\s*:[^\r\n]*/gm));
-	if (idLines.length !== 1) {
+	if (idLines.length !== 1)
 		throw new Error(`Task frontmatter must contain exactly one top-level id field; found ${idLines.length}.`);
-	}
 	const idLine = idLines[0];
 	if (!idLine || idLine.index === undefined) throw new Error("Task frontmatter id field could not be located safely.");
-	const line = idLine[0];
+	return { line: idLine[0], index: range.start + idLine.index };
+}
+
+function replaceBlockId(
+	content: string,
+	line: string,
+	index: number,
+	frontmatterEnd: number,
+	expectedId: string,
+	newId: string,
+): string {
+	const continuation = content.slice(index + line.length, frontmatterEnd).match(/^((?:\r?\n[ \t]+[^\r\n]*)+)/)?.[1];
+	const indentation = continuation?.match(/^\r?\n([ \t]+)/)?.[1];
+	if (!continuation || !indentation) throw new Error("Task frontmatter block id field has no value.");
+	const currentValue = continuation
+		.split(/\r?\n/)
+		.map((part) => part.trim())
+		.join("");
+	if (canonicalTaskId(currentValue) !== canonicalTaskId(expectedId))
+		throw new Error(`Task frontmatter id ${currentValue || "(empty)"} does not match ${expectedId}.`);
+	const newline = continuation.startsWith("\r\n") ? "\r\n" : "\n";
+	return `${content.slice(0, index)}${line}${newline}${indentation}${newId}${content.slice(index + line.length + continuation.length)}`;
+}
+
+function replaceScalarId(content: string, line: string, index: number, expectedId: string, newId: string): string {
 	const match = line.match(/^(id\s*:\s*)([^#]*?)(\s+#.*)?$/);
 	if (!match) throw new Error("Task frontmatter id field could not be updated safely.");
 	const rawValue = (match[2] ?? "").trim();
-	const idStart = frontmatterStart + idLine.index;
-	if (/^[>|][+-]?$/.test(rawValue)) {
-		const continuation = content.slice(idStart + line.length, closing.index).match(/^((?:\r?\n[ \t]+[^\r\n]*)+)/)?.[1];
-		const indentation = continuation?.match(/^\r?\n([ \t]+)/)?.[1];
-		if (!continuation || !indentation) {
-			throw new Error("Task frontmatter block id field has no value.");
-		}
-		const currentValue = continuation
-			.split(/\r?\n/)
-			.map((part) => part.trim())
-			.join("");
-		if (canonicalTaskId(currentValue) !== canonicalTaskId(expectedId)) {
-			throw new Error(`Task frontmatter id ${currentValue || "(empty)"} does not match ${expectedId}.`);
-		}
-		const newline = continuation.startsWith("\r\n") ? "\r\n" : "\n";
-		const replacement = `${line}${newline}${indentation}${newId}`;
-		return `${content.slice(0, idStart)}${replacement}${content.slice(idStart + line.length + continuation.length)}`;
-	}
 	const quote =
 		rawValue.length >= 2 && rawValue[0] === rawValue.at(-1) && /['"]/.test(rawValue[0] ?? "") ? rawValue[0] : "";
 	const currentValue = quote ? rawValue.slice(1, -1) : rawValue;
@@ -300,7 +309,16 @@ function replaceFrontmatterTaskId(content: string, expectedId: string, newId: st
 		throw new Error(`Task frontmatter id ${currentValue || "(empty)"} does not match ${expectedId}.`);
 	}
 	const replacement = `${match[1]}${quote}${newId}${quote}${match[3] ?? ""}`;
-	return `${content.slice(0, idStart)}${replacement}${content.slice(idStart + line.length)}`;
+	return `${content.slice(0, index)}${replacement}${content.slice(index + line.length)}`;
+}
+
+function replaceFrontmatterTaskId(content: string, expectedId: string, newId: string): string {
+	const range = frontmatterRange(content);
+	const idLine = frontmatterIdLine(content, range);
+	const rawValue = (idLine.line.match(/^(id\s*:\s*)([^#]*?)(\s+#.*)?$/)?.[2] ?? "").trim();
+	return /^[>|][+-]?$/.test(rawValue)
+		? replaceBlockId(content, idLine.line, idLine.index, range.end, expectedId, newId)
+		: replaceScalarId(content, idLine.line, idLine.index, expectedId, newId);
 }
 
 interface DuplicateReferenceScanResult {
@@ -310,6 +328,34 @@ interface DuplicateReferenceScanResult {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function findLineReferences(line: string, canonicalIds: Set<string>, legacyPatterns: RegExp[]): string[] {
+	const candidates = Array.from(line.matchAll(/\b[A-Za-z]+-\d+(?:\.\d+)*\b/g), (match) => match[0]);
+	for (const pattern of legacyPatterns) candidates.push(...Array.from(line.matchAll(pattern), (match) => match[0]));
+	return [
+		...new Set(candidates.filter((id) => canonicalIds.has(canonicalTaskId(id))).map((id) => canonicalTaskId(id))),
+	];
+}
+
+function collectReferenceReviews(
+	content: string,
+	path: string,
+	canonicalIds: Set<string>,
+	legacyPatterns: RegExp[],
+): DuplicateReferenceReview[] {
+	const reviews: DuplicateReferenceReview[] = [];
+	let inFrontmatter = content.split(/\r?\n/, 1)[0] === "---";
+	for (const [index, line] of content.split(/\r?\n/).entries()) {
+		if (index > 0 && inFrontmatter && line === "---") {
+			inFrontmatter = false;
+			continue;
+		}
+		if (inFrontmatter && /^id\s*:/.test(line)) continue;
+		const ids = findLineReferences(line, canonicalIds, legacyPatterns);
+		if (ids.length) reviews.push({ path, line: index + 1, text: line.trim().slice(0, 240), ids });
+	}
+	return reviews;
 }
 
 async function findReferenceReviews(core: Core, groupIds: string[]): Promise<DuplicateReferenceScanResult> {
@@ -332,7 +378,6 @@ async function findReferenceReviews(core: Core, groupIds: string[]): Promise<Dup
 
 	const reviews: DuplicateReferenceReview[] = [];
 	const failures: string[] = [];
-	const numericTokenPattern = /\b[A-Za-z]+-\d+(?:\.\d+)*\b/g;
 	for (const file of files.sort((left, right) => left.localeCompare(right))) {
 		const projectPath = normalizeRelativePath(core.filesystem.rootDir, join(core.filesystem.backlogDir, file));
 		let content: string;
@@ -342,49 +387,59 @@ async function findReferenceReviews(core: Core, groupIds: string[]): Promise<Dup
 			failures.push(`Reference scan could not read ${projectPath}: ${errorMessage(error)}`);
 			continue;
 		}
-		const lines = content.split(/\r?\n/);
-		let inFrontmatter = lines[0] === "---";
-		for (let index = 0; index < lines.length; index += 1) {
-			const line = lines[index] ?? "";
-			if (index > 0 && inFrontmatter && line === "---") {
-				inFrontmatter = false;
-				continue;
-			}
-			if (inFrontmatter && /^id\s*:/.test(line)) continue;
-			const candidates = Array.from(line.matchAll(numericTokenPattern), (match) => match[0]);
-			for (const pattern of legacyPatterns) {
-				candidates.push(...Array.from(line.matchAll(pattern), (match) => match[0]));
-			}
-			const ids = candidates.filter((id) => canonicalIds.has(canonicalTaskId(id)));
-			const uniqueIds = [...new Set(ids.map((id) => canonicalTaskId(id)))];
-			if (uniqueIds.length === 0) continue;
-			reviews.push({
-				path: projectPath,
-				line: index + 1,
-				text: line.trim().slice(0, 240),
-				ids: uniqueIds,
-			});
-		}
+		reviews.push(...collectReferenceReviews(content, projectPath, canonicalIds, legacyPatterns));
 	}
 	return { references: reviews, failures };
 }
 
-export async function previewDuplicateTaskIdRepair(
+async function resolveDuplicateRepairChange(
 	core: Core,
-	options: { includeBranches?: boolean } = {},
-	snapshot?: TaskCorpusSnapshot,
-): Promise<DuplicateRepairPlan> {
-	const groups = await findLocalDuplicateTaskIds(core, snapshot);
-	const crossBranchFindings = options.includeBranches ? await findCrossBranchDuplicateTaskIds(core, snapshot) : [];
-	const blockedReasons: string[] = [];
-	const changes: DuplicateRepairChange[] = [];
-	const [activeTasks, completedTasks, config] = await Promise.all([
-		snapshot ? Promise.resolve(snapshot.activeTasks) : core.filesystem.listTasks(),
-		snapshot ? Promise.resolve(snapshot.completedTasks) : core.filesystem.listCompletedTasks(),
-		core.filesystem.loadConfig(),
-	]);
+	task: Task,
+	groupId: string,
+	parentId: string | undefined,
+	existingIds: string[],
+	plannedIds: string[],
+	taskPrefix: string,
+	zeroPaddedIds?: number,
+): Promise<DuplicateRepairChange | string> {
+	if (!task.filePath) return `${groupId}: ${task.title} has no local file path.`;
+	const nextId = await allocateRepairId(core, parentId, existingIds, plannedIds, taskPrefix, zeroPaddedIds);
+	const targetPath = buildTargetPath(task.filePath, task.id, nextId);
+	if (!targetPath) return `${task.filePath}: filename and frontmatter ID do not identify the same task.`;
+	const sourcePath = absoluteProjectPath(core.filesystem.rootDir, task.filePath);
+	const targetAbsolutePath = absoluteProjectPath(core.filesystem.rootDir, targetPath);
+	const content = await Bun.file(sourcePath)
+		.text()
+		.catch(() => "");
+	if (!content) return `${task.filePath}: task file could not be read.`;
+	try {
+		replaceFrontmatterTaskId(content, task.id, nextId);
+	} catch (error) {
+		return `${task.filePath}: ${errorMessage(error)}`;
+	}
+	if (await Bun.file(targetAbsolutePath).exists()) return `${targetPath}: target file already exists.`;
+	return {
+		sourcePath: task.filePath,
+		targetPath,
+		oldId: task.id,
+		newId: nextId,
+		title: task.title,
+		location: getTaskLocation(task),
+		sourceHash: sha256(content),
+	};
+}
+
+async function resolveDuplicateRepairChanges(
+	core: Core,
+	groups: DuplicateGroup[],
+	activeTasks: Task[],
+	completedTasks: Task[],
+): Promise<{ changes: DuplicateRepairChange[]; blockedReasons: string[] }> {
+	const config = await core.filesystem.loadConfig();
 	const existingIds = [...activeTasks, ...completedTasks].map((task) => task.id);
 	const plannedIds: string[] = [];
+	const changes: DuplicateRepairChange[] = [];
+	const blockedReasons: string[] = [];
 
 	for (const group of groups) {
 		const tasks = sortGroupTasks(group.tasks, config?.zeroPaddedIds);
@@ -394,54 +449,38 @@ export async function previewDuplicateTaskIdRepair(
 			continue;
 		}
 		for (const task of tasks.slice(1)) {
-			if (!task.filePath) {
-				blockedReasons.push(`${group.id}: ${task.title} has no local file path.`);
-				continue;
-			}
-			const nextId = await allocateRepairId(
+			const resolved = await resolveDuplicateRepairChange(
 				core,
+				task,
+				group.id,
 				parentValidation.parentId,
 				existingIds,
 				plannedIds,
 				config?.prefixes?.task ?? "task",
 				config?.zeroPaddedIds,
 			);
-			const targetPath = buildTargetPath(task.filePath, task.id, nextId);
-			if (!targetPath) {
-				blockedReasons.push(`${task.filePath}: filename and frontmatter ID do not identify the same task.`);
-				continue;
+			if (typeof resolved === "string") blockedReasons.push(resolved);
+			else {
+				changes.push(resolved);
+				plannedIds.push(resolved.newId);
 			}
-			const sourcePath = absoluteProjectPath(core.filesystem.rootDir, task.filePath);
-			const targetAbsolutePath = absoluteProjectPath(core.filesystem.rootDir, targetPath);
-			const content = await Bun.file(sourcePath)
-				.text()
-				.catch(() => "");
-			if (!content) {
-				blockedReasons.push(`${task.filePath}: task file could not be read.`);
-				continue;
-			}
-			try {
-				replaceFrontmatterTaskId(content, task.id, nextId);
-			} catch (error) {
-				blockedReasons.push(`${task.filePath}: ${error instanceof Error ? error.message : String(error)}`);
-				continue;
-			}
-			if (await Bun.file(targetAbsolutePath).exists()) {
-				blockedReasons.push(`${targetPath}: target file already exists.`);
-				continue;
-			}
-			changes.push({
-				sourcePath: task.filePath,
-				targetPath,
-				oldId: task.id,
-				newId: nextId,
-				title: task.title,
-				location: getTaskLocation(task),
-				sourceHash: sha256(content),
-			});
-			plannedIds.push(nextId);
 		}
 	}
+	return { changes, blockedReasons };
+}
+
+export async function previewDuplicateTaskIdRepair(
+	core: Core,
+	options: { includeBranches?: boolean } = {},
+	snapshot?: TaskCorpusSnapshot,
+): Promise<DuplicateRepairPlan> {
+	const groups = await findLocalDuplicateTaskIds(core, snapshot);
+	const crossBranchFindings = options.includeBranches ? await findCrossBranchDuplicateTaskIds(core, snapshot) : [];
+	const [activeTasks, completedTasks] = await Promise.all([
+		snapshot ? Promise.resolve(snapshot.activeTasks) : core.filesystem.listTasks(),
+		snapshot ? Promise.resolve(snapshot.completedTasks) : core.filesystem.listCompletedTasks(),
+	]);
+	const { changes, blockedReasons } = await resolveDuplicateRepairChanges(core, groups, activeTasks, completedTasks);
 
 	const duplicateFileCount = groups.reduce((total, group) => total + group.tasks.length - 1, 0);
 	if (changes.length !== duplicateFileCount) {
@@ -583,6 +622,150 @@ async function restoreBackupNoReplace(
 	}
 }
 
+interface PreparedRepairFile extends DuplicateRepairChange {
+	sourcePath: string;
+	targetPath: string;
+	content: string;
+	stagedPath: string;
+	backupPath: string;
+}
+
+interface RepairTransactionState {
+	staged: string[];
+	stagedIdentities: Map<string, FileOwnershipIdentity>;
+	backups: Array<{ sourcePath: string; backupPath: string }>;
+	installed: InstalledRepairFile[];
+}
+
+async function prepareRepairFiles(core: Core, changes: DuplicateRepairChange[]): Promise<PreparedRepairFile[]> {
+	const transactionId = `${process.pid}-${Date.now()}`;
+	return await Promise.all(
+		changes.map(async (change, index) => {
+			const sourcePath = absoluteProjectPath(core.filesystem.rootDir, change.sourcePath);
+			const targetPath = absoluteProjectPath(core.filesystem.rootDir, change.targetPath);
+			const content = await Bun.file(sourcePath).text();
+			if (sha256(content) !== change.sourceHash) throw new Error(`${change.sourcePath} changed after the preview.`);
+			if (await Bun.file(targetPath).exists())
+				throw new Error(`${change.targetPath} now exists; no files were changed.`);
+			return {
+				...change,
+				sourcePath,
+				targetPath,
+				content: replaceFrontmatterTaskId(content, change.oldId, change.newId),
+				stagedPath: `${targetPath}.backlog-doctor-${transactionId}-${index}.tmp`,
+				backupPath: `${sourcePath}.backlog-doctor-${transactionId}-${index}.bak`,
+			};
+		}),
+	);
+}
+
+async function stageRepairFiles(prepared: PreparedRepairFile[], state: RepairTransactionState): Promise<void> {
+	for (const item of prepared) {
+		await Bun.write(item.stagedPath, item.content);
+		state.staged.push(item.stagedPath);
+		state.stagedIdentities.set(item.stagedPath, await readFileOwnershipIdentity(item.stagedPath));
+	}
+	for (const item of prepared) {
+		await rename(item.sourcePath, item.backupPath);
+		state.backups.push({ sourcePath: item.sourcePath, backupPath: item.backupPath });
+	}
+}
+
+async function installRepairFiles(
+	prepared: PreparedRepairFile[],
+	state: RepairTransactionState,
+	installFile: (stagedPath: string, targetPath: string, index: number) => Promise<void>,
+): Promise<void> {
+	for (const [index, item] of prepared.entries()) {
+		try {
+			await installFile(item.stagedPath, item.targetPath, index);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException | undefined)?.code === "EEXIST") {
+				throw new Error(`${item.targetPath} now exists; no files were changed.`);
+			}
+			throw error;
+		}
+		const identity = state.stagedIdentities.get(item.stagedPath);
+		if (!identity) throw new Error(`Could not verify staged repair file ${item.stagedPath}.`);
+		state.installed.push({ targetPath: item.targetPath, identity });
+		await unlink(item.stagedPath);
+	}
+}
+
+async function rollbackRepairTransaction(
+	rootDir: string,
+	state: RepairTransactionState,
+	error: unknown,
+): Promise<never> {
+	const rollbackIssues: string[] = [];
+	for (const item of state.installed.reverse()) {
+		const issue = await rollbackInstalledFile(rootDir, item).catch(
+			(rollbackError) =>
+				`Could not roll back ${normalizeRelativePath(rootDir, item.targetPath)}: ${errorMessage(rollbackError)}.`,
+		);
+		if (issue) rollbackIssues.push(issue);
+	}
+	for (const item of state.backups.reverse()) {
+		const issue = await restoreBackupNoReplace(rootDir, item).catch(
+			(rollbackError) =>
+				`Could not restore ${normalizeRelativePath(rootDir, item.sourcePath)}: ${errorMessage(rollbackError)}. Preserved backup ${normalizeRelativePath(rootDir, item.backupPath)}.`,
+		);
+		if (issue) rollbackIssues.push(issue);
+	}
+	for (const path of state.staged) await removeIfPresent(path).catch(() => {});
+	if (rollbackIssues.length > 0) {
+		throw new Error(
+			`Repair failed: ${errorMessage(error)}\nRollback preserved concurrent changes instead of overwriting them:\n${rollbackIssues.map((issue) => `- ${issue}`).join("\n")}`,
+			{ cause: error },
+		);
+	}
+	throw error;
+}
+
+async function runDuplicateRepairTransaction(
+	core: Core,
+	expectedFingerprint: string,
+	options: {
+		installFile?: (stagedPath: string, targetPath: string, index: number) => Promise<void>;
+	} = {},
+): Promise<DuplicateRepairResult> {
+	const plan = await previewDuplicateTaskIdRepair(core);
+	if (plan.fingerprint !== expectedFingerprint) {
+		throw new Error("Duplicate task files changed after the preview. Run 'backlog doctor' again before repairing.");
+	}
+	if (!plan.repairable) {
+		throw new Error(plan.blockedReasons.join("\n") || "No duplicate task IDs are available to repair.");
+	}
+
+	const prepared = await prepareRepairFiles(core, plan.changes);
+	const state: RepairTransactionState = {
+		staged: [],
+		stagedIdentities: new Map(),
+		backups: [],
+		installed: [],
+	};
+	const installFile = options.installFile ?? installFileNoReplace;
+	try {
+		await stageRepairFiles(prepared, state);
+		await installRepairFiles(prepared, state, installFile);
+
+		const remainingGroups = await findLocalDuplicateTaskIds(core);
+		if (remainingGroups.length > 0) {
+			throw new Error("Repair verification still found duplicate task IDs.");
+		}
+
+		for (const item of state.backups) await removeIfPresent(item.backupPath).catch(() => {});
+		return {
+			repairedFiles: plan.changes.length,
+			changes: plan.changes,
+			references: plan.references,
+			remainingGroups,
+		};
+	} catch (error) {
+		return await rollbackRepairTransaction(core.filesystem.rootDir, state, error);
+	}
+}
+
 export async function applyDuplicateTaskIdRepair(
 	core: Core,
 	expectedFingerprint: string,
@@ -590,108 +773,5 @@ export async function applyDuplicateTaskIdRepair(
 		installFile?: (stagedPath: string, targetPath: string, index: number) => Promise<void>;
 	} = {},
 ): Promise<DuplicateRepairResult> {
-	return await core.withCreateLock(async () => {
-		const plan = await previewDuplicateTaskIdRepair(core);
-		if (plan.fingerprint !== expectedFingerprint) {
-			throw new Error("Duplicate task files changed after the preview. Run 'backlog doctor' again before repairing.");
-		}
-		if (!plan.repairable) {
-			throw new Error(plan.blockedReasons.join("\n") || "No duplicate task IDs are available to repair.");
-		}
-
-		const transactionId = `${process.pid}-${Date.now()}`;
-		const prepared = await Promise.all(
-			plan.changes.map(async (change, index) => {
-				const sourcePath = absoluteProjectPath(core.filesystem.rootDir, change.sourcePath);
-				const targetPath = absoluteProjectPath(core.filesystem.rootDir, change.targetPath);
-				const content = await Bun.file(sourcePath).text();
-				if (sha256(content) !== change.sourceHash) {
-					throw new Error(`${change.sourcePath} changed after the preview.`);
-				}
-				if (await Bun.file(targetPath).exists()) {
-					throw new Error(`${change.targetPath} now exists; no files were changed.`);
-				}
-				return {
-					...change,
-					sourcePath,
-					targetPath,
-					content: replaceFrontmatterTaskId(content, change.oldId, change.newId),
-					stagedPath: `${targetPath}.backlog-doctor-${transactionId}-${index}.tmp`,
-					backupPath: `${sourcePath}.backlog-doctor-${transactionId}-${index}.bak`,
-				};
-			}),
-		);
-
-		const staged: string[] = [];
-		const stagedIdentities = new Map<string, FileOwnershipIdentity>();
-		const backups: Array<{ sourcePath: string; backupPath: string }> = [];
-		const installed: InstalledRepairFile[] = [];
-		const installFile =
-			options.installFile ??
-			(async (stagedPath: string, targetPath: string) => {
-				await installFileNoReplace(stagedPath, targetPath);
-			});
-		try {
-			for (const item of prepared) {
-				await Bun.write(item.stagedPath, item.content);
-				staged.push(item.stagedPath);
-				stagedIdentities.set(item.stagedPath, await readFileOwnershipIdentity(item.stagedPath));
-			}
-			for (const item of prepared) {
-				await rename(item.sourcePath, item.backupPath);
-				backups.push({ sourcePath: item.sourcePath, backupPath: item.backupPath });
-			}
-			for (const [index, item] of prepared.entries()) {
-				try {
-					await installFile(item.stagedPath, item.targetPath, index);
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException | undefined)?.code === "EEXIST") {
-						throw new Error(`${item.targetPath} now exists; no files were changed.`);
-					}
-					throw error;
-				}
-				const identity = stagedIdentities.get(item.stagedPath);
-				if (!identity) throw new Error(`Could not verify staged repair file ${item.stagedPath}.`);
-				installed.push({ targetPath: item.targetPath, identity });
-				await unlink(item.stagedPath);
-			}
-
-			const remainingGroups = await findLocalDuplicateTaskIds(core);
-			if (remainingGroups.length > 0) {
-				throw new Error("Repair verification still found duplicate task IDs.");
-			}
-
-			for (const item of backups) await removeIfPresent(item.backupPath).catch(() => {});
-			return {
-				repairedFiles: plan.changes.length,
-				changes: plan.changes,
-				references: plan.references,
-				remainingGroups,
-			};
-		} catch (error) {
-			const rollbackIssues: string[] = [];
-			for (const item of installed.reverse()) {
-				const issue = await rollbackInstalledFile(core.filesystem.rootDir, item).catch(
-					(rollbackError) =>
-						`Could not roll back ${normalizeRelativePath(core.filesystem.rootDir, item.targetPath)}: ${errorMessage(rollbackError)}.`,
-				);
-				if (issue) rollbackIssues.push(issue);
-			}
-			for (const item of backups.reverse()) {
-				const issue = await restoreBackupNoReplace(core.filesystem.rootDir, item).catch(
-					(rollbackError) =>
-						`Could not restore ${normalizeRelativePath(core.filesystem.rootDir, item.sourcePath)}: ${errorMessage(rollbackError)}. Preserved backup ${normalizeRelativePath(core.filesystem.rootDir, item.backupPath)}.`,
-				);
-				if (issue) rollbackIssues.push(issue);
-			}
-			for (const path of staged) await removeIfPresent(path).catch(() => {});
-			if (rollbackIssues.length > 0) {
-				throw new Error(
-					`Repair failed: ${errorMessage(error)}\nRollback preserved concurrent changes instead of overwriting them:\n${rollbackIssues.map((issue) => `- ${issue}`).join("\n")}`,
-					{ cause: error },
-				);
-			}
-			throw error;
-		}
-	});
+	return await core.withCreateLock(async () => await runDuplicateRepairTransaction(core, expectedFingerprint, options));
 }

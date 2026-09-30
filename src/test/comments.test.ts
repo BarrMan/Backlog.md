@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
+import { formatCommentSection, parseCommentSection } from "../markdown/comments.ts";
 import { CommentsManager } from "../markdown/structured-sections.ts";
 import type { Task } from "../types/index.ts";
 import { createTaskSearchIndex } from "../utils/task-search.ts";
@@ -200,6 +201,14 @@ describe("Task comments", () => {
 			{ index: 1, author: "Alex", createdDate: "2026-06-07 21:21", body: "test" },
 			{ index: 2, author: "Codex", createdDate: "2026-06-07 21:22", body: "second comment" },
 		]);
+	});
+
+	it("keeps comment parsing and canonical formatting with the comment owner", () => {
+		const body = ["author: Alex", "created: 2026-06-07 21:21", "---", "test", "---"].join("\n");
+		expect(parseCommentSection(body)).toEqual([
+			{ index: 1, author: "Alex", createdDate: "2026-06-07 21:21", body: "test" },
+		]);
+		expect(formatCommentSection(parseCommentSection(body))).toContain("---\ntest\n---");
 	});
 
 	it("ignores comment markers nested inside structured description examples", () => {

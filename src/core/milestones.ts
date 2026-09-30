@@ -36,6 +36,81 @@ export function canonicalMilestoneId(value: string): string | null {
 	return match?.[1] ? `m-${String(Number.parseInt(match[1], 10))}` : null;
 }
 
+function setMilestoneAlias(
+	aliasMap: Map<string, string>,
+	aliasKey: string,
+	normalizedId: string,
+	allowOverwrite: boolean,
+): void {
+	const existing = aliasMap.get(aliasKey);
+	if (!existing) {
+		aliasMap.set(aliasKey, normalizedId);
+		return;
+	}
+	if (!allowOverwrite) return;
+	const preferredRawId = /^\d+$/.test(aliasKey) ? `m-${aliasKey}` : /^m-\d+$/.test(aliasKey) ? aliasKey : null;
+	if (!preferredRawId) {
+		aliasMap.set(aliasKey, normalizedId);
+		return;
+	}
+	const existingIsPreferred = existing.toLowerCase() === preferredRawId;
+	const nextIsPreferred = normalizedId.toLowerCase() === preferredRawId;
+	if (nextIsPreferred && !existingIsPreferred) aliasMap.set(aliasKey, normalizedId);
+}
+
+function countTitleKeys(milestones: Milestone[], excludedKeys = new Set<string>()): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const milestone of milestones) {
+		const titleKey = milestoneKey(milestone.title);
+		if (!titleKey || excludedKeys.has(titleKey)) continue;
+		counts.set(titleKey, (counts.get(titleKey) ?? 0) + 1);
+	}
+	return counts;
+}
+
+function addMilestoneIdAliases(aliasMap: Map<string, string>, normalizedId: string, allowOverwrite = true): void {
+	const idKey = milestoneKey(normalizedId);
+	if (idKey) setMilestoneAlias(aliasMap, idKey, normalizedId, allowOverwrite);
+	const canonicalId = canonicalMilestoneId(normalizedId);
+	if (!canonicalId) return;
+	setMilestoneAlias(aliasMap, canonicalId, normalizedId, allowOverwrite);
+	setMilestoneAlias(aliasMap, canonicalId.slice(2), normalizedId, allowOverwrite);
+}
+
+function addMilestoneTitleAlias(
+	aliasMap: Map<string, string>,
+	milestone: Milestone,
+	titleCounts: Map<string, number>,
+	excludedKeys: Set<string>,
+): void {
+	const normalizedId = normalizeMilestoneName(milestone.id);
+	const titleKey = milestoneKey(normalizeMilestoneName(milestone.title));
+	if (
+		!normalizedId ||
+		!titleKey ||
+		excludedKeys.has(titleKey) ||
+		titleCounts.get(titleKey) !== 1 ||
+		aliasMap.has(titleKey)
+	)
+		return;
+	aliasMap.set(titleKey, normalizedId);
+}
+
+function registerMilestoneAliases(
+	aliasMap: Map<string, string>,
+	milestones: Milestone[],
+	titleCounts: Map<string, number>,
+	excludedKeys: Set<string>,
+	allowOverwrite: boolean,
+): void {
+	for (const milestone of milestones) {
+		const normalizedId = normalizeMilestoneName(milestone.id);
+		if (!normalizedId) continue;
+		addMilestoneIdAliases(aliasMap, normalizedId, allowOverwrite);
+		addMilestoneTitleAlias(aliasMap, milestone, titleCounts, excludedKeys);
+	}
+}
+
 /**
  * Collect archived milestone keys, excluding archived titles that are reused by active milestones.
  */
@@ -86,85 +161,20 @@ export function buildMilestoneAliasMap(
 			reservedIdKeys.add(key);
 		}
 	}
-	const setAlias = (aliasKey: string, normalizedId: string, allowOverwrite: boolean): void => {
-		const existing = aliasMap.get(aliasKey);
-		if (!existing) {
-			aliasMap.set(aliasKey, normalizedId);
-			return;
-		}
-		if (!allowOverwrite) {
-			return;
-		}
-		const existingKey = existing.toLowerCase();
-		const nextKey = normalizedId.toLowerCase();
-		const preferredRawId = /^\d+$/.test(aliasKey) ? `m-${aliasKey}` : /^m-\d+$/.test(aliasKey) ? aliasKey : null;
-		if (preferredRawId) {
-			const existingIsPreferred = existingKey === preferredRawId;
-			const nextIsPreferred = nextKey === preferredRawId;
-			if (existingIsPreferred && !nextIsPreferred) {
-				return;
-			}
-			if (nextIsPreferred && !existingIsPreferred) {
-				aliasMap.set(aliasKey, normalizedId);
-			}
-			return;
-		}
-		aliasMap.set(aliasKey, normalizedId);
-	};
-	const addIdAliases = (normalizedId: string, options?: { allowOverwrite?: boolean }) => {
-		const allowOverwrite = options?.allowOverwrite ?? true;
-		const idKey = milestoneKey(normalizedId);
-		if (idKey) {
-			setAlias(idKey, normalizedId, allowOverwrite);
-		}
-		const canonicalId = canonicalMilestoneId(normalizedId);
-		if (!canonicalId) {
-			return;
-		}
-		setAlias(canonicalId, normalizedId, allowOverwrite);
-		setAlias(canonicalId.slice(2), normalizedId, allowOverwrite);
-	};
-	const activeTitleCounts = new Map<string, number>();
-	for (const milestone of milestoneEntities) {
-		const titleKey = milestoneKey(milestone.title);
-		if (!titleKey) continue;
-		activeTitleCounts.set(titleKey, (activeTitleCounts.get(titleKey) ?? 0) + 1);
-	}
+	const activeTitleCounts = countTitleKeys(milestoneEntities);
 	const activeTitleKeys = new Set(activeTitleCounts.keys());
 
-	for (const milestone of milestoneEntities) {
-		const normalizedId = normalizeMilestoneName(milestone.id);
-		const normalizedTitle = normalizeMilestoneName(milestone.title);
-		if (!normalizedId) continue;
-		addIdAliases(normalizedId);
-		const titleKey = milestoneKey(normalizedTitle);
-		if (titleKey && !reservedIdKeys.has(titleKey) && activeTitleCounts.get(titleKey) === 1) {
-			if (!aliasMap.has(titleKey)) {
-				aliasMap.set(titleKey, normalizedId);
-			}
-		}
-	}
+	registerMilestoneAliases(aliasMap, milestoneEntities, activeTitleCounts, reservedIdKeys, true);
 
-	const archivedTitleCounts = new Map<string, number>();
-	for (const milestone of archivedMilestones) {
-		const titleKey = milestoneKey(milestone.title);
-		if (!titleKey || activeTitleKeys.has(titleKey)) continue;
-		archivedTitleCounts.set(titleKey, (archivedTitleCounts.get(titleKey) ?? 0) + 1);
-	}
+	const archivedTitleCounts = countTitleKeys(archivedMilestones, activeTitleKeys);
 
-	for (const milestone of archivedMilestones) {
-		const normalizedId = normalizeMilestoneName(milestone.id);
-		const normalizedTitle = normalizeMilestoneName(milestone.title);
-		if (!normalizedId) continue;
-		addIdAliases(normalizedId, { allowOverwrite: false });
-		const titleKey = milestoneKey(normalizedTitle);
-		if (!titleKey || activeTitleKeys.has(titleKey) || reservedIdKeys.has(titleKey)) continue;
-		if (archivedTitleCounts.get(titleKey) === 1) {
-			if (!aliasMap.has(titleKey)) {
-				aliasMap.set(titleKey, normalizedId);
-			}
-		}
-	}
+	registerMilestoneAliases(
+		aliasMap,
+		archivedMilestones,
+		archivedTitleCounts,
+		new Set([...activeTitleKeys, ...reservedIdKeys]),
+		false,
+	);
 
 	return aliasMap;
 }

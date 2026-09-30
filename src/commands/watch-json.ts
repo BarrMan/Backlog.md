@@ -64,113 +64,185 @@ export async function watchJson(
 	read: () => Promise<string | undefined>,
 	output: Writable = process.stdout,
 ): Promise<void> {
-	const controller = new AbortController();
-	const { signal } = controller;
+	let wake: (() => void) | undefined;
+	const control = createWatchControl(output, () => wake?.());
+	const { signal } = control;
 	const watchers: FSWatcher[] = [];
 	let seen: string | undefined;
-	let failure: Error | undefined;
-	let pending = true;
-	let wake: (() => void) | undefined;
-	let previous: string | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
-
+	const state = { pending: true };
 	const refresh = () => {
-		pending = true;
+		state.pending = true;
 		wake?.();
 	};
+	const onInterrupt = () => {
+		process.exitCode = 130;
+		control.stop();
+	};
+	const onTerminate = () => {
+		process.exitCode = 143;
+		control.stop();
+	};
+
+	process.on("SIGINT", onInterrupt);
+	process.on("SIGTERM", onTerminate);
+	output.on("error", control.onOutputError);
+	output.on("close", control.stop);
+	try {
+		watchDirectories(directories, watchers, refresh, control.fail);
+		timer = startWatchTimer(inputs, () => seen, refresh, onTerminate);
+		await runWatchLoop({
+			inputs,
+			read,
+			output,
+			signal,
+			control,
+			state,
+			setSeen: (value) => (seen = value),
+			setWake: (resolve) => (wake = resolve),
+		});
+	} catch (error) {
+		rethrowUnlessCancelled(error, signal);
+	} finally {
+		cleanupWatch({ timer, watchers, output, control, onInterrupt, onTerminate });
+	}
+	throwWatchFailure(control.failure);
+}
+
+type WatchLoopOptions = {
+	inputs: string[];
+	read: () => Promise<string | undefined>;
+	output: Writable;
+	signal: AbortSignal;
+	control: ReturnType<typeof createWatchControl>;
+	state: { pending: boolean };
+	setSeen: (value: string) => void;
+	setWake: (resolve: (() => void) | undefined) => void;
+};
+
+async function runWatchLoop(options: WatchLoopOptions): Promise<void> {
+	let previous: string | undefined;
+	while (!options.signal.aborted) {
+		const snapshot = await readWatchSnapshot(options, previous);
+		if (!snapshot) return;
+		previous = snapshot;
+		if (options.signal.aborted) return;
+		if (!options.state.pending) await waitForRefresh(options.setWake);
+		options.setWake(undefined);
+		await delay(50, undefined, { signal: options.signal });
+	}
+}
+
+async function readWatchSnapshot(
+	{ inputs, read, output, signal, control, state, setSeen }: WatchLoopOptions,
+	previous: string | undefined,
+): Promise<string | null> {
+	state.pending = false;
+	const seen = filesSignature(inputs);
+	setSeen(seen);
+	const value = await read();
+	if (value === undefined || signal.aborted) return null;
+	if (value !== previous) await writeWatchValue(output, signal, value, control);
+	if (filesSignature(inputs) !== seen) state.pending = true;
+	return value;
+}
+
+function rethrowUnlessCancelled(error: unknown, signal: AbortSignal): void {
+	if (!signal.aborted) throw error;
+}
+
+function throwWatchFailure(failure: Error | undefined): void {
+	if (failure) throw failure;
+}
+
+function cleanupWatch({
+	timer,
+	watchers,
+	output,
+	control,
+	onInterrupt,
+	onTerminate,
+}: {
+	timer: ReturnType<typeof setInterval> | undefined;
+	watchers: FSWatcher[];
+	output: Writable;
+	control: ReturnType<typeof createWatchControl>;
+	onInterrupt: () => void;
+	onTerminate: () => void;
+}): void {
+	if (timer) clearInterval(timer);
+	for (const watcher of watchers) watcher.close();
+	process.off("SIGINT", onInterrupt);
+	process.off("SIGTERM", onTerminate);
+	output.off("close", control.stop);
+	if (output.destroyed && !output.closed) output.once("close", () => output.off("error", control.onOutputError));
+	else output.off("error", control.onOutputError);
+}
+
+function createWatchControl(output: Writable, releaseWait: () => void) {
+	const controller = new AbortController();
+	let failure: Error | undefined;
 	const stop = () => {
-		if (signal.aborted) return;
+		if (controller.signal.aborted) return;
 		controller.abort();
 		if (output.writableLength && !output.destroyed) output.destroy();
-		wake?.();
+		releaseWait();
 	};
 	const fail = (error: Error) => {
 		failure = error;
 		stop();
 	};
-	const onOutputError = (error: NodeJS.ErrnoException) => {
-		if (error.code === "EPIPE") stop();
-		else fail(error);
+	const onOutputError = (error: NodeJS.ErrnoException) => (error.code === "EPIPE" ? stop() : fail(error));
+	return {
+		signal: controller.signal,
+		stop,
+		fail,
+		onOutputError,
+		get failure() {
+			return failure;
+		},
 	};
-	const onInterrupt = () => {
-		process.exitCode = 130;
-		stop();
-	};
-	const onTerminate = () => {
-		process.exitCode = 143;
-		stop();
-	};
+}
 
-	// Await each write, including slow pipes. There is only one write and one pending refresh,
-	// never a queue of snapshots. Aborting also releases a write blocked on an unread pipe.
-	const write = (value: string) =>
-		new Promise<void>((resolve, reject) => {
-			const onAbort = () => resolve();
-			signal.addEventListener("abort", onAbort, { once: true });
-			output.write(value, (error) => {
-				signal.removeEventListener("abort", onAbort);
-				if (error) {
-					onOutputError(error);
-					if (failure) reject(failure);
-					else resolve();
-				} else resolve();
-			});
-		});
-
-	process.on("SIGINT", onInterrupt);
-	process.on("SIGTERM", onTerminate);
-	output.on("error", onOutputError);
-	output.on("close", stop);
-	try {
-		// Register before reading so changes during startup always schedule another pass.
-		for (const directory of new Set(directories)) {
-			const watcher = watch(directory, { recursive: directory === directories[0] }, refresh);
-			watcher.on("error", fail);
-			watchers.push(watcher);
-		}
-		// A killed starter cannot stop the watch, so end with it like a termination request. A full read
-		// can be expensive in large projects, so an idle watch otherwise only compares stats.
-		timer = setInterval(() => {
-			if (starterExited()) onTerminate();
-			else if (filesSignature(inputs) !== seen) refresh();
-		}, 1000);
-		while (!signal.aborted) {
-			pending = false;
-			// Taken before reading: a change during the read differs from it and schedules another pass.
-			seen = filesSignature(inputs);
-			const value = await read();
-			// The CLI already explained validation failures on stderr. Never emit an empty
-			// replacement when no successful JSON response was produced.
-			if (value === undefined || signal.aborted) break;
-			if (value !== previous) {
-				await write(value);
-				previous = value;
-			}
-			if (signal.aborted) break;
-			if (!pending) {
-				await new Promise<void>((resolve) => {
-					wake = resolve;
-				});
-				wake = undefined;
-			}
-			// Coalesce editor save bursts without postponing refresh indefinitely.
-			await delay(50, undefined, { signal });
-		}
-	} catch (error) {
-		if (!signal.aborted) throw error;
-	} finally {
-		if (timer) clearInterval(timer);
-		for (const watcher of watchers) watcher.close();
-		process.off("SIGINT", onInterrupt);
-		process.off("SIGTERM", onTerminate);
-		output.off("close", stop);
-		// Destroyed streams can emit their final error before close. Keep the handler
-		// until then, including when cancellation interrupted a blocked write.
-		if (output.destroyed && !output.closed) {
-			output.once("close", () => output.off("error", onOutputError));
-		} else {
-			output.off("error", onOutputError);
-		}
+function watchDirectories(
+	directories: string[],
+	watchers: FSWatcher[],
+	refresh: () => void,
+	fail: (error: Error) => void,
+): void {
+	for (const directory of new Set(directories)) {
+		const watcher = watch(directory, { recursive: directory === directories[0] }, refresh);
+		watcher.on("error", fail);
+		watchers.push(watcher);
 	}
-	if (failure) throw failure;
+}
+
+function startWatchTimer(inputs: string[], seen: () => string | undefined, refresh: () => void, terminate: () => void) {
+	return setInterval(() => {
+		if (starterExited()) terminate();
+		else if (filesSignature(inputs) !== seen()) refresh();
+	}, 1000);
+}
+
+function waitForRefresh(setWake: (resolve: (() => void) | undefined) => void): Promise<void> {
+	return new Promise(setWake);
+}
+
+async function writeWatchValue(
+	output: Writable,
+	signal: AbortSignal,
+	value: string,
+	control: ReturnType<typeof createWatchControl>,
+): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const onAbort = () => resolve();
+		signal.addEventListener("abort", onAbort, { once: true });
+		output.write(value, (error) => {
+			signal.removeEventListener("abort", onAbort);
+			if (!error) return resolve();
+			control.onOutputError(error);
+			if (control.failure) reject(control.failure);
+			else resolve();
+		});
+	});
 }

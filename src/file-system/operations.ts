@@ -1,9 +1,8 @@
-import { mkdir, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import lockfile from "proper-lockfile";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES, FALLBACK_STATUS } from "../constants/index.ts";
-import { parseDecision, parseDocument, parseTask, TaskDependenciesParseError } from "../markdown/parser.ts";
-import { serializeDecision, serializeDocument, serializeTask } from "../markdown/serializer.ts";
+import { parseTask, TaskDependenciesParseError } from "../markdown/parser.ts";
+import { serializeTask } from "../markdown/serializer.ts";
 import type { BacklogConfig, Decision, Document, Milestone, Task, TaskListFilter } from "../types/index.ts";
 import type { BacklogConfigSource } from "../utils/backlog-directory.ts";
 import {
@@ -11,9 +10,6 @@ import {
 	resolveBacklogDirectory,
 	resolveBacklogDirectoryFromRootConfig,
 } from "../utils/backlog-directory.ts";
-import { findDecisionById } from "../utils/decision-id.ts";
-import { documentIdsEqual, findDocumentById, normalizeDocumentId } from "../utils/document-id.ts";
-import { normalizeDocumentRelativePath, normalizeDocumentSubPath } from "../utils/document-path.ts";
 import type { DraftIdentityFindings } from "../utils/duplicate-detection.ts";
 import { AmbiguousIdError, isAmbiguousIdError } from "../utils/entity-id.ts";
 import {
@@ -39,7 +35,11 @@ import {
 import { applyTaskFilters } from "../utils/task-search.ts";
 import { sortByTaskId } from "../utils/task-sorting.ts";
 import { isConfigValueError, normalizedDefinitionOfDone, parseConfig, serializeConfig } from "./config.ts";
+import { ContentRepository } from "./content-repository.ts";
+import { type LockAttemptSettings, LockOwner } from "./lock-owner.ts";
 import { MilestoneStore } from "./milestones.ts";
+import { ProjectLayout } from "./project-layout.ts";
+import { TaskRepository } from "./task-repository.ts";
 
 // Interface for task path resolution context
 interface TaskPathContext {
@@ -60,24 +60,23 @@ interface CreateLockTarget {
 	locksDir: string;
 }
 
-interface LockAttemptSettings {
-	staleMs: number;
-	retries: number;
-	retryDelayMs: number;
-}
-
 /** True when an error already explains an unreadable config value, so it needs no extra framing. */
 export { isConfigValueError };
 
 const DEFAULT_CREATE_LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_CREATE_LOCK_RETRY_DELAY_MS = 100;
 const DEFAULT_CREATE_LOCK_STALE_MS = 10_000;
-const TASK_FILE_READ_CONCURRENCY = 32;
-
 interface ParsedTaskFile {
 	content: string;
 	task: Task;
 }
+
+export type ContentMutation =
+	| { type: "task"; root: string; taskId: string; filePath: string }
+	| { type: "document"; root: string; documentId: string }
+	| { type: "decision"; root: string; decisionId: string };
+
+export type ContentMutationListener = (mutation: ContentMutation) => void | Promise<void>;
 
 const CREATE_LOCK_ERROR_CODE = "ECREATELOCK";
 export const CREATE_LOCK_ERROR_MESSAGE =
@@ -104,17 +103,6 @@ function createLockError(message: string, cause?: unknown): Error {
 
 function taskLockError(message: string, cause?: unknown): Error {
 	return lockError(TASK_LOCK_ERROR_NAME, TASK_LOCK_ERROR_CODE, message, cause);
-}
-
-/**
- * Records a directory-level listing failure so callers can report it instead of treating an
- * unreadable directory as an empty one. A directory that does not exist yet is normal and is
- * reported as empty; anything else means the contents could not be inspected. The empty string
- * denotes the content directory itself.
- */
-function recordUnreadableDirectory(error: unknown, unreadable?: string[]): void {
-	if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return;
-	unreadable?.push("");
 }
 
 export function isCreateLockError(error: unknown): error is Error {
@@ -167,12 +155,17 @@ export class FileSystem {
 	private readonly projectRoot: string;
 	private cachedConfig: BacklogConfig | null = null;
 	private cachedConfigSnapshot: { path: string; content: string } | null = null;
-	private readonly parsedTaskFiles = new Map<string, ParsedTaskFile>();
-	private taskParseCacheEpoch = 0;
-	private taskFileReadGeneration = 0;
-	private readonly taskFileReadGenerations = new Map<string, number>();
-	private activeTaskFileReads = 0;
-	private readonly pendingTaskFileReads: Array<() => void> = [];
+	private readonly taskRepository: TaskRepository;
+	private readonly contentRepository: ContentRepository;
+	private readonly locks = new LockOwner();
+	private readonly layout = new ProjectLayout();
+	private readonly contentMutationListeners = new Set<ContentMutationListener>();
+	// Retained as private compatibility seams for focused cache tests; repository owns the state.
+	readonly parsedTaskFiles: Map<string, ParsedTaskFile>;
+	readonly taskFileReadGenerations: Map<string, number>;
+	get taskParseCacheEpoch() {
+		return this.taskRepository.epoch;
+	}
 	private readonly milestones: MilestoneStore;
 
 	constructor(projectRoot: string) {
@@ -182,6 +175,14 @@ export class FileSystem {
 		this.resolvedBacklogDir = resolution.backlogPath ?? join(projectRoot, DEFAULT_DIRECTORIES.BACKLOG);
 		this.resolvedConfigPath = resolution.configPath ?? join(this.resolvedBacklogDir, DEFAULT_FILES.CONFIG);
 		this.configSource = resolution.configSource ?? "folder";
+		this.taskRepository = new TaskRepository({ config: async () => await this.loadConfig() });
+		this.parsedTaskFiles = this.taskRepository.parsedFiles;
+		this.taskFileReadGenerations = this.taskRepository.fileReadGenerations;
+		this.contentRepository = new ContentRepository({
+			decisionsDirectory: async () => await this.getDecisionsDir(),
+			documentsDirectory: async () => await this.getDocsDir(),
+			ensureDirectory: async (directory) => await this.ensureDirectoryExists(directory),
+		});
 		this.milestones = new MilestoneStore({
 			activeDirectory: () => this.getMilestonesDir(),
 			archiveDirectory: () => this.getArchiveMilestonesDir(),
@@ -297,9 +298,7 @@ export class FileSystem {
 	}
 
 	private invalidateTaskParseCache(): void {
-		this.taskParseCacheEpoch++;
-		this.parsedTaskFiles.clear();
-		this.taskFileReadGenerations.clear();
+		this.taskRepository.invalidate();
 	}
 
 	setConfigLocation(configSource: BacklogConfigSource): void {
@@ -374,14 +373,7 @@ export class FileSystem {
 			join(backlogDir, DEFAULT_DIRECTORIES.DECISIONS),
 		];
 
-		for (const dir of directories) {
-			try {
-				await mkdir(dir, { recursive: true });
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-				if (!(await stat(dir)).isDirectory()) throw error;
-			}
-		}
+		await this.layout.ensureDirectories(directories);
 	}
 
 	private toCreateLockError(error: unknown): Error {
@@ -568,44 +560,7 @@ export class FileSystem {
 		toError: (error: unknown) => Error,
 		fn: () => Promise<T>,
 	): Promise<T> {
-		await mkdir(dirname(lockDir), { recursive: true });
-
-		let release: (() => Promise<void>) | undefined;
-		try {
-			release = await lockfile.lock(targetPath, {
-				lockfilePath: lockDir,
-				realpath: true,
-				stale: Math.max(settings.staleMs, 2_000),
-				retries: {
-					retries: settings.retries,
-					factor: 1,
-					minTimeout: settings.retryDelayMs,
-					maxTimeout: settings.retryDelayMs,
-					randomize: false,
-				},
-			});
-		} catch (error) {
-			throw toError(error);
-		}
-
-		try {
-			const result = await fn();
-			try {
-				await release?.();
-			} catch (error) {
-				throw toError(error);
-			}
-			return result;
-		} catch (error) {
-			if (release) {
-				try {
-					await release();
-				} catch {
-					// Preserve the original operation error if lock cleanup also fails.
-				}
-			}
-			throw error;
-		}
+		return await this.locks.withTarget(targetPath, lockDir, settings, toError, fn);
 	}
 
 	// Task operations
@@ -626,21 +581,33 @@ export class FileSystem {
 		return (await this.resolveTaskWriteTarget(task, isDraft)).filePath;
 	}
 
+	private async existingTaskAtWritePath(filepath: string, preservesPath: boolean): Promise<Task | null> {
+		if (!preservesPath) return null;
+		try {
+			return parseTask(await Bun.file(filepath).text());
+		} catch (error) {
+			if (error instanceof TaskDependenciesParseError) throw error;
+			return null;
+		}
+	}
+
+	private async removeReplacedTaskFile(taskId: string, filename: string, tasksDir: string): Promise<void> {
+		try {
+			const core = { filesystem: { tasksDir } };
+			const existingPath = await getTaskPath(taskId, core as TaskPathContext);
+			if (existingPath && !existingPath.endsWith(filename)) await unlink(existingPath);
+		} catch (error) {
+			if (isAmbiguousTaskIdError(error)) throw error;
+		}
+	}
+
 	async saveTask(task: Task): Promise<string> {
+		const root = resolve(this.backlogDir);
 		const { id: taskId, filename, filePath: filepath } = await this.resolveTaskWriteTarget(task);
 		const prefix = extractAnyPrefix(taskId) ?? "task";
 		const tasksDir = await this.getTasksDir();
 		const shouldPreservePath = typeof task.filePath === "string" && task.filePath.trim().length > 0;
-		let existingTask: Task | null = null;
-
-		if (shouldPreservePath) {
-			try {
-				existingTask = parseTask(await Bun.file(filepath).text());
-			} catch (error) {
-				if (error instanceof TaskDependenciesParseError) throw error;
-				existingTask = null;
-			}
-		}
+		const existingTask = await this.existingTaskAtWritePath(filepath, shouldPreservePath);
 
 		const persistedTaskId = existingTask?.id && taskIdsEqual(existingTask.id, task.id) ? existingTask.id : taskId;
 		const normalizedParentTaskId = task.parentTaskId
@@ -661,20 +628,12 @@ export class FileSystem {
 
 		if (!shouldPreservePath) {
 			// Delete any existing task files with the same ID but different filenames
-			try {
-				const core = { filesystem: { tasksDir } };
-				const existingPath = await getTaskPath(taskId, core as TaskPathContext);
-				if (existingPath && !existingPath.endsWith(filename)) {
-					await unlink(existingPath);
-				}
-			} catch (error) {
-				if (isAmbiguousTaskIdError(error)) throw error;
-				// Ignore errors if no existing files found
-			}
+			await this.removeReplacedTaskFile(taskId, filename, tasksDir);
 		}
 
 		await this.ensureDirectoryExists(dirname(filepath));
 		await Bun.write(filepath, content);
+		await this.publishContentMutation({ type: "task", root, taskId: task.id, filePath: filepath });
 		return filepath;
 	}
 
@@ -707,95 +666,21 @@ export class FileSystem {
 		}
 	}
 
-	private async withTaskFileReadSlot<T>(read: () => Promise<T>): Promise<T> {
-		if (this.activeTaskFileReads < TASK_FILE_READ_CONCURRENCY) {
-			this.activeTaskFileReads++;
-		} else {
-			await new Promise<void>((resolve) => this.pendingTaskFileReads.push(resolve));
-		}
-
-		try {
-			return await read();
-		} finally {
-			const next = this.pendingTaskFileReads.shift();
-			if (next) {
-				// Transfer this slot directly to the next reader before it resumes.
-				next();
-			} else {
-				this.activeTaskFileReads--;
-			}
-		}
+	async readParsedTaskFile(filepath: string, cacheEpoch = this.taskParseCacheEpoch): Promise<Task> {
+		return await this.taskRepository.readParsedFile(filepath, cacheEpoch);
 	}
 
-	/** Re-read for freshness, but only reparse when the exact text changed. */
-	private async readParsedTaskFile(filepath: string, cacheEpoch = this.taskParseCacheEpoch): Promise<Task> {
-		const cacheKey = resolve(filepath);
-		const generation = ++this.taskFileReadGeneration;
-		if (cacheEpoch === this.taskParseCacheEpoch) {
-			this.taskFileReadGenerations.set(cacheKey, generation);
-		}
-		const content = await this.withTaskFileReadSlot(async () => await Bun.file(filepath).text());
-		const cached = this.parsedTaskFiles.get(cacheKey);
-		if (cached?.content === content) {
-			return structuredClone(cached.task);
-		}
-
-		const parsed = parseTask(content);
-		if (cacheEpoch === this.taskParseCacheEpoch && this.taskFileReadGenerations.get(cacheKey) === generation) {
-			this.parsedTaskFiles.set(cacheKey, { content, task: parsed });
-		}
-		// Task consumers mutate nested lists while preparing edits and branch metadata.
-		return structuredClone(parsed);
-	}
-
-	private async readTaskFiles(
+	async readTaskFiles(
 		directory: string,
 		files: string[],
 		options: { normalizeIdentity: boolean; debugLabel: string },
 		cacheEpoch = this.taskParseCacheEpoch,
 	): Promise<Task[]> {
-		const directoryPath = resolve(directory);
-		const livePaths = new Set(files.map((file) => resolve(directory, file)));
-		if (cacheEpoch === this.taskParseCacheEpoch) {
-			const trackedPaths = new Set([...this.parsedTaskFiles.keys(), ...this.taskFileReadGenerations.keys()]);
-			for (const trackedPath of trackedPaths) {
-				if (dirname(trackedPath) === directoryPath && !livePaths.has(trackedPath)) {
-					this.parsedTaskFiles.delete(trackedPath);
-					this.taskFileReadGenerations.delete(trackedPath);
-				}
-			}
-		}
-
-		const tasks = new Array<Task | undefined>(files.length);
-		let nextIndex = 0;
-		const worker = async () => {
-			while (nextIndex < files.length) {
-				const index = nextIndex++;
-				const file = files[index];
-				if (!file) continue;
-				const filepath = join(directory, file);
-				try {
-					const parsed = await this.readParsedTaskFile(filepath, cacheEpoch);
-					const task = options.normalizeIdentity ? normalizeTaskIdentity(parsed) : parsed;
-					tasks[index] = { ...task, filePath: filepath };
-				} catch (error) {
-					if (process.env.DEBUG) {
-						console.error(`Failed to parse ${options.debugLabel} ${filepath}`, error);
-					}
-				}
-			}
-		};
-
-		await Promise.all(Array.from({ length: Math.min(TASK_FILE_READ_CONCURRENCY, files.length) }, () => worker()));
-		return tasks.filter((task): task is Task => task !== undefined);
+		return await this.taskRepository.readFiles(directory, files, options, cacheEpoch);
 	}
 
 	private async listConfiguredTaskFiles(directory: string): Promise<string[]> {
-		const config = await this.loadConfig();
-		const taskPrefix = (config?.prefixes?.task ?? "task").toLowerCase();
-		return await Array.fromAsync(
-			new Bun.Glob(buildGlobPattern(taskPrefix)).scan({ cwd: directory, followSymlinks: true }),
-		);
+		return await this.taskRepository.listFiles(directory);
 	}
 
 	async listTasks(filter?: TaskListFilter): Promise<Task[]> {
@@ -1283,167 +1168,47 @@ export class FileSystem {
 
 	// Decision log operations
 	async saveDecision(decision: Decision): Promise<{ filepath: string; removedFilepaths: string[] }> {
-		// Normalize ID - remove "decision-" prefix if present
-		const normalizedId = decision.id.replace(/^decision-/, "");
-		const filename = `decision-${normalizedId} - ${this.sanitizeFilename(decision.title)}.md`;
-		const decisionsDir = await this.getDecisionsDir();
-		const filepath = join(decisionsDir, filename);
-		const content = serializeDecision(decision);
-		await this.ensureDirectoryExists(dirname(filepath));
-
-		const matches = await Array.fromAsync(
-			new Bun.Glob("decision-*.md").scan({ cwd: decisionsDir, followSymlinks: true }),
-		);
-		const removedFilepaths: string[] = [];
-		for (const match of matches) {
-			if (match === filename) continue;
-			if (!match.startsWith(`decision-${normalizedId} -`)) continue;
-			try {
-				const matchPath = join(decisionsDir, match);
-				await unlink(matchPath);
-				removedFilepaths.push(matchPath);
-			} catch {
-				// Ignore cleanup errors
-			}
-		}
-
-		await Bun.write(filepath, content);
-
-		return { filepath, removedFilepaths };
+		const root = resolve(this.backlogDir);
+		const saved = await this.contentRepository.saveDecision(decision);
+		await this.publishContentMutation({ type: "decision", root, decisionId: decision.id });
+		return saved;
 	}
 
 	async loadDecision(decisionId: string): Promise<Decision | null> {
-		return findDecisionById(await this.listDecisions(), decisionId);
+		return await this.contentRepository.loadDecision(decisionId);
 	}
 
 	// Document operations
 	async saveDocument(document: Document, subPath = ""): Promise<{ relativePath: string; removedFilepaths: string[] }> {
-		const docsDir = await this.getDocsDir();
-		const canonicalId = normalizeDocumentId(document.id);
-		document.id = canonicalId;
-		const filename = `${canonicalId} - ${this.sanitizeFilename(document.title)}.md`;
-		const normalizedSubPath = normalizeDocumentSubPath(subPath);
-		const relativePath = normalizedSubPath ? `${normalizedSubPath}/${filename}` : filename;
-		const filepath = join(docsDir, ...relativePath.split("/"));
-		const content = serializeDocument(document);
+		const root = resolve(this.backlogDir);
+		const saved = await this.contentRepository.saveDocument(document, subPath);
+		await this.publishContentMutation({ type: "document", root, documentId: document.id });
+		return saved;
+	}
 
-		await this.ensureDirectoryExists(dirname(filepath));
+	subscribeToContentMutations(listener: ContentMutationListener): () => void {
+		this.contentMutationListeners.add(listener);
+		return () => this.contentMutationListeners.delete(listener);
+	}
 
-		const glob = new Bun.Glob("**/doc-*.md");
-		const existingMatches = (await Array.fromAsync(glob.scan({ cwd: docsDir, followSymlinks: true }))).map((relative) =>
-			normalizeDocumentRelativePath(relative),
-		);
-		const matchesForId = existingMatches.filter((relative) => {
-			const base = relative.split("/").pop() || relative;
-			const [candidateId] = base.split(" - ");
-			if (!candidateId) return false;
-			return documentIdsEqual(canonicalId, candidateId);
-		});
-
-		let sourceRelativePath = document.path ? normalizeDocumentRelativePath(document.path) : undefined;
-		if (!sourceRelativePath && matchesForId.length > 0) {
-			sourceRelativePath = normalizeDocumentRelativePath(matchesForId[0] ?? "");
+	private async publishContentMutation(mutation: ContentMutation): Promise<void> {
+		for (const listener of this.contentMutationListeners) {
+			await listener(mutation);
 		}
-
-		const removedFilepaths: string[] = [];
-		if (sourceRelativePath && sourceRelativePath !== relativePath) {
-			const sourcePath = join(docsDir, ...sourceRelativePath.split("/"));
-			try {
-				await this.ensureDirectoryExists(dirname(filepath));
-				await rename(sourcePath, filepath);
-				removedFilepaths.push(sourcePath);
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException | undefined)?.code;
-				if (code !== "ENOENT") {
-					throw error;
-				}
-			}
-		}
-
-		for (const match of matchesForId) {
-			const matchPath = join(docsDir, ...normalizeDocumentRelativePath(match).split("/"));
-			if (matchPath === filepath) {
-				continue;
-			}
-			try {
-				await unlink(matchPath);
-				removedFilepaths.push(matchPath);
-			} catch {
-				// Ignore cleanup errors - file may have been removed already
-			}
-		}
-
-		await Bun.write(filepath, content);
-
-		document.path = relativePath;
-		return { relativePath, removedFilepaths };
 	}
 
 	/** Lists decisions, skipping files that cannot be read or parsed and collecting their paths in `unreadable`. */
 	async listDecisions(unreadable?: string[]): Promise<Decision[]> {
-		try {
-			const decisionsDir = await this.getDecisionsDir();
-			const decisionFiles = await Array.fromAsync(
-				new Bun.Glob("decision-*.md").scan({ cwd: decisionsDir, followSymlinks: true }),
-			);
-			const decisions: Decision[] = [];
-			for (const file of decisionFiles) {
-				// Filter out README files as they're just instruction files
-				if (file.toLowerCase().match(/^readme\.md$/i)) {
-					continue;
-				}
-				const filepath = join(decisionsDir, file);
-				try {
-					const content = await Bun.file(filepath).text();
-					decisions.push({ ...parseDecision(content), path: file });
-				} catch {
-					// One malformed file must not hide every other decision from lookups.
-					unreadable?.push(file);
-				}
-			}
-			return sortByTaskId(decisions);
-		} catch (error) {
-			recordUnreadableDirectory(error, unreadable);
-			return [];
-		}
+		return await this.contentRepository.listDecisions(unreadable);
 	}
 
 	/** Lists documents, skipping files that cannot be read or parsed and collecting their paths in `unreadable`. */
 	async listDocuments(unreadable?: string[]): Promise<Document[]> {
-		try {
-			const docsDir = await this.getDocsDir();
-			// Recursively include all markdown files under docs, excluding README.md variants
-			const glob = new Bun.Glob("**/*.md");
-			const docFiles = await Array.fromAsync(glob.scan({ cwd: docsDir, followSymlinks: true }));
-			const docs: Document[] = [];
-			for (const file of docFiles) {
-				const relativePath = normalizeDocumentRelativePath(file);
-				const base = relativePath.split("/").pop() || relativePath;
-				if (base.toLowerCase() === "readme.md") continue;
-				const filepath = join(docsDir, ...relativePath.split("/"));
-				try {
-					const content = await Bun.file(filepath).text();
-					docs.push({ ...parseDocument(content), path: relativePath });
-				} catch {
-					// One malformed file must not hide every other document from lookups.
-					unreadable?.push(relativePath);
-				}
-			}
-
-			// Sort by title for UI/CLI listing; the path breaks title ties so paged CLI windows never overlap.
-			return docs.sort((a, b) => a.title.localeCompare(b.title) || (a.path ?? "").localeCompare(b.path ?? ""));
-		} catch (error) {
-			recordUnreadableDirectory(error, unreadable);
-			return [];
-		}
+		return await this.contentRepository.listDocuments(unreadable);
 	}
 
 	async loadDocument(id: string): Promise<Document> {
-		const document = findDocumentById(await this.listDocuments(), id);
-		if (!document) {
-			throw new Error(`Document not found: ${id}`);
-		}
-		return document;
+		return await this.contentRepository.loadDocument(id);
 	}
 
 	async listMilestones(): Promise<Milestone[]> {

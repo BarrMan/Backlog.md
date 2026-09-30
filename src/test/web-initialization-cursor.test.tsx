@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import InitializationScreen from "../web/components/InitializationScreen.tsx";
+import { InitializationWizard } from "../web/features/initialization/InitializationWizard.tsx";
 import { apiClient } from "../web/lib/api.ts";
 import { setNativeInputValue } from "./react-dom-input.ts";
 
@@ -79,7 +79,7 @@ describe("Web Cursor initialization", () => {
 
 		activeRoot = createRoot(container);
 		await act(async () => {
-			activeRoot?.render(<InitializationScreen onInitialized={() => (initialized = true)} />);
+			activeRoot?.render(<InitializationWizard onInitialized={() => (initialized = true)} />);
 			await Promise.resolve();
 		});
 

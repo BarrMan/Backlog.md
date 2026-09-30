@@ -500,8 +500,8 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const resultDefault = await $`bun ${["src/cli.ts", "board"]}`.cwd(TEST_DIR).quiet().nothrow();
-			const resultView = await $`bun ${["src/cli.ts", "board", "view"]}`.cwd(TEST_DIR).quiet().nothrow();
+			const resultDefault = await $`bun ${["src/cli/index.ts", "board"]}`.cwd(TEST_DIR).quiet().nothrow();
+			const resultView = await $`bun ${["src/cli/index.ts", "board", "view"]}`.cwd(TEST_DIR).quiet().nothrow();
 
 			expect(resultDefault.stdout.toString()).toBe(resultView.stdout.toString());
 		});

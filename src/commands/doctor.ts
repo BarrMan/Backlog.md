@@ -195,27 +195,41 @@ function printDuplicateRepairPlan(plan: DuplicateRepairPlan): void {
 		for (const change of plan.changes)
 			console.log(`  ${change.sourcePath}\n    ${change.oldId} -> ${change.newId}\n    new path: ${change.targetPath}`);
 	}
-	if (plan.crossBranchFindings.length > 0) {
-		console.log("\nPossible cross-branch ID collisions (diagnostic only):");
-		for (const finding of plan.crossBranchFindings) {
-			console.log(`  ${finding.id}:`);
-			for (const location of finding.locations)
-				console.log(`    - ${location.branch}:${location.path} (${location.state})`);
-		}
-		console.log("Switch to the affected branches and reconcile these paths; Backlog.md will not edit another branch.");
+	printCrossBranchFindings(plan);
+	printReferenceReview(plan);
+	printRepairBlockers(plan);
+}
+
+function printCrossBranchFindings(plan: DuplicateRepairPlan): void {
+	if (plan.crossBranchFindings.length === 0) return;
+	console.log("\nPossible cross-branch ID collisions (diagnostic only):");
+	for (const finding of plan.crossBranchFindings) {
+		console.log(`  ${finding.id}:`);
+		for (const location of finding.locations)
+			console.log(`    - ${location.branch}:${location.path} (${location.state})`);
 	}
-	if (plan.groups.length > 0 && plan.references.length > 0) {
-		console.log("\nReferences requiring human review after repair:");
-		for (const reference of plan.references)
-			console.log(
-				`  ${reference.path}:${reference.line} [${reference.ids.join(", ")}]${reference.text ? `\n    ${reference.text}` : ""}`,
-			);
-		console.log("These references are not changed automatically because the original ID is ambiguous.");
-	}
-	if (plan.groups.length > 0 && !plan.referenceScanComplete)
+	console.log("Switch to the affected branches and reconcile these paths; Backlog.md will not edit another branch.");
+}
+
+function printReferenceReview(plan: DuplicateRepairPlan): void {
+	if (plan.groups.length === 0) return;
+	if (!plan.referenceScanComplete) {
 		console.log("\nReference scan incomplete; repair is blocked. See the failures below.");
-	else if (plan.groups.length > 0 && plan.references.length === 0)
+		return;
+	}
+	if (plan.references.length === 0) {
 		console.log("\nNo textual references to the duplicate IDs were found in backlog Markdown files.");
+		return;
+	}
+	console.log("\nReferences requiring human review after repair:");
+	for (const reference of plan.references)
+		console.log(
+			`  ${reference.path}:${reference.line} [${reference.ids.join(", ")}]${reference.text ? `\n    ${reference.text}` : ""}`,
+		);
+	console.log("These references are not changed automatically because the original ID is ambiguous.");
+}
+
+function printRepairBlockers(plan: DuplicateRepairPlan): void {
 	if (plan.blockedReasons.length > 0)
 		console.log(`\nRepair is blocked:\n${plan.blockedReasons.map((reason) => `  - ${reason}`).join("\n")}`);
 }
