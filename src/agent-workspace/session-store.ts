@@ -64,7 +64,8 @@ function isSession(value: unknown, taskId: string): value is AgentSession {
 function isHandoff(value: unknown): value is HandoffRequest {
 	if (!isRecord(value) || !Object.values(HANDOFF_STATUS).includes(value.status as HandoffRequest["status"]))
 		return false;
-	if (!["id", "sessionId", "documentPath", "createdAt"].every((key) => typeof value[key] === "string")) return false;
+	if (!["id", "sessionId", "createdAt"].every((key) => typeof value[key] === "string")) return false;
+	if (value.documentPath !== undefined && typeof value.documentPath !== "string") return false;
 	if (!["dispatchedAt", "error"].every((key) => value[key] === undefined || typeof value[key] === "string"))
 		return false;
 	if (

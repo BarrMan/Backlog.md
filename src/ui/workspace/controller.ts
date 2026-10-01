@@ -27,6 +27,7 @@ import { FooterSearch } from "../components/footer-search.ts";
 import { openTaskComposer, type TaskComposerOptions } from "../components/task-composer.ts";
 import { formatFooterContent } from "../footer-content.ts";
 import { formatKeymap, keymapKeys, matchesKey } from "../keymap.ts";
+import { adaptListRemoval } from "../list-removal-adapter.ts";
 import { openTaskFilterPicker, taskFilterHeaderControls, taskFilterOptions } from "../task-filter-wiring.ts";
 import { TASK_FIELD_LABELS } from "../task-labels.ts";
 import { buildTaskViewerMilestoneFilterModel } from "../task-viewer/controller.ts";
@@ -44,12 +45,19 @@ import {
 } from "./model.ts";
 import { reconciledWorkspaceSelection, workspaceRows } from "./reconciliation.ts";
 
-type Mode = "navigation" | "details" | "field" | "history" | "config" | "composer";
+type Mode = "navigation" | "details" | "field" | "history" | "output" | "config" | "composer";
 type WorkspaceHost = Pick<TmuxWorkspace, "showBoard" | "showAgent" | "focusAgent" | "takeTaskRequest" | "detach"> &
 	Partial<
 		Pick<
 			TmuxWorkspace,
-			"focusSearch" | "focusTasks" | "resizeNavigation" | "resizeFooter" | "workspaceState" | "updateWorkspaceState"
+			| "focusSearch"
+			| "focusTasks"
+			| "focusDetails"
+			| "resizeNavigation"
+			| "resizeFooter"
+			| "workspaceState"
+			| "updateWorkspaceState"
+			| "subscribeWorkspaceState"
 		>
 	>;
 type EditableWidget = ReturnType<typeof textarea> & {
@@ -69,7 +77,7 @@ export type WorkspaceViewState = {
 };
 type SharedWorkspaceState = Pick<WorkspaceViewState, "filters" | "selectedTaskId"> & {
 	footerEditing?: boolean;
-	footerContext?: "tasks" | "details";
+	footerContext?: "tasks" | "details" | "history" | "output";
 };
 
 export type AgentWorkspaceOptions = {
@@ -102,6 +110,30 @@ export function createWorkspaceViewState(): WorkspaceViewState {
 
 export function withWorkspaceSearch(filters: FilterState, search: string): FilterState {
 	return { ...filters, search };
+}
+
+export function createLatestWorkspaceSearchPublisher(publish: (search: string) => Promise<void>) {
+	let latest: string | undefined;
+	let running = false;
+	let pending = Promise.resolve();
+	const submit = (search: string) => {
+		latest = search;
+		if (running) return pending;
+		running = true;
+		pending = pending
+			.then(async () => {
+				while (latest !== undefined) {
+					const next = latest;
+					latest = undefined;
+					await publish(next);
+				}
+			})
+			.finally(() => {
+				running = false;
+			});
+		return pending;
+	};
+	return { submit, flush: () => pending };
 }
 
 function sessionLabel(session?: AgentSession): string {
@@ -179,6 +211,7 @@ export class AgentWorkspaceController {
 				tags: true,
 				style: { border: { fg: "gray" }, focus: { border: { fg: "yellow" } }, selected: { inverse: true, bold: true } },
 			});
+			adaptListRemoval(tree);
 			const details = scrollablebox({
 				parent: screen,
 				top: 0,
@@ -219,6 +252,8 @@ export class AgentWorkspaceController {
 			let availableLabels = collectAvailableLabels([], initialConfig?.labels ?? []);
 			let filters = state.filters;
 			let entries: WorkspaceEntry[] = [];
+			let cachedTasks: Task[] = [];
+			let cachedSearchIndex = createTaskSearchIndex(cachedTasks);
 			let selectedTask: Task | undefined;
 			let taskSessions: TaskSessions | undefined;
 			let historySession: AgentSession | undefined;
@@ -226,6 +261,7 @@ export class AgentWorkspaceController {
 			let disposeConfig = () => {};
 			let notificationTimer: ReturnType<typeof setTimeout> | undefined;
 			let poll: ReturnType<typeof setInterval> | undefined;
+			let unsubscribeState = async () => {};
 			let refreshRunning = false;
 			let filterFocused = false;
 			let selectionGeneration = 0;
@@ -241,7 +277,7 @@ export class AgentWorkspaceController {
 			};
 			const activateFooterContext = () => {
 				if (!nativePane) return;
-				const footerContext = detailsOnly ? "details" : "tasks";
+				const footerContext = detailsOnly ? (mode === "history" || mode === "output" ? mode : "details") : "tasks";
 				void host.updateWorkspaceState?.<SharedWorkspaceState>((shared) =>
 					shared.footerContext === footerContext ? shared : { ...shared, footerContext },
 				);
@@ -265,7 +301,7 @@ export class AgentWorkspaceController {
 			const showAgent = (session: AgentSession | undefined, generation = selectionGeneration) =>
 				queuePresentation(async () => {
 					if (closed || generation !== selectionGeneration) return;
-					const paneId = session?.paneId ?? null;
+					const paneId = session?.status === "running" ? (session.paneId ?? null) : null;
 					if (session?.status === "running" && !paneId)
 						tell("The running agent has no tmux pane yet. Wait for startup or recover the session.");
 					if (displayedPaneId === paneId) return;
@@ -277,15 +313,18 @@ export class AgentWorkspaceController {
 				footer.setContent(
 					formatFooterContent(
 						mode === "details"
-							? ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] History | [${formatKeymap("workspace", "close")}] Tasks `
+							? ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] Sessions | [${formatKeymap("workspace", "close")}] Tasks `
 							: mode === "history"
-								? ` [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Session | [${formatKeymap("workspace", "open")}] Show agent | [${formatKeymap("workspace", "close")}] Details `
-								: ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "focusDetails")}] Focus details | [${formatKeymap("workspace", "inlineInput")}] Agent | [${formatKeymap("workspace", "open")}] Start/Show | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close `,
+								? ` [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Session | [${formatKeymap("workspace", "open")}] Open | [${formatKeymap("workspace", "close")}] Details `
+								: mode === "output"
+									? " ↑↓ Scroll | [Esc] Sessions "
+									: ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "focusDetails")}] Focus details | [${formatKeymap("workspace", "inlineInput")}] Agent | [${formatKeymap("workspace", "open")}] Start/Show | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close `,
 						screen.width,
 					).content,
 				);
 			};
 			const showDetails = () => {
+				if (mode === "history" || mode === "output") return;
 				details.setContent(
 					selectedTask
 						? detailsText(selectedTask, state.drafts.get(selectedTask.id), active(), taskSessions?.handoff)
@@ -313,6 +352,8 @@ export class AgentWorkspaceController {
 			};
 			const clearSelection = () => {
 				++selectionGeneration;
+				if (mode === "history" || mode === "output") mode = detailsOnly ? "details" : "navigation";
+				details.setLabel?.(" Details ");
 				selectedTask = undefined;
 				taskSessions = undefined;
 				historySession = undefined;
@@ -330,6 +371,8 @@ export class AgentWorkspaceController {
 				void host.updateWorkspaceState?.((shared: SharedWorkspaceState) => ({ ...shared, selectedTaskId: task.id }));
 				const generation = unchanged ? selectionGeneration : ++selectionGeneration;
 				if (!unchanged) {
+					if (mode === "history" || mode === "output") mode = detailsOnly ? "details" : "navigation";
+					details.setLabel?.(" Details ");
 					historySession = undefined;
 					taskSessions = undefined;
 					await showAgent(undefined, generation);
@@ -340,7 +383,7 @@ export class AgentWorkspaceController {
 				taskSessions = sessions;
 				if (!unchanged) detailsViewport.setScroll(state.scrolls.get(task.id) ?? 0);
 				showDetails();
-				if (mode !== "history") await showAgent(active(), generation);
+				if (mode !== "history" && mode !== "output") await showAgent(active(), generation);
 			};
 			const select = async (index: number) => {
 				const entry = entries[index];
@@ -367,11 +410,13 @@ export class AgentWorkspaceController {
 					const config = await core.filesystem.loadConfig();
 					statuses = config?.statuses ?? statuses;
 					const tasks = await core.filesystem.listTasks();
+					cachedTasks = tasks;
+					cachedSearchIndex = createTaskSearchIndex(tasks);
 					availableLabels = collectAvailableLabels(tasks, initialConfig?.labels ?? []);
 					const filtered = applyTaskFilters(
 						tasks,
 						taskFilterOptions(filters, "any", milestoneModel.resolveMilestoneLabel),
-						createTaskSearchIndex(tasks),
+						cachedSearchIndex,
 					);
 					const previous = entries[selected];
 					entries = buildWorkspaceEntries(filtered, statuses, "All", state.collapsed);
@@ -395,7 +440,7 @@ export class AgentWorkspaceController {
 									historySession =
 										sessions.sessions.find((item) => item.id === historySession?.id) ?? sessions.sessions.at(-1);
 									showHistoryRows();
-								} else {
+								} else if (mode !== "output") {
 									showDetails();
 									await showAgent(active(), generation);
 								}
@@ -405,6 +450,33 @@ export class AgentWorkspaceController {
 					render();
 				} finally {
 					busy = false;
+				}
+			};
+			const applyCachedFilters = () => {
+				const previous = entries[selected];
+				const filtered = applyTaskFilters(
+					cachedTasks,
+					taskFilterOptions(filters, "any", milestoneModel.resolveMilestoneLabel),
+					cachedSearchIndex,
+				);
+				entries = buildWorkspaceEntries(filtered, statuses, "All", state.collapsed);
+				tree.setItems(workspaceRows(entries));
+				selected = reconciledWorkspaceSelection(entries, previous, state.selectedTaskId, false);
+				render();
+				if (selected < 0) clearSelection();
+				else void select(selected);
+			};
+			const applySharedState = (shared: SharedWorkspaceState) => {
+				if (shared.filters && JSON.stringify(shared.filters) !== JSON.stringify(filters)) {
+					filters = shared.filters;
+					state.filters = filters;
+					filterHeader.setFilters(filters);
+					applyCachedFilters();
+				}
+				if (detailsOnly && shared.selectedTaskId !== state.selectedTaskId) {
+					const index = entries.findIndex((entry) => entry.kind === "task" && entry.task.id === shared.selectedTaskId);
+					if (index >= 0) void select(index);
+					else clearSelection();
 				}
 			};
 			const selectRequestedTask = async (taskId: string) => {
@@ -490,6 +562,7 @@ export class AgentWorkspaceController {
 				taskSessions = sessions;
 				historySession = taskSessions.sessions.at(-1);
 				mode = "history";
+				activateFooterContext();
 				details.setLabel?.(" Session history ");
 				showHistoryRows();
 				updateFooter();
@@ -716,6 +789,16 @@ export class AgentWorkspaceController {
 				if (filterFocused) return;
 				if (mode === "details") {
 					if (matchesKey(keymapKeys("workspace", "close"), key)) {
+						if (detailsOnly) {
+							run(async () => {
+								await host.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({
+									...shared,
+									footerContext: "tasks",
+								}));
+								await host.focusTasks?.();
+							});
+							return;
+						}
 						mode = "navigation";
 						details.setLabel?.(" Details ");
 						tree.focus();
@@ -728,17 +811,46 @@ export class AgentWorkspaceController {
 						detailField = (detailField + (key.name === "up" ? FIELDS.length - 1 : 1)) % FIELDS.length;
 					return;
 				}
+				if (mode === "output") {
+					if (matchesKey(keymapKeys("workspace", "close"), key)) {
+						mode = "history";
+						details.setLabel?.(" Session history ");
+						showHistoryRows();
+						activateFooterContext();
+						updateFooter();
+						render();
+					}
+					return;
+				}
 				if (mode === "history") {
 					if (matchesKey(keymapKeys("workspace", "close"), key)) {
 						mode = "details";
 						historySession = undefined;
+						details.setLabel?.(" Details ");
+						activateFooterContext();
 						showDetails();
 						return;
 					}
 					if (matchesKey(keymapKeys("workspace", "open"), key))
 						run(async () => {
-							await showAgent(historySession);
-							await host.focusAgent(true);
+							const session = historySession;
+							const task = selectedTask;
+							if (!session || !task) return;
+							if (session.status === "running") {
+								await showAgent(session);
+								await host.focusAgent(true);
+								return;
+							}
+							const output = await service.output(task.id, session.id);
+							if (closed || selectedTask?.id !== task.id || historySession?.id !== session.id || mode !== "history")
+								return;
+							mode = "output";
+							details.setLabel?.(` Session ${session.id.slice(0, 8)} · ${session.status} `);
+							details.setContent((Bun.stripANSI(output) || "No saved output.").replaceAll("{", "{open}"));
+							detailsViewport.setScroll(0);
+							activateFooterContext();
+							updateFooter();
+							render();
 						});
 					else if (
 						matchesKey([...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")], key) &&
@@ -773,13 +885,22 @@ export class AgentWorkspaceController {
 					});
 					return;
 				}
-				if (matchesKey(keymapKeys("workspace", "details"), key)) {
-					state.detailsVisible = !state.detailsVisible;
+				if (
+					matchesKey([...keymapKeys("workspace", "details"), ...keymapKeys("workspace", "focusDetails")], key) &&
+					focusedTask()
+				) {
+					if (tasksOnly) {
+						run(async () => {
+							await host.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({
+								...shared,
+								footerContext: "details",
+							}));
+							await host.focusDetails?.();
+						});
+						return;
+					}
+					state.detailsVisible = true;
 					layout();
-					render();
-					return;
-				}
-				if (matchesKey(keymapKeys("workspace", "focusDetails"), key) && focusedTask()) {
 					mode = "details";
 					details.focus();
 					updateFooter();
@@ -812,6 +933,7 @@ export class AgentWorkspaceController {
 				if (closed) return;
 				closed = true;
 				if (poll) clearInterval(poll);
+				void unsubscribeState();
 				if (notificationTimer) clearTimeout(notificationTimer);
 				disposeConfig();
 				filterHeader.destroy();
@@ -890,25 +1012,21 @@ export class AgentWorkspaceController {
 					render();
 				} else tree.focus();
 			});
+			if (host.subscribeWorkspaceState)
+				run(async () => {
+					const dispose = await host.subscribeWorkspaceState?.<SharedWorkspaceState>((shared) =>
+						applySharedState(shared),
+					);
+					if (!dispose) return;
+					if (closed) await dispose();
+					else unsubscribeState = dispose;
+				});
 			poll = setInterval(
 				() =>
 					run(async () => {
 						if (refreshRunning || closed || mode === "field" || mode === "config" || mode === "composer") return;
 						refreshRunning = true;
 						try {
-							const shared = await host.workspaceState?.<SharedWorkspaceState>();
-							if (shared?.filters && JSON.stringify(shared.filters) !== JSON.stringify(filters)) {
-								filters = shared.filters;
-								state.filters = filters;
-								filterHeader.setFilters(filters);
-								await reload();
-							}
-							const sharedTaskId = shared?.selectedTaskId;
-							if (detailsOnly && sharedTaskId !== state.selectedTaskId) {
-								const index = entries.findIndex((entry) => entry.kind === "task" && entry.task.id === sharedTaskId);
-								if (index >= 0) await select(index);
-								else clearSelection();
-							}
 							const requested = detailsOnly ? undefined : await host.takeTaskRequest();
 							if (requested) await selectRequestedTask(requested);
 							else {
@@ -931,9 +1049,11 @@ export class AgentWorkspaceController {
 			const screen = this.#options.screen ?? createScreen({ title: formatTuiTitle("Workspace") });
 			let closed = false;
 			let header: FilterHeader;
+			let unsubscribeState = async () => {};
 			const close = () => {
 				if (closed) return;
 				closed = true;
+				void unsubscribeState();
 				header.destroy();
 				screen.destroy();
 				resolve("exit");
@@ -994,6 +1114,16 @@ export class AgentWorkspaceController {
 				};
 				screen.on("resize", resize);
 				void host.resizeNavigation?.(header.getHeight());
+				if (host.subscribeWorkspaceState) {
+					const dispose = await host.subscribeWorkspaceState<SharedWorkspaceState>((shared) => {
+						if (!shared.filters || JSON.stringify(shared.filters) === JSON.stringify(navigationFilters)) return;
+						navigationFilters = shared.filters;
+						header.setFilters(navigationFilters);
+						screen.render();
+					});
+					if (closed) await dispose();
+					else unsubscribeState = dispose;
+				}
 				screen.key(["q", "C-c"], close);
 				screen.on("destroy", close);
 				screen.render();
@@ -1010,11 +1140,19 @@ export class AgentWorkspaceController {
 			let filters: FilterState = createWorkspaceViewState().filters;
 			let context: SharedWorkspaceState["footerContext"] = "tasks";
 			let pending = Promise.resolve();
-			let poll: ReturnType<typeof setInterval> | undefined;
+			let pendingQuery: string | undefined;
+			const queryPublisher = createLatestWorkspaceSearchPublisher(async (query) => {
+				await host.updateWorkspaceState?.<SharedWorkspaceState>((state) => ({
+					...state,
+					filters: withWorkspaceSearch(state.filters ?? filters, query),
+					footerEditing: footer.isEditing,
+				}));
+			});
+			let unsubscribeState = async () => {};
 			const close = () => {
 				if (closed) return;
 				closed = true;
-				if (poll) clearInterval(poll);
+				void unsubscribeState();
 				footer.destroy();
 				screen.destroy();
 				resolve("exit");
@@ -1024,40 +1162,40 @@ export class AgentWorkspaceController {
 				content: () => {
 					const query = filters.search ? ` | {yellow-fg}Search: ${filters.search}{/}` : "";
 					if (context === "details")
-						return ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] History | [${formatKeymap("workspace", "close")}] Tasks${query}`;
+						return ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] Sessions | [${formatKeymap("workspace", "close")}] Tasks${query}`;
+					if (context === "history") return ` ↑↓ Session | [Enter] Open | [Esc] Details${query}`;
+					if (context === "output") return ` ↑↓ Scroll | [Esc] Sessions${query}`;
 					return ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "focusDetails")}] Focus details | [${formatKeymap("workspace", "inlineInput")}] Agent | [${formatKeymap("workspace", "open")}] Start/Show | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close${query}`;
 				},
 				query: () => filters.search,
 				onQueryChange: (query) => {
-					pending = pending.then(() =>
-						host.updateWorkspaceState?.<SharedWorkspaceState>((state) => {
-							filters = withWorkspaceSearch(state.filters ?? filters, query);
-							return { ...state, filters, footerEditing: true };
-						}),
-					);
+					filters = withWorkspaceSearch(filters, query);
+					pendingQuery = query;
+					footer.render();
+					screen.render();
+					pending = queryPublisher.submit(query);
 				},
 				onFocusChange: (editing) => {
-					pending = pending.then(() =>
-						host.updateWorkspaceState?.<SharedWorkspaceState>((state) => ({ ...state, footerEditing: editing })),
-					);
+					pending = queryPublisher
+						.flush()
+						.then(() =>
+							host.updateWorkspaceState?.<SharedWorkspaceState>((state) => ({ ...state, footerEditing: editing })),
+						);
 				},
 				onSubmit: async () => {
+					screen.render();
+					await queryPublisher.flush();
 					await pending;
 					await host.focusTasks?.();
 				},
 				onCancel: async () => {
+					screen.render();
+					await queryPublisher.flush();
 					await pending;
 					await host.focusTasks?.();
 				},
 				onHeightChange: (height) => void host.resizeFooter?.(height),
 			});
-			const sync = async () => {
-				const shared = await host.workspaceState?.<SharedWorkspaceState>();
-				if (!shared || footer.isEditing) return;
-				if (shared.filters) filters = shared.filters;
-				context = shared.footerContext ?? "tasks";
-				footer.render();
-			};
 			const focusSearch = async () => {
 				const shared = await host.workspaceState?.<SharedWorkspaceState>();
 				if (shared?.filters) filters = shared.filters;
@@ -1073,9 +1211,27 @@ export class AgentWorkspaceController {
 					void focusSearch();
 					return false;
 				});
-				screen.on("resize", () => footer.render());
+				screen.on("resize", () => {
+					footer.restoreInput();
+					footer.render();
+					screen.render();
+				});
 				screen.on("destroy", close);
-				poll = setInterval(() => void sync(), 250);
+				if (host.subscribeWorkspaceState) {
+					const dispose = await host.subscribeWorkspaceState<SharedWorkspaceState>((shared) => {
+						if (footer.isEditing) return;
+						if (pendingQuery !== undefined) {
+							if (shared.filters?.search !== pendingQuery) return;
+							pendingQuery = undefined;
+						}
+						if (shared.filters) filters = shared.filters;
+						context = shared.footerContext ?? "tasks";
+						footer.render();
+						screen.render();
+					});
+					if (closed) await dispose();
+					else unsubscribeState = dispose;
+				}
 				screen.render();
 			})().catch(close);
 		});

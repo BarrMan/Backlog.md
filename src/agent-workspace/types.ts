@@ -67,7 +67,7 @@ export interface AgentSession {
 export interface HandoffRequest {
 	id: string;
 	sessionId: string;
-	documentPath: string;
+	documentPath?: string;
 	/** Retained while its file is absent so the next handoff restores the same document identity. */
 	document?: {
 		id: string;

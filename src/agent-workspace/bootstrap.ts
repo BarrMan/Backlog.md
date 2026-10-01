@@ -29,21 +29,16 @@ function appendArguments(command: string, arguments_: string): string {
 /** Render only enough orientation to let an agent begin safely and load detail on demand. */
 export function renderSessionBootstrap(input: SessionBootstrapInput): string {
 	return [
-		"# Backlog.md agent session",
-		`Task: ${input.taskId}`,
+		`You are the agent for Backlog task ${input.taskId}.`,
 		`Session: ${input.sessionId}`,
 		`Project: ${input.projectRoot}`,
 		`Working directory: ${input.cwd}`,
 		`Configuration scope: ${input.configScope}${input.worktree ? " (worktree)" : ""}`,
 		"",
-		`Read the task card first: \`backlog task view ${input.taskId} --plain\`.`,
-		"Before acting, read the handoff referenced for this session, if one exists.",
-		"",
-		"Capability index (load only what the current work needs):",
-		"- Task edits and planning: `backlog instructions task-execution`",
-		"- Create or split work: `backlog instructions task-creation`",
-		"- Verify and finish work: `backlog instructions task-finalization`",
-		"- Sessions, handoffs, configuration, and worktrees: `backlog instructions agent-workspace`",
+		`Begin by reading \`backlog task view ${input.taskId} --plain\`. Its description is the durable working context. Continue from the recorded state, following the user's latest instructions.`,
+		"Keep the description current after each meaningful update: direction, decisions, completed work, verification, blockers, and the next concrete step. Record enough for a fresh session to continue without this conversation.",
+		"Preserve requirements and useful context. Keep it concise and current, not a conversation log. Distinguish verified results from assumptions and unfinished work.",
+		"Use the Backlog CLI for task updates; consult command --help as needed. Before switching sessions, save any outstanding context to the description. No separate handover document is needed.",
 		"",
 		`Use BACKLOG_CWD=${input.projectRoot}; work in ${input.cwd}. Previous sessions: \`backlog agent-session list ${input.taskId}\`.`,
 	].join("\n");

@@ -1,10 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { captureProcessOutput } from "../process/capture.ts";
 import { buildAgentLaunchCommand } from "./bootstrap.ts";
 import { fail, type SessionCommandResult } from "./session-utils.ts";
 import type { AgentPreset, AgentSession } from "./types.ts";
 
-const HANDOFF_SETTLE_DELAY_MS = 50;
 const LAUNCH_SETTLE_DELAY_MS = 25;
 const TMUX_PLACEHOLDER_COMMAND = "exec sleep 2147483647";
 
@@ -112,35 +110,6 @@ export class SessionProcess {
 			throw fail(`Agent command failed to launch for session ${session.id}`, pane);
 	}
 
-	async capture(session: AgentSession) {
-		return await this.runner.run(["tmux", "capture-pane", "-p", "-e", "-t", this.paneId(session)]);
-	}
-	async cursorRow(session: AgentSession): Promise<number | undefined> {
-		const result = await this.runner.run(["tmux", "display-message", "-p", "-t", this.paneId(session), "#{cursor_y}"]);
-		return /^\d+$/.test(result.stdout.trim()) ? Number(result.stdout.trim()) : undefined;
-	}
-	async settledCapture(session: AgentSession) {
-		const initial = await this.capture(session);
-		await Bun.sleep(HANDOFF_SETTLE_DELAY_MS);
-		return { initial, settled: await this.capture(session) };
-	}
-	async sendEnter(session: AgentSession): Promise<void> {
-		const result = await this.runner.run(["tmux", "send-keys", "-t", this.paneId(session), "Enter"]);
-		if (result.exitCode !== 0) throw fail(`Could not deliver handoff request to session ${session.id}`, result);
-	}
-	async paste(session: AgentSession, input: string): Promise<void> {
-		const buffer = `backlog-${randomUUID()}`;
-		const loaded = await this.runner.run(["tmux", "load-buffer", "-b", buffer, "-"], { stdin: input });
-		if (loaded.exitCode !== 0) throw fail(`Could not send input to session ${session.id}`, loaded);
-		let pasted = false;
-		try {
-			const result = await this.runner.run(["tmux", "paste-buffer", "-d", "-b", buffer, "-t", this.paneId(session)]);
-			if (result.exitCode !== 0) throw fail(`Could not send input to session ${session.id}`, result);
-			pasted = true;
-		} finally {
-			if (!pasted) await this.runner.run(["tmux", "delete-buffer", "-b", buffer]);
-		}
-	}
 	async kill(session: AgentSession): Promise<void> {
 		const result = await this.runner.run(["tmux", "kill-pane", "-t", this.paneId(session)]);
 		if (result.exitCode !== 0 && !/no server running|can't find pane/i.test(result.stderr))

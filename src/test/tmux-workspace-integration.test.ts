@@ -3,6 +3,7 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
+import { TmuxWorkspace, type TmuxWorkspaceRunner } from "../agent-workspace/tmux-workspace.ts";
 import { Core } from "../core/backlog.ts";
 import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
@@ -38,6 +39,55 @@ async function waitFor(
 }
 
 describe("workspace native tmux integration", () => {
+	integration("recovers startup after the process that acquired a real tmux bootstrap lock is killed", async () => {
+		const directory = createUniqueTestDir("tmux-workspace-stale-bootstrap");
+		paths.push(directory);
+		await mkdir(directory, { recursive: true });
+		const socket = `backlog-stale-bootstrap-${crypto.randomUUID().slice(0, 8)}`;
+		const runner: TmuxWorkspaceRunner = {
+			run: async (args) => {
+				const child = Bun.spawn([tmuxPath as string, "-f", "/dev/null", "-L", socket, ...args.slice(1)], {
+					cwd: directory,
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				return {
+					exitCode: await child.exited,
+					stdout: await new Response(child.stdout).text(),
+					stderr: await new Response(child.stderr).text(),
+				};
+			},
+		};
+		const workspace = new TmuxWorkspace(directory, runner);
+		const readyPath = join(directory, "stale-bootstrap-ready");
+		const owner = Bun.spawn([
+			"sh",
+			"-c",
+			'"$1" -f /dev/null -L "$2" wait-for -L "$3"; : > "$4"; kill -STOP $$; sleep 60',
+			"sh",
+			tmuxPath as string,
+			socket,
+			`${workspace.sessionName}-bootstrap`,
+			readyPath,
+		]);
+		try {
+			await waitFor(
+				async () => await Bun.file(readyPath).exists(),
+				"stale bootstrap lock acquisition",
+				async () => "tmux wait-for lock owner did not become ready",
+			);
+			expect(owner.exitCode).toBeNull();
+			owner.kill("SIGKILL");
+			await owner.exited;
+
+			await workspace.showWorkspace();
+			expect((await runner.run(["tmux", "has-session", "-t", workspace.sessionName])).exitCode).toBe(0);
+		} finally {
+			if (owner.exitCode === null) owner.kill("SIGKILL");
+			await runner.run(["tmux", "kill-server"]);
+		}
+	});
+
 	integration(
 		"keeps native application windows and agent identity through real tmux clients",
 		async () => {
@@ -122,6 +172,7 @@ log_user 0
 set env(COLUMNS) ${columns}
 set env(LINES) ${rows}
 set stty_init {rows ${rows} columns ${columns} -ixon}
+match_max 65536
 spawn ${escapedExpectCommand(entry)}
 expect { -re {Tasks} {} timeout { exit 91 } }
 set acknowledgement [open $env(BACKLOG_TEST_ACKNOWLEDGEMENT) w]
@@ -141,14 +192,30 @@ while {1} {
     if {$key eq "tab"} { send -- "\\t" }
     if {$key eq "fresh-input"} { send -- "fresh-after-return\\r" }
     if {$key eq "agent-native-keys"} { send -- "/\\t\\r" }
-	if {$key eq "footer-search"} { send -- "/" }
-	if {$key eq "footer-cancel"} { send -- "\\033" }
+    if {$key eq "footer-search"} { send -- "/" }
+    if {$key eq "footer-character"} { send -- "S" }
+    if {$key eq "footer-long"} { send -- "earch query" }
+    if {$key eq "footer-backspace"} { send -- "\\177" }
+    if {$key eq "footer-second"} { send -- "Second native" }
+    if {$key eq "footer-first"} { send -- "First native" }
+    if {$key eq "footer-clear"} { send -- "\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177\\177" }
+    if {$key eq "footer-submit"} { send -- "\\r" }
+    if {$key eq "footer-cancel"} { send -- "\\033" }
     if {$key eq "q"} { send -- "q" }
     if {$key eq "detach"} { send -- "\\002d" }
     set acknowledgement [open $env(BACKLOG_TEST_ACKNOWLEDGEMENT) w]
     puts -nonewline $acknowledgement $key
     close $acknowledgement
     if {$key eq "q" || $key eq "detach"} { expect { eof {} timeout { exit 92 } }; exit 0 }
+  }
+  # Consume up to 64 pending redraw chunks before processing the next scripted input.
+  set drained 0
+  expect -timeout 0 {
+    -re {(?s:.)+} {
+      incr drained
+      if {$drained < 64} { exp_continue }
+    }
+    timeout {}
   }
   after 25
 }
@@ -196,6 +263,7 @@ while {1} {
 					false,
 				);
 				await core.createTaskFromInput({ title: "Second native task", status: "To Do" }, false);
+				await core.createTaskFromInput({ title: "Done native task", status: "Done" }, false);
 				await upsertAgentConfiguration(core, "project", {
 					selectedPreset: "fake",
 					presets: {
@@ -208,13 +276,16 @@ while {1} {
 						},
 					},
 				});
-
 				const client = await startClient(false, 120, 40);
 				const workspaceSession = (await requireTmux("list-sessions", "-F", "#{session_name}"))
 					.split("\n")
 					.find((name) => name.startsWith("backlog-workspace-"));
 				expect(workspaceSession).toBeDefined();
 				const host = workspaceSession as string;
+				const workspaceFooterEditing = async () =>
+					(await tmux("show-options", "-qv", "-t", host, "@backlog_workspace_view_state")).stdout.includes(
+						'"footerEditing":true',
+					);
 				expect(
 					(await requireTmux("list-windows", "-t", host, "-F", "#{window_name}:#{window_panes}")).split("\n"),
 				).toEqual(expect.arrayContaining(["Board:1", "Workspace:5"]));
@@ -264,6 +335,138 @@ while {1} {
 				const details = requiredBounds(detailsBounds);
 				const display = requiredBounds(displayBounds);
 				const footer = requiredBounds(footerBounds);
+				const capturePane = async (pane: string) => (await tmux("capture-pane", "-p", "-t", pane)).stdout;
+				const footerCursor = async (pane: string) =>
+					Number(await requireTmux("display-message", "-p", "-t", pane, "#{cursor_x}"));
+				const workspaceSearch = async () =>
+					(await tmux("show-options", "-qv", "-t", host, "@backlog_workspace_view_state")).stdout.match(
+						/"search":"([^"]*)"/,
+					)?.[1];
+				const expectedWorkspaceFooterHintLines = (width: number, search = "") => {
+					const segments = [
+						"[↑↓] Task",
+						"[/] Search",
+						"[Space] Details",
+						"[→] Focus details",
+						"[Tab] Agent",
+						"[Enter] Start/Show",
+						"[N] New",
+						"[Shift+B] Board",
+						"[Q] Close",
+						...(search ? [`Search: ${search}`] : []),
+					];
+					const availableWidth = width - 1;
+					let splitAt = 1;
+					let firstLine = ` ${segments[0]}`;
+					for (let index = 1; index < segments.length; index += 1) {
+						const candidate = ` ${segments.slice(0, index + 1).join(" | ")}`;
+						if (candidate.length > availableWidth) break;
+						splitAt = index + 1;
+						firstLine = candidate;
+					}
+					const secondLine = ` ${segments.slice(splitAt).join(" | ")}`;
+					return secondLine.trim() ? [firstLine, secondLine] : [firstLine];
+				};
+				const expectWorkspaceFooterHints = async (width: number, search = "") => {
+					const footerLines = (await capturePane(footerId))
+						.split("\n")
+						.filter((line) => line.includes("[") || line.includes("Search:"));
+					const expectedLines = expectedWorkspaceFooterHintLines(width, search);
+					expect(footerLines).toEqual(expectedLines);
+					expect(footerLines.join("\n")).toContain("[N] New");
+					expect(footerLines.join("\n")).toContain("[Shift+B] Board");
+					expect(footerLines.join("\n")).toContain("[Q] Close");
+					for (const line of footerLines) expect(line.length).toBeLessThanOrEqual(width - 1);
+					expect(await requireTmux("display-message", "-p", "-t", footerId, "#{pane_width}")).toBe(String(width));
+				};
+				const clearFooter = async (pane: string) => {
+					await requestClientKey("footer-clear");
+					await waitFor(
+						async () => (await footerCursor(pane)) === 3,
+						"footer cleared cursor",
+						() => capturePane(pane),
+					);
+				};
+				const expectFooterSearch = async (pane: string, surface: string) => {
+					expect(await capturePane(pane)).toContain("Search");
+					await requestClientKey("footer-search");
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" /"),
+						`${surface} footer prompt`,
+						() => capturePane(pane),
+					);
+					if (surface === "Workspace")
+						await waitFor(
+							async () => (await selectedPane(`${host}:Workspace`)) === pane && (await workspaceFooterEditing()),
+							"Workspace footer input focus",
+							() => capturePane(pane),
+						);
+					await requestClientKey("footer-character");
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" / S") && (await footerCursor(pane)) === 4,
+						`${surface} footer first character and cursor`,
+						() => capturePane(pane),
+					);
+					await requestClientKey("footer-long");
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" / Search query") && (await footerCursor(pane)) === 15,
+						`${surface} footer long query and cursor`,
+						() => capturePane(pane),
+					);
+					await requestClientKey("footer-backspace");
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" / Search quer") && (await footerCursor(pane)) === 14,
+						`${surface} footer backspace and cursor`,
+						() => capturePane(pane),
+					);
+					await clearFooter(pane);
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" /") && (await footerCursor(pane)) === 3,
+						`${surface} footer cleared query and cursor`,
+						() => capturePane(pane),
+					);
+					if (surface === "Workspace")
+						await waitFor(
+							async () => (await workspaceSearch()) === "",
+							"Workspace cleared footer search state",
+							async () => `search=${await workspaceSearch()}`,
+						);
+					await requestClientKey("footer-submit");
+					await waitFor(
+						async () => (await capturePane(pane)).includes("Search"),
+						`${surface} footer hints after Enter`,
+						() => capturePane(pane),
+					);
+					if (surface === "Workspace") {
+						await waitFor(
+							async () => (await selectedPane(`${host}:Workspace`)) === taskId && !(await workspaceFooterEditing()),
+							"Workspace task focus after footer Enter",
+							() => capturePane(pane),
+						);
+						return;
+					}
+					await requestClientKey("footer-search");
+					await requestClientKey("footer-character");
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" / S") && (await footerCursor(pane)) === 4,
+						`${surface} footer cancellation query and cursor`,
+						() => capturePane(pane),
+					);
+					await requestClientKey("footer-cancel");
+					await waitFor(
+						async () => (await capturePane(pane)).includes("Search"),
+						`${surface} footer hints after Escape`,
+						() => capturePane(pane),
+					);
+					await requestClientKey("footer-search");
+					await clearFooter(pane);
+					await waitFor(
+						async () => (await capturePane(pane)).includes(" /") && (await footerCursor(pane)) === 3,
+						`${surface} footer cleanup query and cursor`,
+						() => capturePane(pane),
+					);
+					await requestClientKey("footer-submit");
+				};
 				expect(nav[1]).toBe(0);
 				expect(nav[2]).toBe(0);
 				expect(nav[3]).toBeGreaterThan(task[3]);
@@ -303,6 +506,9 @@ while {1} {
 					"Board window focus before handoff",
 					async () => await requireTmux("list-windows", "-t", host, "-F", "#{window_name}:#{window_active}"),
 				);
+				const boardPane = await selectedPane(`${host}:Board`);
+				if (!boardPane) throw new Error("Board pane was not selected");
+				await expectFooterSearch(boardPane, "Board");
 				await requestClientKey("handoff");
 				await waitFor(
 					async () => {
@@ -332,16 +538,116 @@ while {1} {
 					"Workspace window focus after Board handoff",
 					async () => await requireTmux("list-windows", "-t", host, "-F", "#{window_name}:#{window_active}"),
 				);
+				expect((await capturePane(taskId)).match(/-\s+Done \(\d+\)/g)).toHaveLength(1);
+				await expectFooterSearch(footerId, "Workspace");
 				await requestClientKey("footer-search");
 				await waitFor(
-					async () => (await selectedPane(`${host}:Workspace`)) === footerId,
+					async () => (await selectedPane(`${host}:Workspace`)) === footerId && (await workspaceFooterEditing()),
 					"footer search focus",
 					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
 				);
+				await requestClientKey("footer-second");
+				await waitFor(
+					async () => {
+						const output = await tmux("capture-pane", "-p", "-t", taskId);
+						return output.stdout.includes("Second native task") && !output.stdout.includes("First native task");
+					},
+					"live Workspace search filtering",
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout,
+				);
+				await requestClientKey("footer-submit");
+				await waitFor(
+					async () =>
+						(await selectedPane(`${host}:Workspace`)) === taskId &&
+						(await tmux("capture-pane", "-p", "-t", taskId)).stdout.includes("Second native task"),
+					"committed Workspace search task focus",
+					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
+				);
+				await requestClientKey("footer-search");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === footerId && (await workspaceFooterEditing()),
+					"footer search focus for cancellation",
+					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
+				);
+				await clearFooter(footerId);
+				await waitFor(
+					async () => (await workspaceSearch()) === "",
+					"cleared Workspace search state before replacement",
+					async () => `search=${await workspaceSearch()}`,
+				);
+				await waitFor(
+					async () => {
+						const output = await tmux("capture-pane", "-p", "-t", taskId);
+						return output.stdout.includes("First native task") && output.stdout.includes("Second native task");
+					},
+					"cleared Workspace search before replacement",
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout,
+				);
+				await requestClientKey("footer-first");
+				await waitFor(
+					async () => {
+						const output = await tmux("capture-pane", "-p", "-t", taskId);
+						return output.stdout.includes("First native task") && !output.stdout.includes("Second native task");
+					},
+					"replacement Workspace search filtering",
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout,
+				);
 				await requestClientKey("footer-cancel");
 				await waitFor(
+					async () => {
+						const output = await tmux("capture-pane", "-p", "-t", taskId);
+						return (
+							(await selectedPane(`${host}:Workspace`)) === taskId &&
+							output.stdout.includes("Second native task") &&
+							!output.stdout.includes("First native task") &&
+							(await capturePane(footerId)).includes("Search")
+						);
+					},
+					"Workspace search cancellation restore",
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout,
+				);
+				await requestClientKey("footer-search");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === footerId && (await workspaceFooterEditing()),
+					"footer search focus for clearing",
+					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
+				);
+				await clearFooter(footerId);
+				await waitFor(
+					async () => (await workspaceSearch()) === "",
+					"cleared Workspace search state before empty submit",
+					async () => `search=${await workspaceSearch()}`,
+				);
+				await waitFor(
+					async () => {
+						const output = await tmux("capture-pane", "-p", "-t", taskId);
+						return output.stdout.includes("First native task") && output.stdout.includes("Second native task");
+					},
+					"empty Workspace search clear",
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout,
+				);
+				await requestClientKey("footer-submit");
+				await waitFor(
 					async () => (await selectedPane(`${host}:Workspace`)) === taskId,
-					"footer search return to tasks",
+					"task focus after empty Workspace search",
+					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
+				);
+				await requestClientKey("footer-search");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === footerId && (await workspaceFooterEditing()),
+					"footer search focus before agent selection",
+					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
+				);
+				await requestClientKey("footer-first");
+				await waitFor(
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout.includes("First native task"),
+					"first task search before agent selection",
+					async () => (await tmux("capture-pane", "-p", "-t", taskId)).stdout,
+				);
+				await requestClientKey("footer-submit");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === taskId,
+					"first task focus before agent selection",
 					async () => await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{pane_id}"),
 				);
 
@@ -410,9 +716,127 @@ while {1} {
 					"native slash, Tab, and Enter agent input",
 					routingDiagnostics,
 				);
+				await requestClientKey("ctrl-q");
+				await waitFor(
+					async () =>
+						(await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{window_zoomed_flag}")) === "0" &&
+						(await selectedPane(`${host}:Workspace`)) === navigationId,
+					"return to Workspace navigation before footer search",
+					routingDiagnostics,
+				);
 				await requireTmux("resize-window", "-t", `${host}:Workspace`, "-x", "100", "-y", "30");
 				const narrowWidth = await requireTmux("display-message", "-p", "-t", navigationId, "#{pane_width}");
 				expect(narrowWidth).toBe("100");
+				await waitFor(
+					async () => {
+						try {
+							await expectWorkspaceFooterHints(100, "First native");
+							return true;
+						} catch {
+							return false;
+						}
+					},
+					"narrow Workspace footer shortcut rows",
+					() => capturePane(footerId),
+				);
+				await requestClientKey("footer-search");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === footerId && (await workspaceFooterEditing()),
+					"narrow Workspace footer search focus",
+					() => capturePane(footerId),
+				);
+				await clearFooter(footerId);
+				await waitFor(
+					async () => (await workspaceSearch()) === "" && (await footerCursor(footerId)) === 3,
+					"cleared narrow Workspace footer editing query",
+					() => capturePane(footerId),
+				);
+				await requestClientKey("footer-character");
+				await waitFor(
+					async () =>
+						(await workspaceSearch()) === "S" &&
+						(await capturePane(footerId)).includes(" / S") &&
+						(await footerCursor(footerId)) === 4,
+					"narrow Workspace footer editing query",
+					() => capturePane(footerId),
+				);
+				await requireTmux("resize-window", "-t", `${host}:Workspace`, "-x", "140", "-y", "50");
+				await waitFor(
+					async () => {
+						try {
+							return (
+								(await selectedPane(`${host}:Workspace`)) === footerId &&
+								(await workspaceFooterEditing()) &&
+								(await workspaceSearch()) === "S" &&
+								(await capturePane(footerId)).includes(" / S") &&
+								(await footerCursor(footerId)) === 4
+							);
+						} catch {
+							return false;
+						}
+					},
+					"wide Workspace footer editing query after resize",
+					() => capturePane(footerId),
+				);
+				await requestClientKey("footer-cancel");
+				await waitFor(
+					async () => {
+						try {
+							await expectWorkspaceFooterHints(140, "First native");
+							const output = await capturePane(taskId);
+							return (
+								(await workspaceSearch()) === "First native" &&
+								(await selectedPane(`${host}:Workspace`)) === taskId &&
+								output.includes("First native task") &&
+								!output.includes("Second native task")
+							);
+						} catch {
+							return false;
+						}
+					},
+					"wide Workspace footer shortcut rows after cancellation",
+					async () => {
+						const [paneState, sharedState, footerScreen, selected, taskScreen] = await Promise.all([
+							requireTmux(
+								"list-panes",
+								"-t",
+								`${host}:Workspace`,
+								"-F",
+								"#{pane_id}:dead=#{pane_dead}:active=#{pane_active}",
+							),
+							tmux("show-options", "-qv", "-t", host, "@backlog_workspace_view_state").then((result) => result.stdout),
+							capturePane(footerId),
+							selectedPane(`${host}:Workspace`),
+							capturePane(taskId),
+						]);
+						return `pane_dead=${paneState}\nshared_state=${sharedState}\nselected_pane=${selected}\nfooter_screen=${footerScreen}\ntask_screen=${taskScreen}`;
+					},
+				);
+				await requestClientKey("footer-search");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === footerId && (await workspaceFooterEditing()),
+					"wide Workspace footer search focus for clearing",
+					() => capturePane(footerId),
+				);
+				await clearFooter(footerId);
+				await requestClientKey("footer-submit");
+				await waitFor(
+					async () => (await selectedPane(`${host}:Workspace`)) === taskId && (await workspaceSearch()) === "",
+					"cleared Workspace search after resize",
+					() => capturePane(footerId),
+				);
+				await waitFor(
+					async () => {
+						try {
+							await expectWorkspaceFooterHints(140);
+							return true;
+						} catch {
+							return false;
+						}
+					},
+					"wide single-row Workspace footer shortcuts after clearing search",
+					() => capturePane(footerId),
+				);
 
 				await requestClientKey("board");
 				await waitFor(
@@ -458,6 +882,6 @@ while {1} {
 				await tmux("kill-server");
 			}
 		},
-		45_000,
+		60_000,
 	);
 });

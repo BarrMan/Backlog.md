@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type SessionWorkerAction = "handoff-dispatch" | "handoff-continue";
+export type SessionWorkerAction = "handoff-continue";
 
 /** Launches a detached CLI worker without coupling session state to the CLI module graph. */
 export async function spawnSessionWorker(

@@ -14,7 +14,7 @@ const preset: AgentPreset = {
 };
 
 describe("agent session bootstrap", () => {
-	it("keeps startup orientation compact and points to lazy capability guides", () => {
+	it("binds every session to durable task context without mandatory workflow loading", () => {
 		const bootstrap = renderSessionBootstrap({
 			taskId: "BACK-123",
 			sessionId: "session-1",
@@ -24,10 +24,12 @@ describe("agent session bootstrap", () => {
 			worktree: true,
 		});
 
-		expect(bootstrap.length).toBeLessThan(1_200);
+		expect(bootstrap.length).toBeLessThan(1_600);
 		expect(bootstrap).toContain("backlog task view BACK-123 --plain");
-		expect(bootstrap).toContain("backlog instructions agent-workspace");
-		expect(bootstrap).toContain("backlog instructions task-execution");
+		expect(bootstrap).toContain("You are the agent for Backlog task BACK-123");
+		expect(bootstrap).toContain("Keep the description current after each meaningful update");
+		expect(bootstrap).toContain("save any outstanding context to the description");
+		expect(bootstrap).not.toContain("backlog instructions");
 		expect(bootstrap).not.toContain("### Execution Workflow");
 	});
 

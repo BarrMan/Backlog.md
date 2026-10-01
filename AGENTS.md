@@ -11,7 +11,7 @@ principle in it, surface the conflict and ask Alex rather than silently proceedi
 not edit the manifesto as a side effect of implementation; changes to it require an
 explicit product decision.
 
-When you're working on a task, you should assign it yourself: -a @{your-name}
+When this session is explicitly assigned to a Backlog task, assign it to yourself: -a @{your-name}.
 
 In addition to the rules above, please consider the following:
 At the end of every task implementation, try to take a moment to see if you can simplify it. 
@@ -102,24 +102,12 @@ are found, the commit will be blocked until fixed.
 - **Github CLI**: Use `gh` whenever possible for PRs and issues
 
 <!-- BACKLOG.MD GUIDELINES START -->
-<CRITICAL_INSTRUCTION>
+## Backlog.md
 
-## Backlog.md Workflow
+Use the `backlog` CLI when the user requests task operations or this session is explicitly assigned to a Backlog task. Other work does not require a Backlog startup command, workflow guide, or task creation.
 
-This project uses Backlog.md for task and project management.
-
-**At the beginning of each conversation in this project, run `backlog instructions overview` before answering or taking action. Re-read it only if you have not read it yet in the current conversation.**
-
-Use the overview to decide whether to search, read, create, or update Backlog tasks.
-
-Before task lifecycle actions, read the matching detailed guide:
-- `backlog instructions task-creation` before creating or splitting tasks
-- `backlog instructions task-execution` before planning, changing status or assignee, adding a plan or implementation notes, or implementing task work
-- `backlog instructions task-finalization` before checking acceptance criteria, writing final summaries, or moving tasks to terminal statuses
-
-Use `backlog <command> --help` before running unfamiliar commands. Help shows options, fields, and examples.
+Use `backlog task create` to create tasks, `backlog task view <id> --plain` to read them, `backlog task edit <id>` to update them, and `backlog search` or `backlog task list` to find tasks. Consult `backlog <command> --help` for options as needed.
 
 Do not edit Backlog task, draft, document, decision, or milestone markdown files directly. Use the `backlog` CLI so metadata, relationships, and history stay consistent.
 
-</CRITICAL_INSTRUCTION>
 <!-- BACKLOG.MD GUIDELINES END -->

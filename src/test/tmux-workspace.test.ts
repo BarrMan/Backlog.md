@@ -7,12 +7,51 @@ import { isTmuxWorkspace, TmuxWorkspace, type TmuxWorkspaceRunner } from "../age
 class RecordingRunner implements TmuxWorkspaceRunner {
 	readonly calls: string[][] = [];
 	readonly options = new Map<string, string>();
+	readonly paneHeights = new Map<string, number>();
 	clients = "";
 	#nextPane = 3;
+	#locks = new Set<string>();
+	#waiters = new Map<string, (() => void)[]>();
+	#signals = new Set<string>();
 	async run(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 		this.calls.push(args);
+		if (args[1] === "wait-for") {
+			for (let index = 2; index < args.length; ) {
+				const option = args[index] ?? "";
+				const hasOption = option.startsWith("-");
+				const name = args[index + (hasOption ? 1 : 0)] as string;
+				if (option === "-S") {
+					const waiter = this.#waiters.get(name)?.shift();
+					if (waiter) waiter();
+					else this.#signals.add(name);
+				} else if (option === "-L") {
+					if (this.#locks.has(name))
+						await new Promise<void>((resolve) => {
+							const waiters = this.#waiters.get(name) ?? [];
+							waiters.push(resolve);
+							this.#waiters.set(name, waiters);
+						});
+					else this.#locks.add(name);
+				} else if (option === "-U") {
+					const waiter = this.#waiters.get(name)?.shift();
+					if (waiter) waiter();
+					else this.#locks.delete(name);
+				} else if (this.#signals.delete(name)) {
+					// Signals sent before a wait are retained by tmux.
+				} else
+					await new Promise<void>((resolve) => {
+						const waiters = this.#waiters.get(name) ?? [];
+						waiters.push(resolve);
+						this.#waiters.set(name, waiters);
+					});
+				index += hasOption ? 2 : 1;
+				if (args[index] === ";") index += 2;
+			}
+			return { exitCode: 0, stdout: "", stderr: "" };
+		}
 		if (args[1] === "new-session") return { exitCode: 0, stdout: "@1|%1\n", stderr: "" };
 		if (args[1] === "new-window") return { exitCode: 0, stdout: "@2|%2\n", stderr: "" };
+		if (args[1] === "list-windows") return { exitCode: 0, stdout: "@1\n@2\n", stderr: "" };
 		if (args[1] === "split-window") return { exitCode: 0, stdout: `%${this.#nextPane++}\n`, stderr: "" };
 		if (args[1] === "has-session") return { exitCode: this.options.has("session") ? 0 : 1, stdout: "", stderr: "" };
 		if (args[1] === "show-options") {
@@ -29,8 +68,12 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 			const format = args.at(-1);
 			if (format === "#{pane_id}")
 				return { exitCode: 0, stdout: target?.startsWith("%") ? `${target}\n` : "%9\n", stderr: "" };
+			if (format === "#{pane_height}")
+				return { exitCode: 0, stdout: `${this.paneHeights.get(target ?? "") ?? 0}\n`, stderr: "" };
 			return { exitCode: 0, stdout: "0\n", stderr: "" };
 		}
+		const pane = args[args.indexOf("-t") + 1];
+		if (args[1] === "resize-pane" && pane) this.paneHeights.set(pane, Number(args.at(-1)));
 		if (args[1] === "list-clients") return { exitCode: 0, stdout: this.clients, stderr: "" };
 		return { exitCode: 0, stdout: "", stderr: "" };
 	}
@@ -111,6 +154,112 @@ describe("TmuxWorkspace", () => {
 			["tmux", "resize-pane", "-t", "%2", "-y", "4"],
 			["tmux", "resize-pane", "-t", "%3", "-y", "2"],
 		]);
+	});
+
+	it("resizes when a cached region height differs from the physical pane", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		await workspace.resizeFooter(2);
+		runner.paneHeights.set("%3", 1);
+		runner.calls.length = 0;
+		await workspace.resizeFooter(2);
+		expect(runner.calls).toContainEqual(["tmux", "resize-pane", "-t", "%3", "-y", "2"]);
+	});
+
+	it("rejects invalid workspace region heights", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.calls.length = 0;
+		await expect(workspace.resizeNavigation(Number.NaN)).rejects.toThrow("positive finite number");
+		await expect(workspace.resizeFooter(Number.POSITIVE_INFINITY)).rejects.toThrow("positive finite number");
+		await expect(workspace.resizeNavigation(0)).rejects.toThrow("positive finite number");
+		expect(runner.calls.some((args) => args[1] === "resize-pane")).toBe(false);
+	});
+
+	it("preserves valid measured heights when rebuilding workspace panes", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		await workspace.resizeNavigation(4);
+		await workspace.resizeFooter(2);
+		runner.options.delete("@backlog_workspace_tasks_pane");
+		runner.calls.length = 0;
+		await workspace.showWorkspace();
+		expect(runner.calls.filter((args) => args[1] === "resize-pane")).toEqual([
+			["tmux", "resize-pane", "-t", "%2", "-y", "4"],
+			["tmux", "resize-pane", "-t", "%7", "-y", "2"],
+		]);
+	});
+
+	it("serializes concurrent workspace state updates", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		await Promise.all([
+			workspace.updateWorkspaceState<{ filters?: { status: string }; search?: string }>((state) => ({
+				...state,
+				filters: { status: "in-progress" },
+			})),
+			workspace.updateWorkspaceState<{ filters?: { status: string }; search?: string }>((state) => ({
+				...state,
+				search: "tmux",
+			})),
+		]);
+		expect(await workspace.workspaceState()).toEqual({ filters: { status: "in-progress" }, search: "tmux" });
+	});
+
+	it("notifies each state subscriber and releases waits during teardown", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		const first: string[] = [];
+		const second: string[] = [];
+		const stopFirst = await workspace.subscribeWorkspaceState<{ search?: string }>((state) => {
+			first.push(state.search ?? "");
+		});
+		const stopSecond = await workspace.subscribeWorkspaceState<{ search?: string }>((state) => {
+			second.push(state.search ?? "");
+		});
+		runner.calls.length = 0;
+		await workspace.updateWorkspaceState((state: { search?: string }) => ({ ...state, search: "latest" }));
+		expect(runner.calls.filter((args) => args[1] === "wait-for" && args[2] === "-S")).toEqual([
+			["tmux", "wait-for", "-S", expect.any(String), ";", "wait-for", "-S", expect.any(String)],
+		]);
+		await Bun.sleep(0);
+		expect(first).toEqual(["", "latest"]);
+		expect(second).toEqual(["", "latest"]);
+		await stopFirst();
+		await workspace.updateWorkspaceState((state: { search?: string }) => ({ ...state, search: "next" }));
+		await Bun.sleep(0);
+		expect(first).toEqual(["", "latest"]);
+		expect(second).toEqual(["", "latest", "next"]);
+		await stopSecond();
+	});
+
+	it("does not broadcast an unchanged serialized workspace state", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		await workspace.updateWorkspaceState((state: { search?: string }) => state);
+		await workspace.subscribeWorkspaceState(() => {});
+		runner.calls.length = 0;
+		await workspace.updateWorkspaceState((state: { search?: string }) => state);
+		expect(
+			runner.calls.some((args) => args[1] === "set-option" && args.at(-2) === "@backlog_workspace_view_state"),
+		).toBe(false);
+		expect(runner.calls.some((args) => args[1] === "wait-for" && args[2] === "-S")).toBe(false);
+	});
+
+	it("removes a rejected initial subscriber without leaving a listener channel", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		await expect(workspace.subscribeWorkspaceState(() => Promise.reject(new Error("listener failed")))).rejects.toThrow(
+			"listener failed",
+		);
+		expect(runner.options.get("@backlog_workspace_view_state_listeners")).toBe("[]");
 	});
 
 	it("consumes the task mailbox without an unconditional delete", async () => {
@@ -202,6 +351,68 @@ describe("TmuxWorkspace real tmux", () => {
 				const listed = await runner.run(["tmux", "list-windows", "-t", workspace.sessionName, "-F", "#{window_name}"]);
 				expect(listed.exitCode).toBe(0);
 				expect(listed.stdout.split("\n")).toEqual(expect.arrayContaining(["Board", "Workspace"]));
+			} finally {
+				await runner.run(["tmux", "kill-server"]);
+			}
+		},
+		10_000,
+	);
+
+	realTmux(
+		"recreates a deleted Workspace window without removing Board",
+		async () => {
+			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
+			paths.push(directory);
+			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
+			const runner: TmuxWorkspaceRunner = {
+				async run(args, options) {
+					const child = Bun.spawn([tmuxPath as string, "-L", socket, "-f", "/dev/null", ...args.slice(1)], {
+						cwd: options?.cwd,
+						env: { ...process.env, TMUX: "" },
+						stdout: "pipe",
+						stderr: "pipe",
+					});
+					return {
+						exitCode: await child.exited,
+						stdout: await new Response(child.stdout).text(),
+						stderr: await new Response(child.stderr).text(),
+					};
+				},
+			};
+			const workspace = new TmuxWorkspace(await realpath(directory), runner);
+			try {
+				await workspace.showWorkspace();
+				const removed = await runner.run([
+					"tmux",
+					"show-options",
+					"-qv",
+					"-t",
+					workspace.sessionName,
+					"@backlog_workspace_window",
+				]);
+				expect(removed.exitCode).toBe(0);
+				await runner.run(["tmux", "kill-window", "-t", removed.stdout.trim()]);
+				const afterRemoval = await runner.run([
+					"tmux",
+					"list-windows",
+					"-t",
+					workspace.sessionName,
+					"-F",
+					"#{window_name}:#{window_panes}",
+				]);
+				expect(afterRemoval.stdout.trim()).toBe("Board:1");
+
+				await workspace.showWorkspace();
+				const rebuilt = await runner.run([
+					"tmux",
+					"list-windows",
+					"-t",
+					workspace.sessionName,
+					"-F",
+					"#{window_name}:#{window_panes}",
+				]);
+				expect(rebuilt.exitCode).toBe(0);
+				expect(rebuilt.stdout.split("\n")).toEqual(expect.arrayContaining(["Board:1", "Workspace:5"]));
 			} finally {
 				await runner.run(["tmux", "kill-server"]);
 			}

@@ -4,14 +4,9 @@ import { join } from "node:path";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
 import { type AgentSessionRunner, AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
-import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 const itRealTmux = process.env.RUN_INTERACTIVE_TUI_TESTS === "1" && Bun.which("tmux") ? it : it.skip;
-
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", "'\\''")}'`;
-}
 
 class FakeTmux implements AgentSessionRunner {
 	readonly commands: string[][] = [];
@@ -19,7 +14,9 @@ class FakeTmux implements AgentSessionRunner {
 		[];
 	failPrepare = false;
 	failLaunch = false;
+	failStop = false;
 	prepareDelay = 0;
+	panes = 0;
 
 	async run(
 		args: string[],
@@ -33,8 +30,11 @@ class FakeTmux implements AgentSessionRunner {
 		}
 		if (args[0] === "tmux" && args[1] === "respawn-pane" && this.failLaunch)
 			return { exitCode: 1, stdout: "", stderr: "launch failed" };
+		if (args[0] === "tmux" && args[1] === "kill-pane" && this.failStop)
+			return { exitCode: 1, stdout: "", stderr: "stop failed" };
 		if (args[0] === "git" && args[1] === "rev-parse") return { exitCode: 0, stdout: ".git\n", stderr: "" };
-		if (args[0] === "tmux" && args[1] === "new-session") return { exitCode: 0, stdout: "%1\n", stderr: "" };
+		if (args[0] === "tmux" && args[1] === "new-session")
+			return { exitCode: 0, stdout: `%${++this.panes}\n`, stderr: "" };
 		if (args[0] === "tmux" && args[1] === "display-message")
 			return { exitCode: 0, stdout: args.at(-1) === "#{cursor_y}" ? "0\n" : "0 0\n", stderr: "" };
 		if (args[0] === "tmux" && args[1] === "capture-pane") return { exitCode: 0, stdout: ">\n", stderr: "" };
@@ -81,21 +81,14 @@ describe("AgentSessionService", () => {
 		]);
 	});
 
-	it("targets relocated panes for handoff input without deleting the buffer twice", async () => {
+	it("requests replacement without injecting input or creating a handover document", async () => {
 		const service = new AgentSessionService(core, { runner });
 		await service.start("task-1");
 		const beforePaste = runner.commands.length;
-		await service.requestHandoff("task-1");
-		expect(runner.commands.slice(beforePaste).filter(([command]) => command === "tmux")).toEqual([
-			["tmux", "capture-pane", "-p", "-e", "-t", "%1"],
-			["tmux", "capture-pane", "-p", "-e", "-t", "%1"],
-			["tmux", "display-message", "-p", "-t", "%1", "#{cursor_y}"],
-			["tmux", "load-buffer", "-b", expect.stringMatching(/^backlog-/), "-"],
-			["tmux", "paste-buffer", "-d", "-b", expect.stringMatching(/^backlog-/), "-t", "%1"],
-			["tmux", "send-keys", "-t", "%1", "Enter"],
-		]);
-		const loadBuffer = runner.commands.findIndex((command) => command[0] === "tmux" && command[1] === "load-buffer");
-		expect(runner.options[loadBuffer]?.stdin).toContain("Write the task handoff now");
+		const request = await service.requestHandoff("task-1");
+		expect(request.status).toBe("ready");
+		expect(request.documentPath).toBeUndefined();
+		expect(runner.commands.slice(beforePaste).filter(([command]) => command === "tmux")).toEqual([]);
 	});
 
 	it("attaches outside tmux and switches the current client inside tmux", async () => {
@@ -171,54 +164,71 @@ describe("AgentSessionService", () => {
 		expect(runner.commands).toContainEqual(["git", "worktree", "add", "-b", "backlog/session/task-1", session.cwd]);
 	});
 
-	it("keeps one handoff document and starts exactly one replacement", async () => {
+	it("starts one replacement before stopping its predecessor and preserves task context and output", async () => {
 		const service = new AgentSessionService(core, { runner });
 		const first = await service.start("task-1");
-		const request = await service.requestHandoff("task-1");
-		const sends = runner.commands.filter((command) => command[0] === "tmux" && command[1] === "send-keys");
-		expect(sends).toHaveLength(1);
-		await service.recover("task-1");
-		expect(runner.commands.filter((command) => command[0] === "tmux" && command[1] === "send-keys")).toHaveLength(1);
+		await core.updateTaskFromInput("task-1", { description: "Verified step one. Next: step two." }, false);
+		await Bun.write(first.outputPath, "Previous session output");
+		await service.requestHandoff("task-1");
 		await expect(service.requestHandoff("task-1")).rejects.toThrow("already has a handoff");
-		await service.completeHandoff("task-1", request.id, "Completed work and verification.");
-		const replacement = await service.continueHandoff("task-1");
+		const replacements = await Promise.all([service.continueHandoff("task-1"), service.continueHandoff("task-1")]);
+		const replacement = replacements.find(Boolean);
+		expect(replacements.filter(Boolean)).toHaveLength(1);
 		expect(replacement?.predecessorId).toBe(first.id);
 		expect(await service.continueHandoff("task-1")).toBeNull();
 		const state = await service.list("task-1");
 		expect(state.sessions.find((session) => session.id === first.id)?.status).toBe("handed-off");
 		expect(state.handoff?.status).toBe("completed");
-		const documentId = (state as { handoffDocumentId?: string }).handoffDocumentId;
-		const secondRequest = await service.requestHandoff("task-1");
-		expect(await Bun.file(join(core.filesystem.docsDir, secondRequest.documentPath)).exists()).toBe(false);
-		expect((await core.loadTaskById("task-1", { includeCrossBranch: false }))?.documentation).toContain(documentId);
-		await service.completeHandoff("task-1", secondRequest.id, "Second handoff.");
-		const secondState = await service.list("task-1");
-		expect((secondState as { handoffDocumentId?: string }).handoffDocumentId).toBe(documentId);
-		const document = await core.getDocument(documentId ?? "");
-		expect(document?.path).toBeDefined();
-		expect(await Bun.file(join(core.filesystem.docsDir, document?.path ?? "")).exists()).toBe(true);
+		expect(state.activeSessionId).toBe(replacement?.id);
+		expect(await service.output("task-1", first.id)).toBe("Previous session output");
+		expect((await core.loadTaskById("task-1"))?.description).toBe("Verified step one. Next: step two.");
+		expect(await Bun.file(replacement?.bootstrapPath ?? "").text()).toContain("backlog task view TASK-1 --plain");
+		const launched = runner.commands.findIndex((args) => args[1] === "respawn-pane" && args[4] === "%2");
+		const stopped = runner.commands.findIndex((args) => args[1] === "kill-pane" && args[3] === "%1");
+		expect(launched).toBeGreaterThan(-1);
+		expect(stopped).toBeGreaterThan(launched);
 	});
 
 	it("reconstructs a failed replacement handoff without duplicate active sessions", async () => {
 		const service = new AgentSessionService(core, { runner });
 		const first = await service.start("task-1");
-		const request = await service.requestHandoff("task-1");
-		await service.completeHandoff("task-1", request.id, "Completed work and verification.");
+		await service.requestHandoff("task-1");
 		runner.failLaunch = true;
 		await expect(service.continueHandoff("task-1")).rejects.toThrow("Could not launch agent session");
 		const failed = await service.list("task-1");
 		expect(failed.handoff?.status).toBe("failed");
-		expect(failed.sessions.filter((session) => session.status === "running")).toHaveLength(0);
+		expect(failed.sessions.filter((session) => session.status === "running")).toHaveLength(1);
+		expect(failed.activeSessionId).toBe(first.id);
+		expect(runner.commands).not.toContainEqual(["tmux", "kill-pane", "-t", first.paneId]);
 
 		runner.failLaunch = false;
 		const reconstructed = new AgentSessionService(core, { runner });
-		await reconstructed.recover("task-1");
+		await reconstructed.continueHandoff("task-1");
 		const recovered = await reconstructed.list("task-1");
 		expect(recovered.handoff?.status).toBe("completed");
 		expect(recovered.sessions.filter((session) => session.status === "running")).toHaveLength(1);
 		expect(recovered.sessions.find((session) => session.status === "running")?.predecessorId).toBe(first.id);
 		await reconstructed.recover("task-1");
 		expect((await reconstructed.list("task-1")).sessions).toHaveLength(recovered.sessions.length);
+	});
+
+	it("retries stopping a predecessor without launching another replacement", async () => {
+		const service = new AgentSessionService(core, { runner });
+		const first = await service.start("task-1");
+		await service.requestHandoff("task-1");
+		runner.failStop = true;
+		await expect(service.continueHandoff("task-1")).rejects.toThrow("Could not stop session");
+		const failed = await service.list("task-1");
+		expect(failed.sessions).toHaveLength(2);
+		expect(failed.activeSessionId).not.toBe(first.id);
+		runner.failStop = false;
+		await service.requestHandoff("task-1");
+		await service.continueHandoff("task-1");
+		const completed = await service.list("task-1");
+		expect(completed.sessions).toHaveLength(2);
+		expect(completed.activeSessionId).toBe(failed.activeSessionId);
+		expect(completed.sessions[0]?.status).toBe("handed-off");
+		expect(completed.handoff?.status).toBe("completed");
 	});
 
 	it("reserves a starting session before preparation so concurrent launches cannot duplicate it", async () => {
@@ -242,26 +252,9 @@ describe("AgentSessionService", () => {
 		expect((await service.list("task-1")).sessions).toHaveLength(1);
 	});
 
-	itRealTmux("delivers an H handoff to a real tmux agent without replacing its prompt", async () => {
+	itRealTmux("replaces a real tmux agent and retains its stopped session output", async () => {
 		const agent = join(root, "fake-agent.sh");
-		const handoffFile = join(root, "agent-handoff.md");
-		const cliCommand = getTestCliCommand().map(shellQuote).join(" ");
-		await Bun.write(
-			agent,
-			[
-				"#!/bin/sh",
-				"printf '> '",
-				"while IFS= read -r line; do",
-				'  case "$line" in',
-				"    *handoff-complete*)",
-				`      printf 'Fake agent handoff.' > ${handoffFile}`,
-				'      request=$(printf "%s" "$line" | sed -n "s/.*--request \\([^ ]*\\).*/\\1/p")',
-				`      ${cliCommand} agent-session handoff-complete TASK-1 --request "$request" --file ${shellQuote(handoffFile)}`,
-				"      exit 0 ;;",
-				"  esac",
-				"done",
-			].join("\n"),
-		);
+		await Bun.write(agent, ["#!/bin/sh", "printf 'Saved session output\\n'", "exec sleep 300"].join("\n"));
 		await chmod(agent, 0o755);
 		await upsertAgentConfiguration(core, "project", {
 			selectedPreset: "fake",
@@ -270,15 +263,19 @@ describe("AgentSessionService", () => {
 			},
 		});
 		const service = new AgentSessionService(core);
-		await service.start("task-1");
+		const first = await service.start("task-1");
 		try {
 			await service.requestHandoff("task-1");
 			for (let attempt = 0; attempt < 100; attempt++) {
 				const state = await service.list("task-1");
-				if (state.handoff?.status === "ready" || state.handoff?.status === "completed") break;
+				if (state.handoff?.status === "completed" || state.handoff?.status === "failed") break;
 				await Bun.sleep(100);
 			}
-			expect((await service.list("task-1")).handoff?.status).toMatch(/ready|completed/);
+			const state = await service.list("task-1");
+			expect(state.handoff?.status).toBe("completed");
+			expect(state.sessions.find((session) => session.id === first.id)?.status).toBe("handed-off");
+			expect(state.activeSessionId).not.toBe(first.id);
+			expect(await service.output("task-1", first.id)).toContain("Saved session output");
 		} finally {
 			await service.stop("task-1").catch(() => undefined);
 		}

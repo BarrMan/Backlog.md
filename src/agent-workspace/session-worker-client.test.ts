@@ -16,13 +16,13 @@ describe("spawnSessionWorker", () => {
 			return child;
 		}) as typeof spawn;
 
-		await spawnSessionWorker("handoff-dispatch", "TASK-1", "/project", spawnProcess);
+		await spawnSessionWorker("handoff-continue", "TASK-1", "/project", spawnProcess);
 
 		expect(command).toBe(process.execPath);
 		expect(args).toEqual([
 			join(process.cwd(), "src", "cli", "index.ts"),
 			"agent-session",
-			"handoff-dispatch",
+			"handoff-continue",
 			"TASK-1",
 			"--worker",
 		]);

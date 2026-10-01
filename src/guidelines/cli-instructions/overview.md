@@ -4,7 +4,11 @@ Backlog.md tracks committed work: what will be built, fixed, or changed.
 
 ### When to Use Backlog
 
-Create a task when work requires planning, decisions, or handoff notes. Search for an existing task first. Skip task creation for questions, exploration, and obvious mechanical edits.
+Use the CLI when the user requests task operations or this session is explicitly assigned to a Backlog task. Other work does not require task creation or loading these instructions.
+
+Create tasks with `backlog task create` and update them with `backlog task edit <id>`. Consult command help for the fields and options you need.
+
+In a task-bound agent session, read the assigned task first. Keep its description current after meaningful changes to direction, decisions, progress, verification, blockers, or next steps. Preserve requirements and useful context so a fresh session can continue from the task without a separate handover document.
 
 ### Find and Read Work
 
@@ -35,13 +39,13 @@ description: |
 - [ ] This is body content.
 ```
 
-### Required Guides
+### Optional Guides
 
-Read the matching guide before taking these actions; this overview does not replace it:
+Load a guide only when its detail is useful for the requested operation:
 
-- `backlog instructions task-creation` — before creating or splitting tasks
-- `backlog instructions task-execution` — before planning, changing status or assignee, adding notes, or implementing
-- `backlog instructions task-finalization` — before checking acceptance criteria, writing final summaries, or marking work finished
+- `backlog instructions task-creation` — creating or splitting tasks
+- `backlog instructions task-execution` — updating and executing assigned work
+- `backlog instructions task-finalization` — verifying and finishing tasks
 
 Use `backlog <command> --help` before unfamiliar operations. Help describes fields, output, and examples.
 

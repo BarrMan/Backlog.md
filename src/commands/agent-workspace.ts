@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import type { Command } from "commander";
 import {
 	initializeAgentConfiguration,
@@ -9,7 +8,6 @@ import {
 import { AgentSessionService } from "../agent-workspace/sessions.ts";
 import { isTmuxWorkspace, TmuxWorkspace, type TmuxWorkspaceView } from "../agent-workspace/tmux-workspace.ts";
 import type { AgentConfigScope, AgentConfiguration, AgentPreset } from "../agent-workspace/types.ts";
-import { spawnSessionWorker } from "../agent-workspace/worker.ts";
 import type { Core } from "../core/backlog.ts";
 import { UnifiedViewController } from "../ui/unified/controller.ts";
 import {
@@ -141,7 +139,7 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 	});
 
 	const sessions = addHelpSchema(program.command("agent-session"), {
-		reads: "Task session state, output, and handoff records",
+		reads: "Task session state and saved output",
 		optional: [{ name: "--help", type: "Boolean", description: "Show lifecycle command help" }],
 		output: "Session records as JSON; output prints persisted session output; attach connects to the session terminal",
 		examples: ["backlog agent-session list BACK-123", "backlog agent-session start BACK-123 --preset opencode"],
@@ -191,45 +189,17 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 		});
 	sessions
 		.command("handoff <taskId>")
-		.description("request a handoff from the active session")
+		.description(
+			"replace the active session using the task description; stop the previous session after successful startup",
+		)
 		.action(async (taskId) => print(await new AgentSessionService(await getCore.project()).requestHandoff(taskId)));
 	sessions
-		.command("handoff-complete <taskId>")
-		.description("record handoff content from a ready request")
-		.requiredOption("--request <id>", "handoff request ID")
-		.option("--content <text>", "handoff Markdown")
-		.option("--file <path>", "read handoff Markdown from a file")
-		.action(async (taskId, options) => {
-			if (Boolean(options.content) === Boolean(options.file))
-				throw new Error("Pass exactly one of --content or --file.");
-			const content = options.file ? await readFile(options.file, "utf8") : options.content;
-			const core = await getCore.project();
-			await new AgentSessionService(core).completeHandoff(taskId, options.request, content);
-			await spawnSessionWorker("handoff-continue", taskId, core.filesystem.rootDir);
-		});
-	sessions
 		.command("handoff-continue <taskId>")
-		.description("start the replacement session after a completed handoff")
+		.description("retry a pending or failed session replacement")
 		.option("--worker", "run as a detached continuation worker")
 		.action(async (taskId, options) => {
 			if (options.worker) await Bun.sleep(250);
 			print(await new AgentSessionService(await getCore.project()).continueHandoff(taskId));
-		});
-	sessions
-		.command("handoff-dispatch <taskId>")
-		.description("deliver a pending handoff when the agent composer is empty")
-		.option("--worker", "wait in the background for an empty agent composer")
-		.action(async (taskId, options) => {
-			const service = new AgentSessionService(await getCore.project());
-			do {
-				const state = await service.list(taskId);
-				if (state.handoff?.status !== "requested" || state.handoff.dispatchedAt) return;
-				const session = state.sessions.find((item) => item.id === state.handoff?.sessionId);
-				if (session?.status !== "running") return;
-				const result = await service.dispatchHandoff(taskId);
-				if (result === "sent" || !options.worker) return;
-				await Bun.sleep(1000);
-			} while (options.worker);
 		});
 	sessions
 		.command("recover <taskId>")

@@ -1,5 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { join } from "node:path";
+import { LockOwner } from "../file-system/lock-owner.ts";
 import { captureProcessOutput } from "../process/capture.ts";
 
 export type TmuxWorkspaceView =
@@ -46,6 +48,10 @@ const FOOTER_PANE = "@backlog_workspace_footer_pane";
 const NAV_HEIGHT = "@backlog_workspace_nav_height";
 const FOOTER_HEIGHT = "@backlog_workspace_footer_height";
 const VIEW_STATE = "@backlog_workspace_view_state";
+const VIEW_STATE_LISTENERS = "@backlog_workspace_view_state_listeners";
+const BOOTSTRAP_LOCK_STALE_MS = 2_000;
+const BOOTSTRAP_LOCK_RETRY_DELAY_MS = 25;
+const BOOTSTRAP_LOCK_RETRIES = 200;
 
 function quote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -96,6 +102,7 @@ export class TmuxWorkspace {
 	readonly sessionName: string;
 	private readonly runner: TmuxWorkspaceRunner;
 	private readonly table: string;
+	private readonly bootstrapLock = new LockOwner();
 	private static readonly bootstraps = new Map<string, Promise<void>>();
 
 	constructor(rootPath: string, runner: TmuxWorkspaceRunner = new BunTmuxWorkspaceRunner()) {
@@ -175,6 +182,10 @@ export class TmuxWorkspace {
 		await this.ensureHost(false);
 		await this.require(["tmux", "select-pane", "-t", await this.id(TASKS_PANE)], "Could not focus workspace task list");
 	}
+	async focusDetails(): Promise<void> {
+		await this.ensureHost(false);
+		await this.require(["tmux", "select-pane", "-t", await this.id(DETAILS_PANE)], "Could not focus workspace details");
+	}
 	async resizeNavigation(height: number): Promise<void> {
 		await this.ensureHost(false);
 		await this.resizeRegion(NAV_PANE, NAV_HEIGHT, height, "Could not resize workspace navigation");
@@ -215,7 +226,88 @@ export class TmuxWorkspace {
 	}
 	async updateWorkspaceState<T extends object>(update: (state: T) => T): Promise<void> {
 		await this.ensureHost(false);
-		await this.set(VIEW_STATE, JSON.stringify(update(await this.workspaceState<T>())));
+		await this.lock("state");
+		try {
+			const current = (await this.option(VIEW_STATE)) ?? "";
+			let state = {} as T;
+			try {
+				state = current ? (JSON.parse(current) as T) : state;
+			} catch {}
+			const next = JSON.stringify(update(state));
+			if (next === current) return;
+			await this.set(VIEW_STATE, next);
+			const listeners = await this.workspaceStateListeners();
+			if (listeners.length)
+				await this.require(
+					["tmux", ...listeners.flatMap((channel, index) => [...(index ? [";"] : []), "wait-for", "-S", channel])],
+					"Could not notify tmux workspace state listeners",
+				);
+		} finally {
+			await this.unlock("state");
+		}
+	}
+	async subscribeWorkspaceState<T extends object>(
+		listener: (state: T) => Promise<void> | void,
+	): Promise<() => Promise<void>> {
+		await this.ensureHost(false);
+		const channel = `${this.sessionName}-state-${process.env.TMUX_PANE ?? randomUUID()}`;
+		let closed = false;
+		let removed = false;
+		let initial = {} as T;
+		const remove = async () => {
+			if (removed) return;
+			removed = true;
+			await this.lock("state");
+			try {
+				await this.set(
+					VIEW_STATE_LISTENERS,
+					JSON.stringify((await this.workspaceStateListeners()).filter((value) => value !== channel)),
+				);
+			} finally {
+				await this.unlock("state");
+			}
+		};
+		await this.lock("state");
+		try {
+			await this.set(
+				VIEW_STATE_LISTENERS,
+				JSON.stringify([...new Set([...(await this.workspaceStateListeners()), channel])]),
+			);
+			const value = await this.option(VIEW_STATE);
+			try {
+				initial = value ? (JSON.parse(value) as T) : initial;
+			} catch {}
+		} finally {
+			await this.unlock("state");
+		}
+		try {
+			await listener(initial);
+		} catch (error) {
+			closed = true;
+			await remove();
+			throw error;
+		}
+		const wait = (async () => {
+			while (!closed) {
+				await this.require(["tmux", "wait-for", channel], "Could not wait for tmux workspace state");
+				if (!closed) {
+					const value = await this.option(VIEW_STATE);
+					let state = {} as T;
+					try {
+						state = value ? (JSON.parse(value) as T) : state;
+					} catch {}
+					await listener(state);
+				}
+			}
+		})();
+		void wait.catch(() => remove().catch(() => {}));
+		return async () => {
+			if (closed) return;
+			closed = true;
+			await remove();
+			await this.require(["tmux", "wait-for", "-S", channel], "Could not stop tmux workspace state listener");
+			await wait.catch(() => {});
+		};
 	}
 
 	async detach(): Promise<void> {
@@ -257,27 +349,17 @@ export class TmuxWorkspace {
 		}
 		const exists = await this.runner.run(["tmux", "has-session", "-t", this.sessionName]);
 		if (exists.exitCode === 0) {
-			const incomplete = await (async () => {
-				await this.lock();
-				try {
-					if (await this.ready()) {
-						if (heal) await this.heal();
-						return false;
-					}
-					if (await this.owned()) {
-						await this.rebuildTopology();
-						return false;
-					}
-					throw new Error(`tmux session ${this.sessionName} is not a Backlog workspace for this root`);
-				} finally {
-					await this.unlock();
+			await this.withBootstrapLock(async () => {
+				if (await this.ready()) {
+					if (heal) await this.heal();
+					return;
 				}
-			})();
-			if (incomplete) {
-				if (attempts === 20) throw new Error(`tmux workspace ${this.sessionName} has incomplete host metadata`);
-				await Bun.sleep(25);
-				return await this.ensureHostUnlocked(heal, attempts + 1);
-			}
+				if (await this.owned()) {
+					await this.rebuildTopology();
+					return;
+				}
+				throw new Error(`tmux session ${this.sessionName} is not a Backlog workspace for this root`);
+			});
 			return;
 		}
 		const size = terminalSize();
@@ -308,8 +390,7 @@ export class TmuxWorkspace {
 			throw this.error("Could not create tmux workspace", board);
 		}
 		const [boardWindow, boardPane] = idPair(board.stdout);
-		await this.lock();
-		try {
+		await this.withBootstrapLock(async () => {
 			const workspace = await this.command(
 				[
 					"tmux",
@@ -415,9 +496,7 @@ export class TmuxWorkspace {
 			await this.launchUi(tasksPane, "workspace-tasks");
 			await this.launchUi(detailsPane, "workspace-details");
 			await this.launchUi(footerPane, "workspace-footer");
-		} finally {
-			await this.unlock();
-		}
+		});
 	}
 
 	private async heal(): Promise<void> {
@@ -461,7 +540,8 @@ export class TmuxWorkspace {
 				parkedActive = active;
 			}
 		}
-		await this.require(["tmux", "kill-window", "-t", workspace], "Could not remove obsolete Workspace window");
+		if (await this.windowInSession(workspace))
+			await this.require(["tmux", "kill-window", "-t", workspace], "Could not remove obsolete Workspace window");
 		const created = await this.command(
 			[
 				"tmux",
@@ -510,18 +590,20 @@ export class TmuxWorkspace {
 			[FOOTER_PANE, footerPane],
 		] as const)
 			await this.set(key, value);
+		const navHeight = Number(await this.option(NAV_HEIGHT));
+		const footerHeight = Number(await this.option(FOOTER_HEIGHT));
 		await this.unset(NAV_HEIGHT);
 		await this.unset(FOOTER_HEIGHT);
 		await this.resizeRegion(
 			NAV_PANE,
 			NAV_HEIGHT,
-			Number((await this.option(NAV_HEIGHT)) ?? 3),
+			Number.isFinite(navHeight) && navHeight > 0 ? navHeight : 3,
 			"Could not resize workspace navigation",
 		);
 		await this.resizeRegion(
 			FOOTER_PANE,
 			FOOTER_HEIGHT,
-			Number((await this.option(FOOTER_HEIGHT)) ?? 1),
+			Number.isFinite(footerHeight) && footerHeight > 0 ? footerHeight : 1,
 			"Could not resize workspace footer",
 		);
 		if (parkedActive && (await this.paneExists(parkedActive))) {
@@ -629,13 +711,28 @@ export class TmuxWorkspace {
 	}
 	private async ready(): Promise<boolean> {
 		if ((await this.option(READY)) !== "1" || !(await this.owned())) return false;
+		const [boardPane, workspaceWindow, navPane, tasksPane, detailsPane, displayPane, footerPane] = await Promise.all(
+			[BOARD_PANE, WORKSPACE_WINDOW, NAV_PANE, TASKS_PANE, DETAILS_PANE, DISPLAY_PANE, FOOTER_PANE].map((key) =>
+				this.option(key),
+			),
+		);
 		return (
-			await Promise.all(
-				[BOARD_PANE, WORKSPACE_WINDOW, NAV_PANE, TASKS_PANE, DETAILS_PANE, DISPLAY_PANE, FOOTER_PANE].map((key) =>
-					this.option(key),
-				),
-			)
-		).every(Boolean);
+			!!boardPane &&
+			!!workspaceWindow &&
+			!!navPane &&
+			!!tasksPane &&
+			!!detailsPane &&
+			!!displayPane &&
+			!!footerPane &&
+			(await this.windowInSession(workspaceWindow))
+		);
+	}
+	private async windowInSession(window: string): Promise<boolean> {
+		const windows = await this.command(
+			["tmux", "list-windows", "-t", this.sessionName, "-F", "#{window_id}"],
+			"Could not inspect Workspace window",
+		);
+		return windows.stdout.split("\n").some((candidate) => candidate.trim() === window);
 	}
 	private async owned(): Promise<boolean> {
 		return (await this.option(OWNER)) === this.rootPath;
@@ -648,6 +745,14 @@ export class TmuxWorkspace {
 	private async option(key: string): Promise<string | undefined> {
 		const result = await this.runner.run(["tmux", "show-options", "-qv", "-t", this.sessionName, key]);
 		return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
+	}
+	private async workspaceStateListeners(): Promise<string[]> {
+		const value = await this.option(VIEW_STATE_LISTENERS);
+		try {
+			return value ? (JSON.parse(value) as unknown[]).filter((item): item is string => typeof item === "string") : [];
+		} catch {
+			return [];
+		}
 	}
 	private async set(key: string, value: string): Promise<void> {
 		await this.require(
@@ -662,21 +767,42 @@ export class TmuxWorkspace {
 		);
 	}
 	private async resizeRegion(paneKey: string, heightKey: string, height: number, message: string): Promise<void> {
+		if (!Number.isFinite(height) || height <= 0)
+			throw new Error("Workspace region height must be a positive finite number");
 		const rows = Math.max(1, Math.floor(height));
-		if ((await this.option(heightKey)) === String(rows)) return;
-		await this.require(["tmux", "resize-pane", "-t", await this.id(paneKey), "-y", String(rows)], message);
+		const pane = await this.id(paneKey);
+		if ((await this.option(heightKey)) === String(rows)) {
+			const current = await this.runner.run(["tmux", "display-message", "-p", "-t", pane, "#{pane_height}"]);
+			const currentRows = Number(current.stdout.trim());
+			if (Number.isFinite(currentRows) && currentRows > 0 && currentRows === rows) return;
+		}
+		await this.require(["tmux", "resize-pane", "-t", pane, "-y", String(rows)], message);
 		await this.set(heightKey, String(rows));
 	}
-	private async lock(): Promise<void> {
+	private async lock(name = "bootstrap"): Promise<void> {
 		await this.require(
-			["tmux", "wait-for", "-L", `${this.sessionName}-bootstrap`],
-			"Could not lock tmux workspace bootstrap",
+			["tmux", "wait-for", "-L", `${this.sessionName}-${name}`],
+			`Could not lock tmux workspace ${name}`,
 		);
 	}
-	private async unlock(): Promise<void> {
+	private async withBootstrapLock<T>(operation: () => Promise<T>): Promise<T> {
+		return await this.bootstrapLock.withTarget(
+			this.rootPath,
+			join(this.rootPath, "backlog", ".locks", "workspace-bootstrap"),
+			{
+				staleMs: BOOTSTRAP_LOCK_STALE_MS,
+				retries: BOOTSTRAP_LOCK_RETRIES,
+				retryDelayMs: BOOTSTRAP_LOCK_RETRY_DELAY_MS,
+			},
+			(error) =>
+				new Error(`Could not lock tmux workspace bootstrap: ${error instanceof Error ? error.message : String(error)}`),
+			operation,
+		);
+	}
+	private async unlock(name = "bootstrap"): Promise<void> {
 		await this.require(
-			["tmux", "wait-for", "-U", `${this.sessionName}-bootstrap`],
-			"Could not unlock tmux workspace bootstrap",
+			["tmux", "wait-for", "-U", `${this.sessionName}-${name}`],
+			`Could not unlock tmux workspace ${name}`,
 		);
 	}
 	private async command(args: string[], message: string) {
