@@ -5,35 +5,35 @@ import { Command } from "commander";
 import { registerAgentWorkspaceCommands } from "../commands/agent-workspace.ts";
 import { registerCleanupCommand } from "../commands/cleanup.ts";
 import { registerCompletionCommand } from "../commands/completion.ts";
-import { registerConfigCommand } from "../commands/config-command-actions.ts";
 import { registerContentCommands } from "../commands/content-commands.ts";
 import { registerDoctorCommand } from "../commands/doctor.ts";
 import { addHelpSchema } from "../commands/help-schema.ts";
-import { registerInitCommand } from "../commands/init.ts";
 import { registerInstructionsCommand } from "../commands/instructions.ts";
 import { registerMcpCommand } from "../commands/mcp.ts";
 import { loadInitializedProject } from "../commands/project-command.ts";
 import { registerBoardCommands, registerBrowserOverviewCommands } from "../commands/project-view-commands.ts";
 import { registerSearchCommand } from "../commands/search.ts";
-import {
-	normalizeCliPriority,
-	normalizeCliProjects,
-	normalizeCliStatusList,
-	normalizeCliTaskTypes,
-} from "../commands/task-filter-normalizers.ts";
 import { findLocalDuplicateTaskIds } from "../core/duplicate-task-repair.ts";
 import { isConfigValueError } from "../file-system/operations.ts";
 import { type AgentInstructionFile, addAgentInstructions, Core } from "../index.ts";
 import { formatDuplicateTaskIdWarning } from "../utils/duplicate-detection.ts";
 import type { ReadOutputOptions } from "../utils/read-output-mode.ts";
 import { getVersion } from "../utils/version.ts";
+import { registerConfigCommand } from "./features/config/register.ts";
 import { registerDraftCommands } from "./features/drafts/register.ts";
+import { registerInitCommand } from "./features/init/register.ts";
 import { registerMilestoneCommands } from "./features/milestones/register.ts";
 import {
 	type CliReadOutput,
 	isPlainRequested as isRuntimePlainRequested,
 	resolveListOutput as resolveRuntimeListOutput,
 } from "./features/read-output.ts";
+import {
+	normalizeCliPriority,
+	normalizeCliProjects,
+	normalizeCliStatusList,
+	normalizeCliTaskTypes,
+} from "./features/tasks/filter-normalizers.ts";
 import {
 	formatTaskEditError,
 	printMissingRequiredArgument,

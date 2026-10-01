@@ -193,14 +193,6 @@ export function useTaskDetailsModalActions({
 		const body = fields.commentBody.trim();
 		const author = fields.commentAuthor.trim();
 		if (!body) return;
-		if (/^\s*---\s*$/m.test(body.replace(/\r\n/g, "\n"))) {
-			setError("Comment body cannot contain standalone '---' delimiter lines.");
-			return;
-		}
-		if (author && /^\s*---\s*$/m.test(author.replace(/\r\n/g, "\n"))) {
-			setError("Comment author cannot contain standalone '---' delimiter lines.");
-			return;
-		}
 		const requestEpoch = lifecycleRef.current.epoch;
 		setCommentSaving(true);
 		setError(null);

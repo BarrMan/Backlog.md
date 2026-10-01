@@ -1,8 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { parseFrontmatter } from "../markdown/frontmatter.ts";
-import { parseDecision, parseDocument, parseMarkdown, parseTask } from "../markdown/parser.ts";
+import {
+	parseDecision,
+	parseDocument,
+	parseMarkdown,
+	parseTask,
+	UnsupportedTaskFrontmatterSchemaError,
+} from "../markdown/parser.ts";
 import { serializeDecision, serializeDocument, serializeTask } from "../markdown/serializer.ts";
-import { updateStructuredSections } from "../markdown/structured-sections.ts";
 import type { Decision, Document, Task } from "../types/index.ts";
 
 describe("Markdown Parser", () => {
@@ -49,10 +54,11 @@ This is the task description.
 	describe("parseTask", () => {
 		it("should parse a complete task", () => {
 			const content = `---
+task_schema_version: 2
 id: task-1
 title: "Fix login bug"
 status: "In Progress"
-assignee: "@developer"
+assignee: ["@developer"]
 reporter: "@manager"
 created_date: "2025-06-03"
 labels: ["bug", "frontend"]
@@ -61,6 +67,13 @@ dependencies: ["task-0"]
 modified_files: ["src/auth/login.ts", "src/web/LoginForm.tsx"]
 parent_task_id: "task-parent"
 subtasks: ["task-1.1", "task-1.2"]
+acceptance_criteria:
+  - index: 1
+    text: Login form validates correctly
+    checked: false
+  - index: 2
+    text: Error messages are displayed properly
+    checked: false
 ---
 
 ## Description
@@ -94,6 +107,7 @@ Fix the login bug that prevents users from signing in.
 
 		it("should parse a task with minimal fields", () => {
 			const content = `---
+task_schema_version: 2
 id: task-2
 title: "Simple task"
 ---
@@ -116,6 +130,7 @@ Just a basic task.`;
 
 		it("should parse unquoted created_date", () => {
 			const content = `---
+task_schema_version: 2
 id: task-5
 title: "Unquoted"
 created_date: 2025-06-08
@@ -126,20 +141,20 @@ created_date: 2025-06-08
 			expect(task.createdDate).toBe("2025-06-08");
 		});
 
-		it("should parse created_date in short format", () => {
+		it("rejects unsupported historical created_date formats", () => {
 			const content = `---
+task_schema_version: 2
 id: task-6
 title: "Short"
 created_date: 08-06-25
 ---`;
 
-			const task = parseTask(content);
-
-			expect(task.createdDate).toBe("2025-06-08");
+			expect(() => parseTask(content)).toThrow("created_date must be a date string");
 		});
 
 		it("should preserve frontmatter when title contains dollar-sign digit sequences", () => {
 			const content = `---
+task_schema_version: 2
 id: task-112.11
 title: 'Build ~$15,000 System (Magnepan 1.7x)'
 status: To Do
@@ -163,7 +178,7 @@ Task body.`;
 			expect(task.priority).toBe("high");
 		});
 
-		it("should extract acceptance criteria with checked items", () => {
+		it("treats missing schema versions as unsupported and leaves the body opaque", () => {
 			const content = `---
 id: task-4
 title: "Test with mixed criteria"
@@ -175,85 +190,46 @@ title: "Test with mixed criteria"
 - [x] Done item
 - [ ] Another todo`;
 
-			const task = parseTask(content);
-
-			expect(task.acceptanceCriteriaItems?.map((item) => item.text)).toEqual([
-				"Todo item",
-				"Done item",
-				"Another todo",
-			]);
+			expect(() => parseTask(content)).toThrow(UnsupportedTaskFrontmatterSchemaError);
 		});
 
-		it("should parse unquoted assignee names starting with @", () => {
+		it("rejects invalid YAML rather than repairing it", () => {
 			const content = `---
+task_schema_version: 2
 id: task-5
 title: "Assignee Test"
-assignee: @MrLesk
+			assignee: [unterminated
 ---
 
 Test task.`;
 
-			const task = parseTask(content);
-
-			expect(task.assignee).toEqual(["@MrLesk"]);
+			expect(() => parseTask(content)).toThrow();
 		});
 
-		it("should parse unquoted reporter names starting with @", () => {
+		it("rejects retired scalar assignees", () => {
 			const content = `---
-id: task-6
-title: "Reporter Test"
-assignee: []
-reporter: @MrLesk
-created_date: 2025-06-08
+task_schema_version: 2
+id: task-5
+title: "Assignee Test"
+assignee: "@MrLesk"
 ---
+`;
 
-Test task with reporter.`;
-
-			const task = parseTask(content);
-
-			expect(task.reporter).toBe("@MrLesk");
-		});
-
-		it("should parse inline assignee lists with unquoted @ handles", () => {
-			const content = `---
-id: task-7
-title: "Inline Assignees"
-assignee: [@alice, "@bob"]
-status: To Do
-created_date: 2025-06-08
----
-
-Test task with inline list.`;
-
-			const task = parseTask(content);
-
-			expect(task.assignee).toEqual(["@alice", "@bob"]);
-		});
-
-		it("should escape backslashes in inline @ lists", () => {
-			const content = `---
-id: task-8
-title: "Backslash Inline Assignees"
-assignee: [@domain\\\\user]
-status: To Do
-created_date: 2025-06-08
----
-
-Test task with inline list containing backslash.`;
-
-			const task = parseTask(content);
-
-			expect(task.assignee).toEqual(["@domain\\\\user"]);
+			expect(() => parseTask(content)).toThrow("assignee must be a list");
 		});
 	});
 
 	describe("parseDecision", () => {
 		it("should parse a decision log", () => {
 			const content = `---
+decision_schema_version: 1
 id: decision-1
 title: "Use TypeScript for backend"
 date: "2025-06-03"
 status: "accepted"
+context: We need to choose a language for the backend.
+decision: We will use TypeScript for better type safety.
+consequences: Better development experience but steeper learning curve.
 ---
 
 ## Context
@@ -280,10 +256,15 @@ Better development experience but steeper learning curve.`;
 
 		it("should parse decision log with alternatives", () => {
 			const content = `---
+decision_schema_version: 1
 id: decision-2
 title: "Choose database"
 date: "2025-06-03"
 status: "proposed"
+context: Need a database solution.
+decision: Use PostgreSQL.
+consequences: Good performance and reliability.
+alternatives: Considered MongoDB and MySQL.
 ---
 
 ## Context
@@ -309,10 +290,12 @@ Considered MongoDB and MySQL.`;
 
 		it("should handle missing sections", () => {
 			const content = `---
+decision_schema_version: 1
 id: decision-3
 title: "Minimal decision"
 date: "2025-06-03"
 status: "proposed"
+context: Some context.
 ---
 
 ## Context
@@ -367,7 +350,7 @@ describe("malformed frontmatter", () => {
 describe("frontmatter parse cache", () => {
 	// gray-matter hands the same data object to every caller that parses identical content, so a
 	// caller mutating its own result used to change what later parses of that content returned.
-	const content = "---\nid: task-608\ntitle: Cache probe\nlabels: [cache]\n---\n\nBody text\n";
+	const content = "---\ntask_schema_version: 2\nid: task-608\ntitle: Cache probe\nlabels: [cache]\n---\n\nBody text\n";
 
 	it("gives each parseFrontmatter call an independent result", () => {
 		const first = parseFrontmatter(content);
@@ -377,7 +360,7 @@ describe("frontmatter parse cache", () => {
 		first.content = "mutated content";
 
 		const second = parseFrontmatter(content);
-		expect(second.data).toEqual({ id: "task-608", title: "Cache probe", labels: ["cache"] });
+		expect(second.data).toEqual({ task_schema_version: 2, id: "task-608", title: "Cache probe", labels: ["cache"] });
 		expect(second.content.trim()).toBe("Body text");
 	});
 
@@ -424,8 +407,9 @@ describe("Markdown Serializer", () => {
 			expect(result).toContain("modified_files:");
 			expect(result).toContain("- src/auth/login.ts");
 			expect(result).toContain("- src/web/LoginForm.tsx");
-			expect(result).toContain("## Description");
-			expect(result).toContain("This is a test task description.");
+			expect(result).toContain("task_schema_version: 2");
+			expect(result).toContain("description: This is a test task description.");
+			expect(result).not.toContain("## Description");
 		});
 
 		it("should serialize task with subtasks", () => {
@@ -514,6 +498,7 @@ describe("Markdown Serializer", () => {
 
 			const frontmatter = parseFrontmatter(result).data;
 			expect(Object.keys(frontmatter)).toEqual([
+				"task_schema_version",
 				"id",
 				"title",
 				"status",
@@ -558,7 +543,7 @@ describe("Markdown Serializer", () => {
 			expect(emptyOptionals).not.toMatch(/(?:references|documentation|modified_files|subtasks):/);
 		});
 
-		it("removes acceptance criteria section when list becomes empty", () => {
+		it("serializes empty acceptance criteria in frontmatter", () => {
 			const task: Task = {
 				id: "task-clean",
 				title: "Cleanup Task",
@@ -573,13 +558,11 @@ describe("Markdown Serializer", () => {
 
 			const result = serializeTask(task);
 
-			expect(result).not.toContain("## Acceptance Criteria");
-			expect(result).not.toContain("<!-- AC:BEGIN -->");
-			expect(result).toContain("## Description");
-			expect(result).toContain("Some details");
+			expect(result).toContain("acceptance_criteria: []");
+			expect(result).toContain("description: Some details");
 		});
 
-		it("removes an empty marked acceptance criteria section without disturbing surrounding sections", () => {
+		it("preserves opaque body markers when acceptance criteria becomes empty", () => {
 			const rawContent = [
 				"## Description",
 				"",
@@ -617,14 +600,14 @@ describe("Markdown Serializer", () => {
 
 			const result = serializeTask(task);
 
-			expect(result).not.toContain("## Acceptance Criteria");
-			expect(result).not.toContain("<!-- AC:BEGIN -->");
-			expect(result).toContain("<!-- SECTION:DESCRIPTION:END -->\n\n## Implementation Plan");
+			expect(result).toContain("acceptance_criteria: []");
+			expect(result).toContain("## Acceptance Criteria\n<!-- AC:BEGIN -->\n<!-- AC:END -->");
+			expect(result).toContain("<!-- SECTION:DESCRIPTION:END -->\n\n## Acceptance Criteria");
 			expect(result).toContain("## Custom Details\n\nKeep this exactly.");
 			expect(result).not.toMatch(/\n{3,}/);
 		});
 
-		it("removes an empty marked definition of done section without disturbing surrounding sections", () => {
+		it("preserves opaque body markers when definition of done becomes empty", () => {
 			const rawContent = [
 				"## Description",
 				"",
@@ -668,14 +651,14 @@ describe("Markdown Serializer", () => {
 
 			const result = serializeTask(task);
 
-			expect(result).not.toContain("## Definition of Done");
-			expect(result).not.toContain("<!-- DOD:BEGIN -->");
-			expect(result).toContain("<!-- AC:END -->\n\n## Implementation Plan");
+			expect(result).toContain("definition_of_done: []");
+			expect(result).toContain("## Definition of Done\n<!-- DOD:BEGIN -->\n<!-- DOD:END -->");
+			expect(result).toContain("<!-- AC:END -->\n\n## Definition of Done");
 			expect(result).toContain("## Custom Details\n\nKeep this exactly.");
 			expect(result).not.toMatch(/\n{3,}/);
 		});
 
-		it("keeps all structured sections in canonical order when the plan changes", () => {
+		it("keeps opaque body sections unchanged when the plan changes", () => {
 			const rawContent = [
 				"## Description",
 				"",
@@ -749,67 +732,12 @@ describe("Markdown Serializer", () => {
 			].map((heading) => result.indexOf(heading));
 
 			expect(headings).toEqual([...headings].sort((left, right) => left - right));
-			expect(result).toContain("New plan");
-			expect(result).not.toContain("Old plan");
+			expect(result).toContain("implementation_plan: New plan");
+			expect(result).toContain("Old plan");
 			expect(result).not.toMatch(/\n{3,}/);
 		});
 
-		it("uses Definition of Done in structured-section fallback ordering without changing no-DoD ordering", () => {
-			const acceptanceCriteria = [
-				"## Acceptance Criteria",
-				"<!-- AC:BEGIN -->",
-				"- [ ] #1 Accepted",
-				"<!-- AC:END -->",
-			].join("\n");
-			const definitionOfDone = [
-				"## Definition of Done",
-				"<!-- DOD:BEGIN -->",
-				"- [ ] #1 Verified",
-				"<!-- DOD:END -->",
-			].join("\n");
-			const comments = [
-				"## Comments",
-				"",
-				"<!-- COMMENTS:BEGIN -->",
-				"created: 2026-07-12 12:00",
-				"---",
-				"Comment",
-				"---",
-				"<!-- COMMENTS:END -->",
-			].join("\n");
-			const withDod = updateStructuredSections(`${acceptanceCriteria}\n\n${definitionOfDone}\n\n${comments}`, {
-				implementationNotes: "Notes",
-				finalSummary: "Summary",
-			});
-			const withDodHeadings = [
-				"## Acceptance Criteria",
-				"## Definition of Done",
-				"## Implementation Notes",
-				"## Comments",
-				"## Final Summary",
-			].map((heading) => withDod.indexOf(heading));
-			expect(withDodHeadings).toEqual([...withDodHeadings].sort((left, right) => left - right));
-
-			const finalAfterDod = updateStructuredSections(`${acceptanceCriteria}\n\n${definitionOfDone}`, {
-				finalSummary: "Summary",
-			});
-			expect(finalAfterDod.indexOf("## Final Summary")).toBeGreaterThan(finalAfterDod.indexOf("## Definition of Done"));
-
-			const withoutDod = updateStructuredSections(`${acceptanceCriteria}\n\n${comments}`, {
-				implementationNotes: "Notes",
-				finalSummary: "Summary",
-			});
-			const withoutDodHeadings = [
-				"## Acceptance Criteria",
-				"## Implementation Notes",
-				"## Comments",
-				"## Final Summary",
-			].map((heading) => withoutDod.indexOf(heading));
-			expect(withoutDodHeadings).toEqual([...withoutDodHeadings].sort((left, right) => left - right));
-			expect(withoutDod).not.toContain("## Definition of Done");
-		});
-
-		it("serializes acceptance criteria when structured items exist", () => {
+		it("serializes acceptance criteria in frontmatter when structured items exist", () => {
 			const task: Task = {
 				id: "task-freeform",
 				title: "Legacy Criteria Task",
@@ -824,8 +752,9 @@ describe("Markdown Serializer", () => {
 
 			const result = serializeTask(task);
 
-			expect(result).toContain("## Acceptance Criteria");
-			expect(result).toContain("- [ ] #1 Criterion A");
+			expect(result).toContain("acceptance_criteria:");
+			expect(result).toContain("text: Criterion A");
+			expect(result).not.toContain("## Acceptance Criteria");
 		});
 	});
 
@@ -845,10 +774,9 @@ describe("Markdown Serializer", () => {
 			const result = serializeDecision(decision);
 
 			expect(result).toContain("id: decision-1");
-			expect(result).toContain("## Context");
-			expect(result).toContain("We need type safety");
-			expect(result).toContain("## Decision");
-			expect(result).toContain("Use TypeScript");
+			expect(result).toContain("decision_schema_version: 1");
+			expect(result).toContain("context: We need type safety");
+			expect(result).toContain("decision: Use TypeScript");
 		});
 
 		it("should serialize decision log with alternatives", () => {
@@ -866,8 +794,7 @@ describe("Markdown Serializer", () => {
 
 			const result = serializeDecision(decision);
 
-			expect(result).toContain("## Alternatives");
-			expect(result).toContain("Considered MongoDB");
+			expect(result).toContain("alternatives: Considered MongoDB");
 		});
 	});
 

@@ -11,12 +11,6 @@ export function printMissingRequiredArgument(argumentName: string): void {
 
 export function formatTaskEditError(error: unknown, taskId: string, commandKind = "task"): string {
 	const message = error instanceof Error ? error.message : String(error);
-	if (
-		message.startsWith("Malformed Acceptance Criteria markers:") ||
-		message.startsWith("Malformed Definition of Done markers:")
-	) {
-		return `${message}\nThe edit was not applied. Run 'backlog ${commandKind} view ${taskId} --plain' to locate the ${commandKind} file, repair or remove the malformed marker block in that Markdown file, then rerun the edit.`;
-	}
 	if (message.startsWith("Invalid index:"))
 		return `${message} Try 'backlog ${commandKind} edit ${taskId} --help' for index options.`;
 	if (

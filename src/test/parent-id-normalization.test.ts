@@ -5,11 +5,11 @@ import { $ } from "bun";
 import { Core } from "../index.ts";
 import type { Task } from "../types/index.ts";
 import { LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 async function initGitRepo(dir: string) {
 	await $`git init -b main`.cwd(dir).quiet();
@@ -41,7 +41,7 @@ describe("CLI parent task id normalization", () => {
 		};
 		await core.createTask(parent, true);
 
-		await $`bun run ${CLI_PATH} task create Child --parent 4`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} task create Child --parent 4`.cwd(TEST_DIR).quiet();
 
 		const child = await core.filesystem.loadTask("task-4.1");
 		expect(child?.parentTaskId).toBe("TASK-4");
@@ -77,7 +77,7 @@ describe("CLI parent task id normalization", () => {
 		await $`git checkout main`.cwd(TEST_DIR).quiet();
 		await core.git.fetch();
 
-		const createResult = await $`bun run ${CLI_PATH} task create Child --parent task-1`.cwd(TEST_DIR).nothrow().quiet();
+		const createResult = await $`${CLI_COMMAND} task create Child --parent task-1`.cwd(TEST_DIR).nothrow().quiet();
 
 		expect(createResult.exitCode).toBe(1);
 		expect(createResult.stderr.toString()).toContain("Parent task TASK-1 not found.");
@@ -89,9 +89,9 @@ describe("CLI parent task id normalization", () => {
 	it("rejects milestone IDs as parent task IDs when creating subtasks", async () => {
 		const core = new Core(TEST_DIR);
 		await initializeTestProject(core, "Parent Validation Test", true);
-		await $`bun run ${CLI_PATH} milestone add "Release"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} milestone add Release`.cwd(TEST_DIR).quiet();
 
-		const result = await $`bun run ${CLI_PATH} task create Child --parent m-0`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} task create Child --parent m-0`.cwd(TEST_DIR).nothrow().quiet();
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr.toString()).toContain("Parent task M-0 not found");

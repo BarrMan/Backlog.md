@@ -5,7 +5,7 @@ import { FileSystem } from "../file-system/operations.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
 import { createServerFixture } from "./server-fixture.ts";
-import { createUniqueTestDir, retry, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
 
 describe("task collection query endpoint", () => {
 	let testDir: string;
@@ -88,6 +88,8 @@ describe("task collection query endpoint", () => {
 		expect(((await (await request("/api/tasks")).json()) as Task[]).find((task) => task.id === "BACK-002")?.title).toBe(
 			"BACK-002",
 		);
+		if (!fixture) throw new Error("Server fixture was not initialized");
+		const publication = fixture.awaitNextPublication("tasks-updated");
 		await new FileSystem(testDir).saveTask({
 			id: "BACK-002",
 			title: "Changed on disk",
@@ -98,10 +100,9 @@ describe("task collection query endpoint", () => {
 			createdDate: "2026-01-01",
 			parentTaskId: "BACK-001.02",
 		});
-		await retry(async () => {
-			const task = ((await (await request("/api/tasks")).json()) as Task[]).find((item) => item.id === "BACK-002");
-			if (task?.title !== "Changed on disk") throw new Error("prepared graph has not reconciled the file change");
-		});
+		await withTimeout(publication, "filesystem task reconciliation", 3_000);
+		const task = ((await (await request("/api/tasks")).json()) as Task[]).find((item) => item.id === "BACK-002");
+		expect(task?.title).toBe("Changed on disk");
 	});
 
 	it("pins request-local reads and mutations while the root config changes directories", async () => {

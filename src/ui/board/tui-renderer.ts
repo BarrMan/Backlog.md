@@ -3,17 +3,17 @@ import { type BoardLayout, generateKanbanBoardWithMetadata, generateMilestoneGro
 import { type Core, createRuntimeCore } from "../../core/backlog.ts";
 import type { Milestone, Task, TaskCreateInput } from "../../types/index.ts";
 import { openTaskComposer, type TaskComposerOptions } from "../components/task-composer.ts";
-import { Board } from "./board.ts";
 import { BoardActions } from "./board-actions.ts";
-import { BoardDialogs } from "./board-dialogs.ts";
 import { BoardInteraction } from "./board-interaction.ts";
-import { BoardView } from "./board-view.ts";
+import { BoardDialogs } from "./components/board-dialogs.ts";
+import { BoardView } from "./components/board-view.ts";
+import { FilterBar } from "./components/filter-bar.ts";
+import { Footer } from "./components/footer.ts";
+import { BoardTaskPopup } from "./components/task-popup.ts";
 import { type BoardSessionConfigurationOptions, normalizeBoardSessionConfiguration } from "./configuration.ts";
-import { FilterBar } from "./filter-bar.ts";
-import { Footer } from "./footer.ts";
-import { areBoardTaskCollectionsEqual } from "./navigation.ts";
+import { Board } from "./models/board.ts";
+import { areBoardTaskCollectionsEqual } from "./policies/navigation.ts";
 import { type BoardScreenSession, createBoardScreenSession, removeBoardScreenListener } from "./screen.ts";
-import { BoardTaskPopup } from "./task-popup.ts";
 
 export type BoardTuiOptions = {
 	core?: Core;
@@ -82,8 +82,14 @@ export class TUIRenderer {
 	}
 
 	async run(): Promise<void> {
-		if (!process.stdout.isTTY) return this.renderText();
-		if (this.statuses.length === 0) return console.log("No tasks available for the Kanban board.");
+		if (!process.stdout.isTTY) {
+			this.renderText();
+			return;
+		}
+		if (this.statuses.length === 0) {
+			console.log("No tasks available for the Kanban board.");
+			return;
+		}
 		try {
 			await new Promise<void>((resolve) => {
 				this.resolve = resolve;
@@ -161,6 +167,11 @@ export class TUIRenderer {
 			onClosed: () => undefined,
 		});
 		this.closeListener = this.dialogs.onClosed(() => this.popup?.onModalClosed());
+		const onSwitchView = this.options?.viewSwitcher
+			? async () => {
+					await this.options?.viewSwitcher?.switchView();
+				}
+			: undefined;
 		this.interaction = new BoardInteraction({
 			screen,
 			board: this.board,
@@ -175,18 +186,16 @@ export class TUIRenderer {
 			onTaskSelect: this.options?.onTaskSelect,
 			onTabPress: this.options?.onTabPress,
 			onWorkspacePress: this.options?.onWorkspacePress,
-			onSwitchView: this.options?.viewSwitcher
-				? async () => {
-						await this.options?.viewSwitcher?.switchView();
-					}
-				: undefined,
+			onSwitchView,
 		});
 		this.interaction.attach();
 		screen.on("resize", this.resize);
 		this.options?.subscribeUpdates?.((tasks, statuses) => this.update(tasks, statuses));
 		this.render();
 		this.view.focus(0, 0);
-		if (this.options?.startupWarning) this.footer.showTransient(` {yellow-fg}${this.options.startupWarning}{/}`, 15000);
+		if (this.options?.startupWarning) {
+			this.footer.showTransient(` {yellow-fg}${this.options.startupWarning}{/}`, 15000);
+		}
 		screen.render();
 		this.options?.onReady?.();
 	}
@@ -200,8 +209,9 @@ export class TUIRenderer {
 			!this.session ||
 			!this.dialogs ||
 			!this.interaction
-		)
+		) {
 			return;
+		}
 		this.rendering = true;
 		try {
 			this.filters.render({ modalOpen: this.dialogs.isOpen });
@@ -220,7 +230,9 @@ export class TUIRenderer {
 		this.session.screen.render();
 	}
 	private layout(): void {
-		if (!this.session) return;
+		if (!this.session) {
+			return;
+		}
 
 		const height = this.filters?.height ?? 0;
 		this.session.boardArea.top = height;
@@ -236,8 +248,9 @@ export class TUIRenderer {
 			this.disposed ||
 			(areBoardTaskCollectionsEqual(this.board.tasksSnapshot, tasks) &&
 				(statuses.length === 0 || statuses.every((status, index) => status === this.board.statusesSnapshot[index])))
-		)
+		) {
 			return;
+		}
 		this.board.update(tasks, statuses.length ? statuses : this.board.statusesSnapshot);
 		this.refreshFilterChoices(tasks);
 		if (this.dialogs?.defersUpdates) {
@@ -245,7 +258,9 @@ export class TUIRenderer {
 			return;
 		}
 		this.render();
-		if (this.popup?.isOpen) void this.popup.sync();
+		if (this.popup?.isOpen) {
+			void this.popup.sync();
+		}
 	}
 
 	private refreshFilterChoices(tasks: readonly Task[]): void {
@@ -258,36 +273,48 @@ export class TUIRenderer {
 		this.filters?.refreshChoices([...labels], [...milestones]);
 	}
 	private async getCore(): Promise<Core> {
-		if (this.options?.core) return this.options.core;
-		if (!this.fallbackCore) this.fallbackCore = await createRuntimeCore();
+		if (this.options?.core) {
+			return this.options.core;
+		}
+		if (!this.fallbackCore) {
+			this.fallbackCore = await createRuntimeCore();
+		}
 		return this.fallbackCore;
 	}
 
 	private renderText(): void {
 		const visible = this.options?.hideEmptyColumns ? this.board.lanes.map((lane) => lane.status) : this.statuses;
 		const name = this.options?.projectName?.trim() || "Project";
-		console.log(
-			this.options?.milestoneMode
-				? generateMilestoneGroupedBoard(this.initialTasks, visible, this.options.milestoneEntities ?? [], name)
-				: generateKanbanBoardWithMetadata(this.initialTasks, visible, name),
-		);
+		if (this.options?.milestoneMode) {
+			console.log(
+				generateMilestoneGroupedBoard(this.initialTasks, visible, this.options.milestoneEntities ?? [], name),
+			);
+			return;
+		}
+		console.log(generateKanbanBoardWithMetadata(this.initialTasks, visible, name));
 	}
 	private close(handoff?: () => Promise<unknown>): Promise<void> {
-		this.closing ??= (async () => {
-			await this.dialogs?.settle();
-			await this.actions.settle();
-			await this.dispose();
-			await handoff?.();
-			this.resolve?.();
-		})();
+		if (!this.closing) {
+			this.closing = (async () => {
+				await this.dialogs?.settle();
+				await this.actions.settle();
+				await this.dispose();
+				await handoff?.();
+				this.resolve?.();
+			})();
+		}
 		return this.closing;
 	}
 
 	private async dispose(): Promise<void> {
-		if (this.disposed) return;
+		if (this.disposed) {
+			return;
+		}
 		this.disposed = true;
 		const session = this.session;
-		if (!session) return;
+		if (!session) {
+			return;
+		}
 		removeBoardScreenListener(session.screen, "resize", this.resize);
 		this.interaction?.detach();
 		this.closeListener?.();
@@ -296,7 +323,9 @@ export class TUIRenderer {
 		this.footer?.destroy();
 		this.view?.destroy();
 		session.container.destroy();
-		if (session.ownsScreen) session.screen.destroy();
+		if (session.ownsScreen) {
+			session.screen.destroy();
+		}
 		this.session = null;
 	}
 }

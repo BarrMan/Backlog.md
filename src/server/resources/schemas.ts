@@ -1,4 +1,5 @@
 import { t } from "elysia";
+import { TASK_SOURCE } from "../../types/index.ts";
 
 export const errorSchema = t.Object({
 	error: t.String(),
@@ -75,7 +76,12 @@ const taskProperties = {
 	contentRevision: t.Optional(t.String()),
 	lastModified: t.Optional(t.Union([t.String(), t.Date()])),
 	source: t.Optional(
-		t.Union([t.Literal("local"), t.Literal("remote"), t.Literal("completed"), t.Literal("local-branch")]),
+		t.Union([
+			t.Literal(TASK_SOURCE.LOCAL),
+			t.Literal(TASK_SOURCE.REMOTE),
+			t.Literal(TASK_SOURCE.COMPLETED),
+			t.Literal(TASK_SOURCE.LOCAL_BRANCH),
+		]),
 	),
 	onStatusChange: t.Optional(t.String()),
 	agentConfiguration: t.Optional(agentConfigurationSchema),
@@ -109,7 +115,12 @@ export const taskSummarySchema = t.Object({
 	branch: t.Optional(t.String()),
 	ordinal: t.Optional(t.Number()),
 	source: t.Optional(
-		t.Union([t.Literal("local"), t.Literal("remote"), t.Literal("completed"), t.Literal("local-branch")]),
+		t.Union([
+			t.Literal(TASK_SOURCE.LOCAL),
+			t.Literal(TASK_SOURCE.REMOTE),
+			t.Literal(TASK_SOURCE.COMPLETED),
+			t.Literal(TASK_SOURCE.LOCAL_BRANCH),
+		]),
 	),
 	acceptanceCriteriaCount: t.Number(),
 	checkedAcceptanceCriteriaCount: t.Number(),
@@ -177,6 +188,14 @@ export const decisionSchema = t.Object({
 	rawContent: t.String(),
 	alternatives: t.Optional(t.String()),
 	path: t.Optional(t.String()),
+});
+
+export const decisionUpdateSchema = t.Object({
+	title: t.String(),
+	context: t.String(),
+	decision: t.String(),
+	consequences: t.String(),
+	alternatives: t.Optional(t.String()),
 });
 
 export const decisionListItemSchema = t.Omit(decisionSchema, ["rawContent", "path"]);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { BranchTaskLoader } from "../core/task-loader.ts";
 import type { GitBranchTip, GitOperations } from "../git/operations.ts";
+import { serializeTask } from "../markdown/serializer.ts";
 import type { BacklogConfig } from "../types/index.ts";
 
 const config: BacklogConfig = {
@@ -16,17 +17,16 @@ const config: BacklogConfig = {
 };
 
 function taskMarkdown(id: string, title: string): string {
-	return `---
-id: ${id}
-title: ${title}
-status: To Do
-assignee: []
-created_date: 2026-08-10
-labels: []
-dependencies: []
----
-
-Cached branch task`;
+	return serializeTask({
+		id,
+		title,
+		status: "To Do",
+		assignee: [],
+		createdDate: "2026-08-10",
+		labels: [],
+		dependencies: [],
+		rawContent: "Cached branch task",
+	});
 }
 
 describe("branch task loading", () => {

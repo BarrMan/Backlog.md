@@ -907,7 +907,7 @@ describe("Core", () => {
 			expect(loadedTask?.status).toBe("In Progress");
 		});
 
-		it("should preserve description text when saving without header markers", async () => {
+		it("stores description in frontmatter without adding body markers", async () => {
 			const taskNoHeader: Task = {
 				...sampleTask,
 				id: "task-2",
@@ -918,21 +918,21 @@ describe("Core", () => {
 			const loaded = await core.filesystem.loadTask("task-2");
 			expect(loaded?.description).toBe("Just text");
 			const body = await core.getTaskContent("task-2");
-			const matches = (body?.match(/## Description/g) ?? []).length;
-			expect(matches).toBe(1);
+			expect(body).toContain("description: Just text");
+			expect(body).not.toContain("## Description");
 		});
 
-		it("should not duplicate description header in saved content", async () => {
+		it("keeps body content opaque when description resembles a heading", async () => {
 			const taskWithHeader: Task = {
 				...sampleTask,
 				id: "task-3",
 				description: "Existing",
+				rawContent: "## Description\n\nFree-form note",
 			};
 
 			await core.createTask(taskWithHeader, false);
 			const body = await core.getTaskContent("task-3");
-			const matches = (body?.match(/## Description/g) ?? []).length;
-			expect(matches).toBe(1);
+			expect(body).toEndWith("## Description\n\nFree-form note");
 		});
 
 		it("should handle task creation without auto-commit when git fails", async () => {
@@ -947,17 +947,7 @@ describe("Core", () => {
 			expect(loadedTask?.id).toBe("TASK-1");
 		});
 
-		it("should normalize assignee for string and array inputs", async () => {
-			const stringTask = {
-				...sampleTask,
-				id: "task-2",
-				title: "String Assignee",
-				assignee: "@alice",
-			} as unknown as Task;
-			await core.createTask(stringTask, false);
-			const loadedString = await core.filesystem.loadTask("task-2");
-			expect(loadedString?.assignee).toEqual(["@alice"]);
-
+		it("should preserve assignee arrays when creating tasks", async () => {
 			const arrayTask: Task = {
 				...sampleTask,
 				id: "task-3",
@@ -969,7 +959,7 @@ describe("Core", () => {
 			expect(loadedArray?.assignee).toEqual(["@bob"]);
 		});
 
-		it("should normalize assignee when updating tasks", async () => {
+		it("should replace assignee arrays when updating tasks", async () => {
 			await core.createTask(sampleTask, false);
 
 			await core.updateTaskFromInput("task-1", { assignee: ["@carol"] }, false);

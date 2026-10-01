@@ -99,7 +99,6 @@ function sanitizeComment(value: TaskCommentInput | string): TaskCommentInput | u
 		.replace(/\r\n/g, "\n")
 		.trim();
 	if (!body) return undefined;
-	assertSafeCommentValue(body, "Comment body");
 	const author =
 		typeof value === "string"
 			? undefined
@@ -107,13 +106,5 @@ function sanitizeComment(value: TaskCommentInput | string): TaskCommentInput | u
 					.replace(/\s+/g, " ")
 					.trim();
 	const createdDate = typeof value === "string" ? undefined : String(value.createdDate ?? "").trim();
-	if (author) assertSafeCommentValue(author, "Comment author");
-	if (createdDate) assertSafeCommentValue(createdDate, "Comment created date");
 	return { body, ...(author && { author }), ...(createdDate && { createdDate }) };
-}
-
-function assertSafeCommentValue(value: string, name: string): void {
-	if (/<!--\s*COMMENTS?:/i.test(value)) throw new Error(`${name} cannot contain Backlog comment markers.`);
-	if (/^\s*---\s*$/m.test(value.replace(/\r\n/g, "\n")))
-		throw new Error(`${name} cannot contain standalone '---' delimiter lines.`);
 }

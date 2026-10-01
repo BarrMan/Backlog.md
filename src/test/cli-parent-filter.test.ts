@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import { LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("CLI parent task filtering", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-parent-filter");
@@ -89,7 +89,7 @@ describe("CLI parent task filtering", () => {
 	});
 
 	it("should filter tasks by parent with full task ID", async () => {
-		const result = await $`bun ${cliPath} task list --parent task-1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --parent task-1 --plain`.cwd(TEST_DIR).quiet();
 
 		const exitCode = result.exitCode;
 
@@ -108,7 +108,7 @@ describe("CLI parent task filtering", () => {
 	});
 
 	it("should filter tasks by parent with short task ID", async () => {
-		const result = await $`bun ${cliPath} task list --parent 1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --parent 1 --plain`.cwd(TEST_DIR).quiet();
 
 		const exitCode = result.exitCode;
 
@@ -133,17 +133,17 @@ describe("CLI parent task filtering", () => {
 		await core.editTask("task-1", { status: "Done" }, false);
 		expect(await core.completeTask("task-1", false)).toBe(true);
 
-		const view = await $`bun ${cliPath} task view 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const view = await $`${cliCommand} task view 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
 		expect(view.exitCode).toBe(0);
 		expect(view.stdout.toString()).toContain("Parent task");
 
-		const filtered = await $`bun ${cliPath} task list --parent 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const filtered = await $`${cliCommand} task list --parent 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
 		expect(filtered.exitCode).toBe(0);
 		expect(filtered.stdout.toString()).toContain("TASK-1.1 - Child task 1");
 		expect(filtered.stdout.toString()).toContain("TASK-1.2 - Child task 2");
 		expect(filtered.stdout.toString()).not.toContain("TASK-2 - Standalone task");
 
-		const created = await $`bun ${cliPath} task create ${"Late child"} --parent 1`.cwd(TEST_DIR).nothrow().quiet();
+		const created = await $`${cliCommand} task create ${"Late child"} --parent 1`.cwd(TEST_DIR).nothrow().quiet();
 		expect(created.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("task-1.3"))?.parentTaskId).toBe("TASK-1");
 	});
@@ -156,7 +156,7 @@ describe("CLI parent task filtering", () => {
 			await Bun.file(join(tasksDir, "task-1 - Parent-task.md")).text(),
 		);
 
-		const result = await $`bun ${cliPath} task list --parent 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${cliCommand} task list --parent 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
 
 		expect(result.exitCode).not.toBe(0);
 		const output = `${result.stdout.toString()}${result.stderr.toString()}`;
@@ -166,7 +166,7 @@ describe("CLI parent task filtering", () => {
 	});
 
 	it("should show error for non-existent parent task", async () => {
-		const result = await $`bun ${cliPath} task list --parent task-999 --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${cliCommand} task list --parent task-999 --plain`.cwd(TEST_DIR).nothrow().quiet();
 
 		const exitCode = result.exitCode;
 
@@ -176,7 +176,7 @@ describe("CLI parent task filtering", () => {
 	});
 
 	it("should show message when parent has no children", async () => {
-		const result = await $`bun ${cliPath} task list --parent task-2 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --parent task-2 --plain`.cwd(TEST_DIR).quiet();
 
 		const exitCode = result.exitCode;
 
@@ -190,7 +190,7 @@ describe("CLI parent task filtering", () => {
 	});
 
 	it("should work with -p shorthand flag", async () => {
-		const result = await $`bun ${cliPath} task list -p task-1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list -p task-1 --plain`.cwd(TEST_DIR).quiet();
 
 		const exitCode = result.exitCode;
 
@@ -206,7 +206,7 @@ describe("CLI parent task filtering", () => {
 	});
 
 	it("should combine parent filter with status filter", async () => {
-		const result = await $`bun ${cliPath} task list --parent task-1 --status "To Do" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --parent task-1 --status "To Do" --plain`.cwd(TEST_DIR).quiet();
 
 		const exitCode = result.exitCode;
 

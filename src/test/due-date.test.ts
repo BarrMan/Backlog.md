@@ -3,11 +3,11 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
+import { parseFrontmatter } from "../markdown/frontmatter.ts";
 import { parseMilestone, parseTask } from "../markdown/parser.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
 import { normalizeDueDate } from "../utils/due-date.ts";
-import { pinTimeZone } from "./pin-timezone.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 describe("date-only due date model", () => {
@@ -63,6 +63,7 @@ describe("date-only due date model", () => {
 		expect(parseTask(serialized).dueDate).toBe("2026-08-10");
 
 		const milestone = parseMilestone(`---
+milestone_schema_version: 1
 id: m-1
 title: Release
 due_date: 2026-08-10
@@ -77,6 +78,7 @@ Release milestone
 
 	it("reads a stored due date that still carries a time as its day", () => {
 		const task = parseTask(`---
+task_schema_version: 2
 id: TASK-1
 title: Legacy due date
 status: To Do
@@ -90,6 +92,7 @@ dependencies: []
 		expect(task.dueDate).toBe("2026-08-10");
 
 		const milestone = parseMilestone(`---
+milestone_schema_version: 1
 id: m-1
 title: Legacy release
 due_date: 2026-08-10T16:30+02:00
@@ -100,6 +103,7 @@ due_date: 2026-08-10T16:30+02:00
 
 	it("reads an unquoted due_date as a string rather than a YAML date", () => {
 		const task = parseTask(`---
+task_schema_version: 2
 id: TASK-1
 title: Unquoted due date
 status: To Do
@@ -116,6 +120,7 @@ dependencies: []
 	it("treats YAML null due_date values as absent", () => {
 		for (const value of ["null", "NULL", "~"]) {
 			const task = parseTask(`---
+task_schema_version: 2
 id: TASK-1
 title: No due date
 status: To Do
@@ -129,6 +134,7 @@ dependencies: []
 			expect(task.dueDate).toBeUndefined();
 
 			const milestone = parseMilestone(`---
+milestone_schema_version: 1
 id: m-1
 title: No due date
 due_date: ${value}
@@ -190,14 +196,12 @@ describe("due date persistence operations", () => {
 		await Bun.write(
 			join(testDir, "backlog", "milestones", "m-1 - Invalid-release.md"),
 			`---
+milestone_schema_version: 1
 id: m-1
 title: "Invalid release"
 due_date: not-a-date
+description: Invalid release
 ---
-
-## Description
-
-Invalid release
 `,
 		);
 
@@ -205,69 +209,20 @@ Invalid release
 	});
 });
 
-// A quoted key slips past the frontmatter preprocessing that quotes due_date values, so YAML
-// resolves the unquoted timestamp to a real Date. Such a record is perfectly valid and must not
-// fail to parse: a throw here drops the whole task or milestone out of every listing.
-// Frontmatter no longer delivers a Date, but the normalizer still accepts unknown, so a Date
-// reaching it must yield a day rather than a stringified locale timestamp the pattern rejects.
-describe("due dates given as a Date value", () => {
-	// UTC midnight reads as the previous day here, so a local-calendar reading would shift it.
-	pinTimeZone("America/Los_Angeles");
+describe("YAML timestamp scalars", () => {
+	it("preserves timestamp text before due-date validation", () => {
+		const timestamp = "2026-09-05T00:30:00+14:00";
+		const frontmatter = parseFrontmatter(`---\ndue_date: ${timestamp}\n---\n`).data;
 
-	it("takes the UTC day of a Date carrying a time", () => {
-		expect(normalizeDueDate(new Date("2026-08-10T14:30:00Z"))).toBe("2026-08-10");
-		// 23:30 on the 10th in UTC+2 is still the 10th in UTC, and must not read as the 9th here.
-		expect(normalizeDueDate(new Date("2026-08-10T23:30:00+02:00"))).toBe("2026-08-10");
-		expect(normalizeDueDate(new Date(Date.UTC(2026, 7, 10)))).toBe("2026-08-10");
-	});
-
-	it("rejects a Date that names no instant", () => {
-		expect(() => normalizeDueDate(new Date("nonsense"), "Due date")).toThrow("YYYY-MM-DD");
-	});
-});
-
-// preprocessFrontmatter quotes due_date values so YAML hands the parser a string. A quoted key
-// slipped past it, leaving js-yaml to resolve the timestamp to an instant -- and once it is a Date
-// the written offset is gone, so the same stored value meant different days depending on how its
-// key happened to be spelled, and saving the record persisted the shifted one.
-describe("due dates under a quoted frontmatter key", () => {
-	// This instant falls on the 4th in UTC and on the 4th locally here, so only preserving the
-	// value as written can yield the 5th: no reading of a Date could pass by accident.
-	pinTimeZone("America/Los_Angeles");
-
-	// YAML permits whitespace before the colon, so each spelling is also tested in that form.
-	const keys = ["due_date", '"due_date"', "'due_date'", "due_date ", '"due_date" '];
-	const taskWith = (line: string) => `---
+		expect(frontmatter.due_date).toBe(timestamp);
+		expect(
+			parseTask(`---
+task_schema_version: 2
 id: TASK-1
-title: Legacy timestamp
-status: To Do
-assignee: []
-created_date: 2026-08-01
-${line}
-labels: []
-dependencies: []
+title: Timestamp due date
+due_date: ${timestamp}
 ---
-`;
-	const milestoneWith = (line: string) => `---
-id: m-1
-title: Release
-${line}
----
-`;
-
-	it("reads the written day however the due_date key is spelled", () => {
-		for (const key of keys) {
-			const line = `${key}: 2026-09-05T00:30:00+14:00`;
-			expect(parseTask(taskWith(line)).dueDate).toBe("2026-09-05");
-			expect(parseMilestone(milestoneWith(line)).dueDate).toBe("2026-09-05");
-		}
-	});
-
-	it("reads a bare day however the due_date key is spelled", () => {
-		for (const key of keys) {
-			const line = `${key}: 2026-08-10`;
-			expect(parseTask(taskWith(line)).dueDate).toBe("2026-08-10");
-			expect(parseMilestone(milestoneWith(line)).dueDate).toBe("2026-08-10");
-		}
+`).dueDate,
+		).toBe("2026-09-05");
 	});
 });

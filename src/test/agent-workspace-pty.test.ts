@@ -8,10 +8,14 @@ import {
 	upsertAgentConfiguration,
 } from "../agent-workspace/config.ts";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 const expectPath = Bun.which("expect");
+const cliCommand = getTestCliCommand();
+const escapedCliCommand = cliCommand
+	.map((argument) => `{${argument.replaceAll("\\", "\\\\").replaceAll("{", "\\{").replaceAll("}", "\\}")}}`)
+	.join(" ");
 const interactive =
 	process.env.RUN_INTERACTIVE_TUI_TESTS === "1" && expectPath && process.platform !== "win32" ? it : it.skip;
 
@@ -53,7 +57,7 @@ set env(NO_COLOR) {1}
 set env(BACKLOG_CWD) {${directory}}
 set env(XDG_CONFIG_HOME) {${configHome}}
 set stty_init {rows 40 columns 120 -ixon}
-spawn {bun} {${getTestCliPath()}} workspace
+spawn ${escapedCliCommand} workspace
 expect {
 	-re {First task} {}
 	timeout { exit 91 }

@@ -6,12 +6,12 @@ import { Core } from "../core/backlog.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
 import { AmbiguousTaskIdError, LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let core: Core;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 const parentTask: Task = {
 	id: "TASK-1",
@@ -155,21 +155,21 @@ describe("local task command performance boundaries", () => {
 		await $`git commit -m ${"Commit branch-only task"}`.cwd(testDir).quiet();
 		await $`git switch main`.cwd(testDir).quiet();
 
-		const view = await $`bun ${CLI_PATH} task view TASK-99 --plain`.cwd(testDir).nothrow().quiet();
-		const shorthand = await $`bun ${CLI_PATH} task TASK-99 --plain`.cwd(testDir).nothrow().quiet();
-		const edit = await $`bun ${CLI_PATH} task edit TASK-99 --title ${"Must remain absent"} --plain`
+		const view = await $`${CLI_COMMAND} task view TASK-99 --plain`.cwd(testDir).nothrow().quiet();
+		const shorthand = await $`${CLI_COMMAND} task TASK-99 --plain`.cwd(testDir).nothrow().quiet();
+		const edit = await $`${CLI_COMMAND} task edit TASK-99 --title ${"Must remain absent"} --plain`
 			.cwd(testDir)
 			.nothrow()
 			.quiet();
-		const archive = await $`bun ${CLI_PATH} task archive TASK-99`.cwd(testDir).nothrow().quiet();
-		const complete = await $`bun ${CLI_PATH} task complete TASK-99`.cwd(testDir).nothrow().quiet();
-		const demote = await $`bun ${CLI_PATH} task demote TASK-99`.cwd(testDir).nothrow().quiet();
-		const parentFilter = await $`bun ${CLI_PATH} task list --parent TASK-99 --plain`.cwd(testDir).nothrow().quiet();
-		const parentCreate = await $`bun ${CLI_PATH} task create ${"Child of a branch task"} --parent TASK-99`
+		const archive = await $`${CLI_COMMAND} task archive TASK-99`.cwd(testDir).nothrow().quiet();
+		const complete = await $`${CLI_COMMAND} task complete TASK-99`.cwd(testDir).nothrow().quiet();
+		const demote = await $`${CLI_COMMAND} task demote TASK-99`.cwd(testDir).nothrow().quiet();
+		const parentFilter = await $`${CLI_COMMAND} task list --parent TASK-99 --plain`.cwd(testDir).nothrow().quiet();
+		const parentCreate = await $`${CLI_COMMAND} task create ${"Child of a branch task"} --parent TASK-99`
 			.cwd(testDir)
 			.nothrow()
 			.quiet();
-		const dependencyEdit = await $`bun ${CLI_PATH} task edit TASK-1 --dep TASK-99 --plain`
+		const dependencyEdit = await $`${CLI_COMMAND} task edit TASK-1 --dep TASK-99 --plain`
 			.cwd(testDir)
 			.nothrow()
 			.quiet();

@@ -3,16 +3,16 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 let core: Core;
 
 async function runCli(args: string[], cwd = TEST_DIR) {
-	return await $`bun ${[CLI_PATH, ...args]}`.cwd(cwd).nothrow().quiet();
+	return await $`${[...CLI_COMMAND, ...args]}`.cwd(cwd).nothrow().quiet();
 }
 
 async function addTask(id: string, title: string, dependencies: string[] = []) {

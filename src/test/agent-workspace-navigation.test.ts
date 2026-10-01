@@ -4,9 +4,9 @@ import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import type { AgentSession, TaskSessions } from "../agent-workspace/types.ts";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { AgentWorkspaceController } from "../ui/agent-workspace.ts";
 import type { TaskComposerOptions } from "../ui/components/task-composer.ts";
 import { createScreen } from "../ui/tui.ts";
+import { AgentWorkspaceController } from "../ui/workspace/controller.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 type Widget = {

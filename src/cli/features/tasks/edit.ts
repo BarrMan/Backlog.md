@@ -1,8 +1,7 @@
 import { dirname, isAbsolute } from "node:path";
 import * as clack from "@clack/prompts";
 import type { Command, OptionValues } from "commander";
-import { parseTaskEditOptions } from "../../../commands/task-edit-options.ts";
-import { pickTaskForEditWizard, runTaskEditWizard } from "../../../commands/task-wizard.ts";
+import { DRAFT_STATUS } from "../../../constants/index.ts";
 import { loadTaskDetail } from "../../../core/task-detail.ts";
 import { formatTaskPlainText } from "../../../formatters/task-plain-text.ts";
 import type { Core } from "../../../index.ts";
@@ -12,6 +11,8 @@ import { DRAFT_PREFIX, normalizeId } from "../../../utils/prefix-config.ts";
 import { getValidStatuses } from "../../../utils/status.ts";
 import { canonicalTaskId, LOCAL_TASK_LOOKUP_HINT } from "../../../utils/task-path.ts";
 import { addEditFieldOptions, hasEditFieldFlags } from "../task/edit-fields.ts";
+import { parseTaskEditOptions } from "./edit-options.ts";
+import { pickTaskForEditWizard, runTaskEditWizard } from "./wizard.ts";
 
 type EditCommandTarget = {
 	label: string;
@@ -80,9 +81,9 @@ const taskEditTarget: EditCommandTarget = {
 };
 
 const draftEditTarget: EditCommandTarget = {
-	label: "Draft",
+	label: DRAFT_STATUS,
 	pluralLabel: "drafts",
-	statuses: async () => ["Draft"],
+	statuses: async () => [DRAFT_STATUS],
 	async resolve(core, idOrSelectedPath) {
 		if (isAbsolute(idOrSelectedPath)) {
 			const draftsDir = await core.filesystem.getDraftsDir();

@@ -47,6 +47,7 @@ describe("Priority functionality", () => {
 	describe("parseTask", () => {
 		it("should preserve non-default priority values", () => {
 			const content = `---
+task_schema_version: 2
 id: task-1
 title: "Custom priority task"
 status: "To Do"
@@ -68,6 +69,7 @@ This task has a custom priority.`;
 
 		it("should handle task without priority field", () => {
 			const content = `---
+task_schema_version: 2
 id: task-1
 title: "No priority task"
 status: "To Do"
@@ -88,6 +90,7 @@ This task has no priority.`;
 
 		it("should handle case-insensitive priority values", () => {
 			const content = `---
+task_schema_version: 2
 id: task-1
 title: "Mixed case priority"
 status: "To Do"

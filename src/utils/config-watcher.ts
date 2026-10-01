@@ -6,6 +6,7 @@ import type { BacklogConfig } from "../types/index.ts";
 
 export interface ConfigWatcherCallbacks {
 	onConfigChanged?: (config: BacklogConfig | null) => void | Promise<void>;
+	onConfigInvalid?: () => void | Promise<void>;
 }
 
 interface ConfigWatcherHandle {
@@ -113,9 +114,18 @@ async function publishStableConfig(
 	content: string,
 	isCurrent: () => boolean,
 ): Promise<boolean> {
-	const config = filesystem.parseConfig(content);
-	if (!isUsableConfig(config, content) || !isCurrent() || !filesystem.publishConfig(config, configPath, content))
+	let config: BacklogConfig | null;
+	try {
+		config = filesystem.parseConfig(content);
+	} catch {
+		await callbacks.onConfigInvalid?.();
 		return false;
+	}
+	if (!isUsableConfig(config, content)) {
+		await callbacks.onConfigInvalid?.();
+		return false;
+	}
+	if (!isCurrent() || !filesystem.publishConfig(config, configPath, content)) return false;
 	while (isCurrent()) {
 		try {
 			await callbacks.onConfigChanged?.(config);

@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-397
 title: Fix drag-and-drop between kanban columns when target column is shorter
 status: Done
@@ -15,31 +16,47 @@ references:
   - 'https://github.com/MrLesk/Backlog.md/issues/543'
   - 'https://github.com/MrLesk/Backlog.md/pull/544'
 priority: high
+description: >-
+  Web Kanban drag-and-drop fails when moving a task from a long source column to
+  a shorter adjacent target column unless dropped near the top. Root cause is
+  that TaskColumn did not fill the stretched wrapper height, so
+  onDragOver/onDrop handlers were not reachable across the full visible column
+  area.
+final_summary: >-
+  Linked issue #543 and PR #544. Verified reproduction on main and confirmed fix
+  on PR branch: adding `h-full` to TaskColumn removes wrapper/column height
+  mismatch and restores drop targeting across full column height in both All
+  Tasks and Milestone modes. Verified build and tests for merge gate.
+acceptance_criteria:
+  - index: 1
+    text: >-
+      In All Tasks mode, dragging from the bottom of a long column to a shorter
+      adjacent column succeeds
+    checked: true
+  - index: 2
+    text: >-
+      In Milestone mode, target columns accept drops across their full visual
+      height
+    checked: true
+  - index: 3
+    text: >-
+      TaskColumn root fills its wrapper height so drag events are captured in
+      stretched regions
+    checked: true
+  - index: 4
+    text: >-
+      Build passes with `bun run build` and tests pass with `bun test` in
+      CI/expected environment
+    checked: true
+definition_of_done:
+  - index: 1
+    text: bunx tsc --noEmit passes when TypeScript touched
+    checked: true
+  - index: 2
+    text: bun run check . passes when formatting/linting touched
+    checked: true
+  - index: 3
+    text: bun test (or scoped test) passes
+    checked: true
+comments: []
 ---
-
-## Description
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
-Web Kanban drag-and-drop fails when moving a task from a long source column to a shorter adjacent target column unless dropped near the top. Root cause is that TaskColumn did not fill the stretched wrapper height, so onDragOver/onDrop handlers were not reachable across the full visible column area.
-<!-- SECTION:DESCRIPTION:END -->
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 In All Tasks mode, dragging from the bottom of a long column to a shorter adjacent column succeeds
-- [x] #2 In Milestone mode, target columns accept drops across their full visual height
-- [x] #3 TaskColumn root fills its wrapper height so drag events are captured in stretched regions
-- [x] #4 Build passes with `bun run build` and tests pass with `bun test` in CI/expected environment
-<!-- AC:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Linked issue #543 and PR #544. Verified reproduction on main and confirmed fix on PR branch: adding `h-full` to TaskColumn removes wrapper/column height mismatch and restores drop targeting across full column height in both All Tasks and Milestone modes. Verified build and tests for merge gate.
-<!-- SECTION:FINAL_SUMMARY:END -->
-
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [x] #1 bunx tsc --noEmit passes when TypeScript touched
-- [x] #2 bun run check . passes when formatting/linting touched
-- [x] #3 bun test (or scoped test) passes
-<!-- DOD:END -->

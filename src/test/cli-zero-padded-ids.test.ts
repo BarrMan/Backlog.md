@@ -3,10 +3,10 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 
@@ -32,7 +32,7 @@ describe("CLI Zero Padded IDs Feature", () => {
 	});
 
 	test("should create a task with a zero-padded ID", async () => {
-		const result = await $`bun ${CLI_PATH} task create "Padded Task"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "Padded Task"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const tasksDir = join(TEST_DIR, "backlog", "tasks");
@@ -42,7 +42,7 @@ describe("CLI Zero Padded IDs Feature", () => {
 	});
 
 	test("should create a document with a zero-padded ID", async () => {
-		const result = await $`bun ${CLI_PATH} doc create "Padded Doc"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} doc create "Padded Doc"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const docsDir = join(TEST_DIR, "backlog", "docs");
@@ -52,7 +52,7 @@ describe("CLI Zero Padded IDs Feature", () => {
 	});
 
 	test("should create a decision with a zero-padded ID", async () => {
-		const result = await $`bun ${CLI_PATH} decision create "Padded Decision"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} decision create "Padded Decision"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const decisionsDir = join(TEST_DIR, "backlog", "decisions");
@@ -62,8 +62,8 @@ describe("CLI Zero Padded IDs Feature", () => {
 	});
 
 	test("should correctly increment a padded task ID", async () => {
-		await $`bun ${CLI_PATH} task create "First Padded Task"`.cwd(TEST_DIR).quiet();
-		const result = await $`bun ${CLI_PATH} task create "Second Padded Task"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} task create "First Padded Task"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "Second Padded Task"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const tasksDir = join(TEST_DIR, "backlog", "tasks");
@@ -74,10 +74,10 @@ describe("CLI Zero Padded IDs Feature", () => {
 
 	test("should create a sub-task with a zero-padded ID", async () => {
 		// Create parent task first
-		await $`bun ${CLI_PATH} task create "Parent Task"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} task create "Parent Task"`.cwd(TEST_DIR).quiet();
 
 		// Create sub-task
-		const result = await $`bun ${CLI_PATH} task create "Padded Sub-task" -p task-001`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "Padded Sub-task" -p task-001`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const tasksDir = join(TEST_DIR, "backlog", "tasks");

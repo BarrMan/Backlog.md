@@ -126,6 +126,61 @@ describe("BrowserServices lifecycle", () => {
 		await services.dispose();
 	});
 
+	it("treats unknown directory events as task invalidations, not config changes", async () => {
+		const { directory, core } = await createProject("server-unknown-watcher-event");
+		const initialized = Bun.spawn(["git", "init"], {
+			cwd: directory,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		expect(await initialized.exited).toBe(0);
+		const publications: string[] = [];
+		const dataWaiters: Array<() => void> = [];
+		const hub = {
+			disconnectAll: () => publications.push("disconnect"),
+			publishLoading: () => {},
+			publishData: () => {
+				publications.push("data");
+				dataWaiters.shift()?.();
+			},
+			publishConfig: () => publications.push("config"),
+		};
+		const services = new BrowserServices(core, hub as never);
+		const callbacks = new Map<string, (path: string | null) => void>();
+		(
+			services as unknown as {
+				watchDirectory: (
+					watchers: Array<{ close: () => void }>,
+					directory: string,
+					callback: (path: string | null) => void,
+				) => boolean;
+			}
+		).watchDirectory = (watchers, directory, callback) => {
+			callbacks.set(directory, callback);
+			watchers.push({ close: () => {} });
+			return true;
+		};
+		await services.initialize();
+		publications.length = 0;
+
+		const rootCallback = callbacks.get(core.filesystem.rootDir);
+		const gitCallback = callbacks.get(join(directory, ".git"));
+		expect(rootCallback).toBeDefined();
+		expect(gitCallback).toBeDefined();
+		const rootData = new Promise<void>((resolve) => dataWaiters.push(resolve));
+		rootCallback?.(null);
+		await (services as unknown as { reconciling?: Promise<void> }).reconciling;
+		await rootData;
+		const gitData = new Promise<void>((resolve) => dataWaiters.push(resolve));
+		gitCallback?.(null);
+		await (services as unknown as { reconciling?: Promise<void> }).reconciling;
+		await gitData;
+
+		expect(publications).toEqual(["data", "data"]);
+		await services.dispose();
+	});
+
 	it("ignores Git index traffic but publishes Git ref changes", async () => {
 		const { directory, core } = await createProject("server-git-watcher");
 		const initialized = Bun.spawn(["git", "init"], {

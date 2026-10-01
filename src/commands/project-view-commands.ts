@@ -90,7 +90,7 @@ export function registerBoardCommands(program: Command, runtime: ProjectViewComm
 	const view = async (options: { milestones?: boolean }) => {
 		const core = await runtime.createCore();
 		const config = await core.filesystem.loadConfig();
-		const { UnifiedViewController } = await import("../ui/unified-view.ts");
+		const { UnifiedViewController } = await import("../ui/unified/controller.ts");
 		await new UnifiedViewController({
 			core,
 			initialView: "kanban",

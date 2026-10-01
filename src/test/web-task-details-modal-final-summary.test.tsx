@@ -264,13 +264,18 @@ describe("Web task popup Final Summary display", () => {
 			...task,
 			comments: [
 				...(task.comments ?? []),
-				{ index: 2, author: "@reviewer", createdDate: "2025-01-03 12:00", body: "New comment" },
+				{
+					index: 2,
+					author: "<!-- COMMENTS:BEGIN -->",
+					createdDate: "2025-01-03 12:00",
+					body: "New comment\n---\n<!-- COMMENT:END -->",
+				},
 			],
 		};
 		apiClient.updateTask = async (id, updates) => {
 			expect(id).toBe("TASK-12B");
-			expect(updates.commentsAppend).toEqual(["New comment"]);
-			expect(updates.commentAuthor).toBe("@reviewer");
+			expect(updates.commentsAppend).toEqual(["New comment\n---\n<!-- COMMENT:END -->"]);
+			expect(updates.commentAuthor).toBe("<!-- COMMENTS:BEGIN -->");
 			return updatedTask;
 		};
 
@@ -307,8 +312,8 @@ describe("Web task popup Final Summary display", () => {
 			expect(commentTextarea).toBeTruthy();
 			if (!authorInput || !commentTextarea) throw new Error("Expected comment inputs");
 			await act(async () => {
-				setFormValue(authorInput, "@reviewer");
-				setFormValue(commentTextarea, "New comment");
+				setFormValue(authorInput, "<!-- COMMENTS:BEGIN -->");
+				setFormValue(commentTextarea, "New comment\n---\n<!-- COMMENT:END -->");
 				await Promise.resolve();
 			});
 
@@ -330,6 +335,7 @@ describe("Web task popup Final Summary display", () => {
 				await Promise.resolve();
 			});
 
+			expect(container?.textContent).toContain("<!-- COMMENTS:BEGIN -->");
 			expect(container?.textContent).toContain("New comment");
 			expect(container?.textContent).toContain("Add comment");
 			expect(container?.textContent).toContain("Save");

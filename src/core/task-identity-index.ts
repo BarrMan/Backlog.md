@@ -1,6 +1,6 @@
 import { isAbsolute, relative } from "node:path";
 import { DEFAULT_DIRECTORIES } from "../constants/index.ts";
-import type { Task, TaskDirectoryType } from "../types/index.ts";
+import { TASK_SOURCE, type Task, type TaskDirectoryType } from "../types/index.ts";
 import { canonicalTaskId, taskIdsEqual } from "../utils/task-path.ts";
 import { compareTaskIds } from "../utils/task-sorting.ts";
 
@@ -25,7 +25,7 @@ export function workingCopyTaskIdentityRecord(
 		branch: "local",
 		path,
 		lastModified: task.lastModified ?? (task.updatedDate ? new Date(task.updatedDate) : new Date(0)),
-		task: { ...task, source: type === "completed" ? "completed" : "local" },
+		task: { ...task, source: type === "completed" ? TASK_SOURCE.COMPLETED : TASK_SOURCE.LOCAL },
 		workingCopy: true,
 	};
 }
@@ -259,7 +259,9 @@ export class TaskIdentityIndex {
 				this.resolutionStrategy,
 			);
 			if (selected?.task)
-				tasks.push(lifecycle.type === "completed" ? { ...selected.task, source: "completed" } : selected.task);
+				tasks.push(
+					lifecycle.type === "completed" ? { ...selected.task, source: TASK_SOURCE.COMPLETED } : selected.task,
+				);
 		}
 		return tasks;
 	}
@@ -296,7 +298,7 @@ export class TaskIdentityIndex {
 		if (candidates.length > 0) return { status: "ambiguous", candidates };
 		const selected = selectTask(group);
 		return selected
-			? { status: "found", task: localSource ? { ...selected, source: "local" } : selected }
+			? { status: "found", task: localSource ? { ...selected, source: TASK_SOURCE.LOCAL } : selected }
 			: { status: "not-found" };
 	}
 

@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-44
 title: Checklist alignment
 status: Done
@@ -9,16 +10,21 @@ labels:
   - ui
   - enhancement
 dependencies: []
+description: >-
+  Goal: Make checkbox lists flush-left and tidy.
+
+
+  Detailed work:
+
+  - During markdown-to-UI transform, replace "- [x] " / "- [ ] " with " [x] " /
+  " [ ] " (or another padding scheme you prefer)
+acceptance_criteria:
+  - index: 1
+    text: All checklist lines start at the same column (snapshot diff)
+    checked: true
+  - index: 2
+    text: Regex unit test passes for both checked and unchecked cases
+    checked: true
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-Goal: Make checkbox lists flush-left and tidy.
-
-Detailed work:
-- During markdown-to-UI transform, replace "- [x] " / "- [ ] " with " [x] " / " [ ] " (or another padding scheme you prefer)
-
-## Acceptance Criteria
-
-- [x] All checklist lines start at the same column (snapshot diff)
-- [x] Regex unit test passes for both checked and unchecked cases

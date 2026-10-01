@@ -10,9 +10,10 @@
 
 import { DEFAULT_DIRECTORIES } from "../constants/index.ts";
 import type { GitBranchTip, GitOperations } from "../git/operations.ts";
-import { parseTask } from "../markdown/parser.ts";
-import type { BacklogConfig, Task, TaskDirectoryType } from "../types/index.ts";
-import { extractAnyPrefix } from "../utils/prefix-config.ts";
+import { FrontmatterSchemaError, parseTask } from "../markdown/parser.ts";
+import type { BacklogConfig, Task, TaskDirectoryType, TaskSource } from "../types/index.ts";
+import { TASK_DIRECTORY, TASK_SOURCE } from "../types/index.ts";
+import { DEFAULT_TASK_PREFIX, extractAnyPrefix } from "../utils/prefix-config.ts";
 import {
 	canonicalTaskId,
 	extractTaskIdFromFilename,
@@ -20,9 +21,6 @@ import {
 	normalizeTaskIdentity,
 } from "../utils/task-path.ts";
 import { normalizeTaskLifecyclePath, type TaskIdentityIndex } from "./task-identity-index.ts";
-
-/** Default prefix for tasks */
-const DEFAULT_TASK_PREFIX = "task";
 
 export function getBranchHistoryCutoff(activeBranchDays: number, now = Date.now()): Date | undefined {
 	if (!activeBranchDays) return undefined;
@@ -65,10 +63,10 @@ function extractConfiguredTaskId(filePath: string, prefix: string): string | nul
 }
 
 const STATE_DIRECTORIES: Array<{ path: string; type: TaskDirectoryType }> = [
-	{ path: DEFAULT_DIRECTORIES.TASKS, type: "task" },
-	{ path: DEFAULT_DIRECTORIES.DRAFTS, type: "draft" },
-	{ path: DEFAULT_DIRECTORIES.ARCHIVE_TASKS, type: "archived" },
-	{ path: DEFAULT_DIRECTORIES.COMPLETED, type: "completed" },
+	{ path: DEFAULT_DIRECTORIES.TASKS, type: TASK_DIRECTORY.TASK },
+	{ path: DEFAULT_DIRECTORIES.DRAFTS, type: TASK_DIRECTORY.DRAFT },
+	{ path: DEFAULT_DIRECTORIES.ARCHIVE_TASKS, type: TASK_DIRECTORY.ARCHIVED },
+	{ path: DEFAULT_DIRECTORIES.COMPLETED, type: TASK_DIRECTORY.COMPLETED },
 ];
 
 function getTaskTypeFromPath(path: string, backlogDir: string): TaskDirectoryType | null {
@@ -111,11 +109,11 @@ interface PinnedBranchRef {
 	branch: string;
 	ref: string;
 	commit: string;
-	source: "local-branch" | "remote";
+	source: TaskSource;
 }
 
 interface HydrationOptions {
-	source: "local-branch" | "remote";
+	source: Extract<TaskSource, "local-branch" | "remote">;
 	loadTask: (commit: string, path: string) => Promise<Task | null>;
 }
 
@@ -132,8 +130,8 @@ function logicalTaskPath(path: string, backlogDir: string): string {
 }
 
 function lifecycleRank(type: TaskDirectoryType | undefined): number {
-	if (type === "task") return 2;
-	if (type === "completed") return 1;
+	if (type === TASK_DIRECTORY.TASK) return 2;
+	if (type === TASK_DIRECTORY.COMPLETED) return 1;
 	return 0;
 }
 
@@ -231,11 +229,11 @@ function pinnedBranchRef(tip: GitBranchTip, currentBranch: string, includeRemote
 	if (isRemoteBranch(tip.name)) {
 		if (!includeRemote) return null;
 		const branch = normalizeRemoteBranch(tip.name);
-		return branch ? { branch, ref: `origin/${branch}`, commit: tip.commit, source: "remote" } : null;
+		return branch ? { branch, ref: `origin/${branch}`, commit: tip.commit, source: TASK_SOURCE.REMOTE } : null;
 	}
 	if (!currentBranch || tip.current) return null;
 	const branch = normalizeLocalBranch(tip.name, currentBranch);
-	return branch ? { branch, ref: branch, commit: tip.commit, source: "local-branch" } : null;
+	return branch ? { branch, ref: branch, commit: tip.commit, source: TASK_SOURCE.LOCAL_BRANCH } : null;
 }
 
 /**
@@ -259,12 +257,13 @@ async function hydrateTasks(winners: HydrationCandidate[], options: HydrationOpt
 				const task = await options.loadTask(w.commit, w.path);
 				if (task) {
 					task.source = options.source;
-					task.branch = options.source === "remote" ? w.ref.replace(/^origin\//, "") : w.ref;
+					task.branch = options.source === TASK_SOURCE.REMOTE ? w.ref.replace(/^origin\//, "") : w.ref;
 					task.filePath = w.path;
 					task.contentRef = w.commit;
 					if (w.stateEntry) w.stateEntry.task = task;
 				}
 			} catch (error) {
+				if (error instanceof FrontmatterSchemaError) throw error;
 				complete = false;
 				console.error(`Failed to hydrate task ${w.id} from ${w.ref}:${w.path}`, error);
 			}
@@ -393,7 +392,7 @@ export class BranchTaskLoader {
 		const branchRefs = await this.getPinnedBranchRefs(tips, userConfig, currentBranch);
 		if (branchRefs.length === 0) return { entries: [], complete: true };
 
-		const remoteCount = branchRefs.filter((branch) => branch.source === "remote").length;
+		const remoteCount = branchRefs.filter((branch) => branch.source === TASK_SOURCE.REMOTE).length;
 		const localCount = branchRefs.length - remoteCount;
 		if (remoteCount > 0) onProgress?.(`Indexing ${remoteCount} recent remote branches...`);
 		if (localCount > 0) onProgress?.(`Indexing ${localCount} other local branches...`);
@@ -415,7 +414,7 @@ export class BranchTaskLoader {
 					branchRef,
 					{ backlogDir, prefix, historyCutoff, includeCompleted },
 					stateEntries,
-					branchRef.source === "remote" ? remoteIndex : localIndex,
+					branchRef.source === TASK_SOURCE.REMOTE ? remoteIndex : localIndex,
 				);
 				complete = indexed && complete;
 			}
@@ -426,10 +425,10 @@ export class BranchTaskLoader {
 		const strategy = userConfig?.taskResolutionStrategy ?? "most_progressed";
 		const candidatesFor = (
 			index: Map<string, RemoteIndexEntry[]>,
-			source: "local-branch" | "remote",
+			source: Extract<TaskSource, "local-branch" | "remote">,
 		): HydrationCandidate[] => {
 			const toRef =
-				source === "remote"
+				source === TASK_SOURCE.REMOTE
 					? (entry: RemoteIndexEntry) => `origin/${entry.branch}`
 					: (entry: RemoteIndexEntry) => entry.branch;
 			let candidates: HydrationCandidate[];
@@ -456,9 +455,9 @@ export class BranchTaskLoader {
 
 		const loadTask = (commit: string, path: string) => this.loadCachedTask(commit, path);
 		const hydrationResults = await Promise.all([
-			hydrateTasks(candidatesFor(remoteIndex, "remote"), { source: "remote", loadTask }),
-			hydrateTasks(candidatesFor(localIndex, "local-branch"), {
-				source: "local-branch",
+			hydrateTasks(candidatesFor(remoteIndex, TASK_SOURCE.REMOTE), { source: TASK_SOURCE.REMOTE, loadTask }),
+			hydrateTasks(candidatesFor(localIndex, TASK_SOURCE.LOCAL_BRANCH), {
+				source: TASK_SOURCE.LOCAL_BRANCH,
 				loadTask,
 			}),
 		]);
@@ -529,7 +528,7 @@ export class BranchTaskLoader {
 			entry.stateEntry = { id: cached.id, type: cached.type, branch: branchRef.ref, path: cached.path, lastModified };
 			stateEntries.push(entry.stateEntry);
 		}
-		if (cached.type !== "task" && (!includeCompleted || cached.type !== "completed")) return;
+		if (cached.type !== TASK_DIRECTORY.TASK && (!includeCompleted || cached.type !== TASK_DIRECTORY.COMPLETED)) return;
 		const entries = index.get(cached.id);
 		if (entries) entries.push(entry);
 		else index.set(cached.id, [entry]);
@@ -583,6 +582,7 @@ export class BranchTaskLoader {
 				try {
 					return normalizeTaskIdentity(parseTask(content));
 				} catch (error) {
+					if (error instanceof FrontmatterSchemaError) throw error;
 					console.error(`Failed to parse task ${commit}:${path}`, error);
 					return null;
 				}

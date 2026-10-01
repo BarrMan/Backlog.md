@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Task } from "../types/index.ts";
 import { moveTargetToAdjacentColumn } from "../ui/board/interaction.ts";
-import { TaskViewerSession } from "../ui/task-viewer-session.ts";
+import { TaskViewerSession } from "../ui/task-viewer/session.ts";
 import { UnifiedViewSession } from "../ui/unified/session.ts";
 
 const task = (id: string): Task => ({

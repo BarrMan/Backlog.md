@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import { formatRootEntry, printRootEntry } from "../ui/root-entry.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI root entry (bare run)", () => {
 	beforeEach(async () => {
@@ -53,7 +53,7 @@ describe("CLI root entry (bare run)", () => {
 	});
 
 	it("prints a plain local entry point in non-initialized repo", async () => {
-		const result = await $`bun ${CLI_PATH}`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND}`.cwd(TEST_DIR).quiet();
 		const out = result.stdout.toString();
 		expect(result.exitCode).toBe(0);
 		expect(out).toContain("██████╗");
@@ -75,7 +75,7 @@ describe("CLI root entry (bare run)", () => {
 		const core = new Core(TEST_DIR);
 		await initializeFilesystemTestProject(core, "Splash Test");
 
-		const result = await $`bun ${CLI_PATH}`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND}`.cwd(TEST_DIR).quiet();
 		const out = result.stdout.toString();
 		expect(result.exitCode).toBe(0);
 		expect(out).toContain("██████╗");
@@ -95,7 +95,7 @@ describe("CLI root entry (bare run)", () => {
 	});
 
 	it("--help shows commander help, not the root entry", async () => {
-		const result = await $`bun ${CLI_PATH} --help`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} --help`.cwd(TEST_DIR).quiet();
 		const out = result.stdout.toString();
 		expect(result.exitCode).toBe(0);
 		expect(out).toMatch(/Usage: .*backlog/);

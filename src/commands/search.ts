@@ -292,7 +292,7 @@ async function renderInteractiveSearch(
 	if (allTasks.length === 0) return printSearchResults(searchResultsInPrintedOrder(results, "plain"));
 	const interactiveTasks = parsed.modifiedFileFilters?.length ? searchResultTasks : allTasks;
 	if (interactiveTasks.length === 0) return printSearchResults(searchResultsInPrintedOrder(results, "plain"));
-	const { UnifiedViewController } = await import("../ui/unified-view.ts");
+	const { UnifiedViewController } = await import("../ui/unified/controller.ts");
 	await new UnifiedViewController({
 		core,
 		initialView: "task-list",

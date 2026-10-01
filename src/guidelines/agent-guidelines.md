@@ -106,56 +106,40 @@ backlog task edit 7 -s "In Progress" -a @agent-k  # Multiple commands: change st
 
 ```markdown
 ---
+task_schema_version: 2
 id: task-42
 title: Add GraphQL resolver
 status: To Do
 assignee: [@sara]
 labels: [backend, api]
+description: Brief explanation of the task purpose.
+acceptance_criteria:
+  - text: First criterion
+    checked: false
+  - text: Second criterion
+    checked: true
+definition_of_done:
+  - text: Tests pass
+    checked: false
+implementation_plan: |-
+  1. Research approach
+  2. Implement solution
+implementation_notes: Progress notes captured during implementation.
+comments:
+  - body: Task discussion, review questions, and collaboration notes.
+    created_date: "2026-09-30 12:00"
+final_summary: PR-style summary of what was implemented.
 modified_files:
   - src/server/api.ts
   - src/web/components/TaskList.tsx
 ---
 
-## Description
+## Research
 
-Brief explanation of the task purpose.
-
-## Acceptance Criteria
-
-<!-- AC:BEGIN -->
-
-- [ ] #1 First criterion
-- [x] #2 Second criterion (completed)
-- [ ] #3 Third criterion
-
-<!-- AC:END -->
-
-## Definition of Done
-
-<!-- DOD:BEGIN -->
-
-- [ ] #1 Tests pass
-- [ ] #2 Docs updated
-
-<!-- DOD:END -->
-
-## Implementation Plan
-
-1. Research approach
-2. Implement solution
-
-## Implementation Notes
-
-Progress notes captured during implementation.
-
-## Comments
-
-Task discussion, review questions, and collaboration notes.
-
-## Final Summary
-
-PR-style summary of what was implemented.
+Free-form Markdown body content is preserved verbatim and is not task state.
 ```
+
+All application-owned structured fields are versioned YAML frontmatter: tasks and drafts use `task_schema_version: 2`, decisions use `decision_schema_version: 1`, and milestones use `milestone_schema_version: 1`. The Markdown body is opaque free-form content.
 
 ### How to Modify Each Section
 
@@ -678,7 +662,7 @@ If single quotes are not practical in your shell, escape each literal backtick b
 
 - Use comments for task discussion, review notes, questions, and handoff context that should remain visible to humans and agents.
 - Comments are append-only via `backlog task edit <id> --comment "..."`; include `--comment-author @name` when attribution is useful.
-- Comment bodies may contain Markdown, but standalone `---` lines are reserved as comment delimiters.
+- Comment bodies may contain Markdown and are stored as YAML text values.
 - Do not use comments as the primary execution log; use Implementation Notes for progress and Final Summary for the PR description.
 
 ### Final Summary Formatting

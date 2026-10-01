@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let core: Core;
 
 describe("task project filtering", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("task-project-filtering");
@@ -104,8 +104,8 @@ describe("task project filtering", () => {
 	});
 
 	it("filters CLI task list with repeated and comma-separated canonicalized values", async () => {
-		const comma = await $`bun ${cliPath} task list --project web,mobile --plain`.cwd(testDir).quiet();
-		const repeated = await $`bun ${cliPath} task list --project WEB --project Mobile --plain`.cwd(testDir).quiet();
+		const comma = await $`${cliCommand} task list --project web,mobile --plain`.cwd(testDir).quiet();
+		const repeated = await $`${cliCommand} task list --project WEB --project Mobile --plain`.cwd(testDir).quiet();
 
 		for (const result of [comma, repeated]) {
 			expect(result.exitCode).toBe(0);
@@ -118,7 +118,7 @@ describe("task project filtering", () => {
 	});
 
 	it("filters CLI search by project and composes with existing filters", async () => {
-		const search = await $`bun ${cliPath} search "Shared" --project web,api --status "To Do" --priority high --plain`
+		const search = await $`${cliCommand} search "Shared" --project web,api --status "To Do" --priority high --plain`
 			.cwd(testDir)
 			.quiet();
 		expect(search.exitCode).toBe(0);
@@ -127,17 +127,17 @@ describe("task project filtering", () => {
 		expect(output).not.toContain("Shared API capability");
 		expect(output).not.toContain("Shared Mobile exploration");
 
-		const projectOnly = await $`bun ${cliPath} search --project API --plain`.cwd(testDir).quiet();
+		const projectOnly = await $`${cliCommand} search --project API --plain`.cwd(testDir).quiet();
 		expect(projectOnly.stdout.toString()).toContain("Shared API capability");
 		expect(projectOnly.stdout.toString()).not.toContain("Documents:");
 	});
 
 	it("rejects invalid configured projects clearly", async () => {
-		const list = await $`bun ${cliPath} task list --project desktop --plain`.cwd(testDir).nothrow().quiet();
+		const list = await $`${cliCommand} task list --project desktop --plain`.cwd(testDir).nothrow().quiet();
 		expect(list.exitCode).toBe(1);
 		expect(list.stderr.toString()).toContain("Invalid project: desktop. Valid projects are: Web, API, Mobile");
 
-		const search = await $`bun ${cliPath} search --project desktop --plain`.cwd(testDir).nothrow().quiet();
+		const search = await $`${cliCommand} search --project desktop --plain`.cwd(testDir).nothrow().quiet();
 		expect(search.exitCode).toBe(1);
 		expect(search.stderr.toString()).toContain("Invalid project: desktop. Valid projects are: Web, API, Mobile");
 	});
@@ -147,28 +147,27 @@ describe("task project filtering", () => {
 		if (!config) throw new Error("Expected test config");
 		await core.filesystem.saveConfig({ ...config, projects: [] });
 
-		const list = await $`bun ${cliPath} task list --project web --plain`.cwd(testDir).nothrow().quiet();
+		const list = await $`${cliCommand} task list --project web --plain`.cwd(testDir).nothrow().quiet();
 		expect(list.exitCode).toBe(1);
 		expect(list.stderr.toString()).toContain("No projects are configured. Add a 'projects:' list to");
 
-		const search = await $`bun ${cliPath} search --project web --plain`.cwd(testDir).nothrow().quiet();
+		const search = await $`${cliCommand} search --project web --plain`.cwd(testDir).nothrow().quiet();
 		expect(search.exitCode).toBe(1);
 		expect(search.stderr.toString()).toContain("No projects are configured. Add a 'projects:' list to");
 	});
 
 	it("documents configured project filters and completes their values", async () => {
-		const listHelp = await $`bun ${cliPath} task list --help`.cwd(testDir).text();
-		const searchHelp = await $`bun ${cliPath} search --help`.cwd(testDir).text();
+		const listHelp = await $`${cliCommand} task list --help`.cwd(testDir).text();
+		const searchHelp = await $`${cliCommand} search --help`.cwd(testDir).text();
 		expect(listHelp).toContain("--project <project>");
 		expect(listHelp).toContain("project: one or more of configured projects: Web, API, Mobile");
 		expect(searchHelp).toContain("--project <project>");
 		expect(searchHelp).toContain("project: one or more of configured projects: Web, API, Mobile");
 
 		for (const completionLine of ["backlog task list --project ", "backlog search --project "]) {
-			const completion =
-				await $`bun ${cliPath} completion __complete ${completionLine} ${String(completionLine.length)}`
-					.cwd(testDir)
-					.quiet();
+			const completion = await $`${cliCommand} completion __complete ${completionLine} ${String(completionLine.length)}`
+				.cwd(testDir)
+				.quiet();
 			expect(completion.stdout.toString().trim().split("\n")).toEqual(["Web", "API", "Mobile"]);
 		}
 	});

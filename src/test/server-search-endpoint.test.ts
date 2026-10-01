@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
 import { FileSystem } from "../file-system/operations.ts";
+import { serializeMilestone } from "../markdown/serializer.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Decision, Document, Milestone, Task } from "../types/index.ts";
 import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup, withTimeout } from "./test-utils.ts";
@@ -85,7 +86,7 @@ const dependentTask: Task = {
 	dependencies: [baseTask.id],
 	description: "Depends on task-0007 for completion",
 	priority: "medium",
-	modifiedFiles: ["src/ui/task-viewer-with-search.ts"],
+	modifiedFiles: ["src/ui/task-viewer/controller.ts"],
 };
 
 const customPriorityTask: Task = {
@@ -542,15 +543,12 @@ describe("BacklogServer search endpoint", () => {
 	it("resolves numeric milestone aliases to zero-padded legacy milestone IDs", async () => {
 		await Bun.write(
 			join(filesystem.milestonesDir, "m-01 - legacy-release.md"),
-			`---
-id: m-01
-title: "Legacy Release"
----
-
-## Description
-
-Milestone: Legacy Release
-`,
+			serializeMilestone({
+				id: "m-01",
+				title: "Legacy Release",
+				description: "Milestone: Legacy Release",
+				rawContent: "",
+			}),
 		);
 
 		const createResponse = await fetch(`http://127.0.0.1:${serverPort}/api/tasks`, {
@@ -581,27 +579,21 @@ Milestone: Legacy Release
 	it("prefers canonical IDs when zero-padded and canonical milestone IDs both exist", async () => {
 		await Bun.write(
 			join(filesystem.milestonesDir, "m-1 - canonical-release.md"),
-			`---
-id: m-1
-title: "Canonical Release"
----
-
-## Description
-
-Milestone: Canonical Release
-`,
+			serializeMilestone({
+				id: "m-1",
+				title: "Canonical Release",
+				description: "Milestone: Canonical Release",
+				rawContent: "",
+			}),
 		);
 		await Bun.write(
 			join(filesystem.milestonesDir, "m-01 - zero-padded-release.md"),
-			`---
-id: m-01
-title: "Zero-padded Release"
----
-
-## Description
-
-Milestone: Zero-padded Release
-`,
+			serializeMilestone({
+				id: "m-01",
+				title: "Zero-padded Release",
+				description: "Milestone: Zero-padded Release",
+				rawContent: "",
+			}),
 		);
 
 		const createResponse = await fetch(`http://127.0.0.1:${serverPort}/api/tasks`, {
@@ -621,27 +613,16 @@ Milestone: Zero-padded Release
 	it("prefers archived milestone IDs over active title matches for ID-shaped task inputs", async () => {
 		await Bun.write(
 			join(filesystem.archiveMilestonesDir, "m-0 - archived-id.md"),
-			`---
-id: m-0
-title: "Archived source"
----
-
-## Description
-
-Milestone: Archived source
-`,
+			serializeMilestone({
+				id: "m-0",
+				title: "Archived source",
+				description: "Milestone: Archived source",
+				rawContent: "",
+			}),
 		);
 		await Bun.write(
 			join(filesystem.milestonesDir, "m-2 - active-id-shaped-title.md"),
-			`---
-id: m-2
-title: "m-0"
----
-
-## Description
-
-Milestone: m-0
-`,
+			serializeMilestone({ id: "m-2", title: "m-0", description: "Milestone: m-0", rawContent: "" }),
 		);
 
 		const createResponse = await fetch(`http://127.0.0.1:${serverPort}/api/tasks`, {

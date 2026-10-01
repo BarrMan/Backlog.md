@@ -1,226 +1,182 @@
-import type { AcceptanceCriterion, Decision, Document, Task } from "../types/index.ts";
-import { normalizeAssignee } from "../utils/assignee.ts";
+import type { Decision, Document, Milestone, Task } from "../types/index.ts";
 import { stringifyFrontmatter } from "./frontmatter.ts";
 import {
-	AcceptanceCriteriaManager,
-	CommentsManager,
-	DefinitionOfDoneManager,
-	getStructuredSections,
-	updateStructuredSections,
-} from "./structured-sections.ts";
+	CHECKLIST_FRONTMATTER_FIELDS,
+	COMMENT_FRONTMATTER_FIELDS,
+	DECISION_FRONTMATTER_FIELDS,
+	DECISION_FRONTMATTER_SCHEMA_VERSION,
+	DOCUMENT_FRONTMATTER_FIELDS,
+	MILESTONE_FRONTMATTER_FIELDS,
+	MILESTONE_FRONTMATTER_SCHEMA_VERSION,
+	TASK_FRONTMATTER_FIELDS,
+	TASK_FRONTMATTER_SCHEMA_VERSION,
+} from "./schema.ts";
 
-function normalizeOptionalText(value: string | undefined): string | undefined {
-	const trimmed = value?.trim();
-	return trimmed ? trimmed : undefined;
-}
-
-function sectionChanged(
-	rawContent: string,
-	key: keyof ReturnType<typeof getStructuredSections>,
-	nextValue: string,
-): boolean {
-	const existing = normalizeOptionalText(getStructuredSections(rawContent)[key]);
-	return existing !== normalizeOptionalText(nextValue);
-}
-
-function checklistItemsEqual(left: AcceptanceCriterion[], right: AcceptanceCriterion[]): boolean {
-	if (left.length !== right.length) return false;
-	return left.every((item, index) => {
-		const other = right[index];
-		return other?.index === item.index && other.checked === item.checked && other.text === item.text;
-	});
-}
-
-function commentItemsEqual(left: Task["comments"], right: Task["comments"]): boolean {
-	const leftComments = left ?? [];
-	const rightComments = right ?? [];
-	if (leftComments.length !== rightComments.length) return false;
-	return leftComments.every((item, index) => {
-		const other = rightComments[index];
-		return (
-			other?.index === item.index &&
-			other.body === item.body &&
-			other.createdDate === item.createdDate &&
-			other.author === item.author
-		);
-	});
-}
+const TASK_FRONTMATTER_FIELD_MODE = {
+	TRUTHY: "truthy",
+	NONEMPTY: "nonempty",
+	DEFINED: "defined",
+} as const;
 
 interface TaskFrontmatterField {
 	key: string;
 	property: keyof Task;
-	mode?: "truthy" | "nonempty" | "defined";
+	mode?: (typeof TASK_FRONTMATTER_FIELD_MODE)[keyof typeof TASK_FRONTMATTER_FIELD_MODE];
 }
 
 const taskFrontmatterFields: readonly TaskFrontmatterField[] = [
-	{ key: "id", property: "id" },
-	{ key: "title", property: "title" },
-	{ key: "status", property: "status" },
-	{ key: "assignee", property: "assignee" },
-	{ key: "reporter", property: "reporter", mode: "truthy" },
-	{ key: "created_date", property: "createdDate" },
-	{ key: "updated_date", property: "updatedDate", mode: "truthy" },
-	{ key: "due_date", property: "dueDate", mode: "truthy" },
-	{ key: "labels", property: "labels" },
-	{ key: "milestone", property: "milestone", mode: "truthy" },
-	{ key: "dependencies", property: "dependencies" },
-	{ key: "references", property: "references", mode: "nonempty" },
-	{ key: "documentation", property: "documentation", mode: "nonempty" },
-	{ key: "modified_files", property: "modifiedFiles", mode: "nonempty" },
-	{ key: "parent_task_id", property: "parentTaskId", mode: "truthy" },
-	{ key: "subtasks", property: "subtasks", mode: "nonempty" },
-	{ key: "priority", property: "priority", mode: "truthy" },
-	{ key: "type", property: "type", mode: "truthy" },
-	{ key: "project", property: "project", mode: "truthy" },
-	{ key: "ordinal", property: "ordinal", mode: "defined" },
-	{ key: "onStatusChange", property: "onStatusChange", mode: "truthy" },
-	{ key: "agentConfiguration", property: "agentConfiguration", mode: "truthy" },
+	{ key: TASK_FRONTMATTER_FIELDS.ID, property: "id" },
+	{ key: TASK_FRONTMATTER_FIELDS.TITLE, property: "title" },
+	{ key: TASK_FRONTMATTER_FIELDS.STATUS, property: "status" },
+	{ key: TASK_FRONTMATTER_FIELDS.ASSIGNEE, property: "assignee" },
+	{ key: TASK_FRONTMATTER_FIELDS.REPORTER, property: "reporter", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.CREATED_DATE, property: "createdDate" },
+	{ key: TASK_FRONTMATTER_FIELDS.UPDATED_DATE, property: "updatedDate", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.DUE_DATE, property: "dueDate", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.LABELS, property: "labels" },
+	{ key: TASK_FRONTMATTER_FIELDS.MILESTONE, property: "milestone", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.DEPENDENCIES, property: "dependencies" },
+	{ key: TASK_FRONTMATTER_FIELDS.REFERENCES, property: "references", mode: TASK_FRONTMATTER_FIELD_MODE.NONEMPTY },
+	{ key: TASK_FRONTMATTER_FIELDS.DOCUMENTATION, property: "documentation", mode: TASK_FRONTMATTER_FIELD_MODE.NONEMPTY },
+	{
+		key: TASK_FRONTMATTER_FIELDS.MODIFIED_FILES,
+		property: "modifiedFiles",
+		mode: TASK_FRONTMATTER_FIELD_MODE.NONEMPTY,
+	},
+	{ key: TASK_FRONTMATTER_FIELDS.PARENT_TASK_ID, property: "parentTaskId", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.SUBTASKS, property: "subtasks", mode: TASK_FRONTMATTER_FIELD_MODE.NONEMPTY },
+	{ key: TASK_FRONTMATTER_FIELDS.PRIORITY, property: "priority", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.TYPE, property: "type", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.PROJECT, property: "project", mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY },
+	{ key: TASK_FRONTMATTER_FIELDS.ORDINAL, property: "ordinal", mode: TASK_FRONTMATTER_FIELD_MODE.DEFINED },
+	{
+		key: TASK_FRONTMATTER_FIELDS.ON_STATUS_CHANGE,
+		property: "onStatusChange",
+		mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY,
+	},
+	{
+		key: TASK_FRONTMATTER_FIELDS.AGENT_CONFIGURATION,
+		property: "agentConfiguration",
+		mode: TASK_FRONTMATTER_FIELD_MODE.TRUTHY,
+	},
 ];
 
-function taskFrontmatter(task: Task): Record<string, unknown> {
-	const frontmatter: Record<string, unknown> = {};
+function taskFrontmatter(task: Task, retained: Record<string, unknown> = {}): Record<string, unknown> {
+	const frontmatter: Record<string, unknown> = {
+		...retained,
+		[TASK_FRONTMATTER_FIELDS.SCHEMA_VERSION]: TASK_FRONTMATTER_SCHEMA_VERSION,
+	};
 	for (const field of taskFrontmatterFields) {
 		const value = task[field.property];
-		if (field.mode === "truthy" && !value) continue;
-		if (field.mode === "nonempty" && (!Array.isArray(value) || value.length === 0)) continue;
-		if (field.mode === "defined" && value === undefined) continue;
+		delete frontmatter[field.key];
+		if (field.mode === TASK_FRONTMATTER_FIELD_MODE.TRUTHY && !value) continue;
+		if (field.mode === TASK_FRONTMATTER_FIELD_MODE.NONEMPTY && (!Array.isArray(value) || value.length === 0)) continue;
+		if (field.mode === TASK_FRONTMATTER_FIELD_MODE.DEFINED && value === undefined) continue;
 		frontmatter[field.key] = value;
+	}
+	for (const key of [
+		TASK_FRONTMATTER_FIELDS.DESCRIPTION,
+		TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_PLAN,
+		TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_NOTES,
+		TASK_FRONTMATTER_FIELDS.FINAL_SUMMARY,
+		TASK_FRONTMATTER_FIELDS.ACCEPTANCE_CRITERIA,
+		TASK_FRONTMATTER_FIELDS.DEFINITION_OF_DONE,
+		TASK_FRONTMATTER_FIELDS.COMMENTS,
+	]) {
+		delete frontmatter[key];
+	}
+	if (task.description !== undefined) frontmatter[TASK_FRONTMATTER_FIELDS.DESCRIPTION] = task.description;
+	if (task.implementationPlan !== undefined)
+		frontmatter[TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_PLAN] = task.implementationPlan;
+	if (task.implementationNotes !== undefined)
+		frontmatter[TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_NOTES] = task.implementationNotes;
+	if (task.finalSummary !== undefined) frontmatter[TASK_FRONTMATTER_FIELDS.FINAL_SUMMARY] = task.finalSummary;
+	if (task.acceptanceCriteriaItems !== undefined) {
+		frontmatter[TASK_FRONTMATTER_FIELDS.ACCEPTANCE_CRITERIA] = task.acceptanceCriteriaItems.map(
+			({ index, text, checked }) => ({
+				[CHECKLIST_FRONTMATTER_FIELDS.INDEX]: index,
+				[CHECKLIST_FRONTMATTER_FIELDS.TEXT]: text,
+				[CHECKLIST_FRONTMATTER_FIELDS.CHECKED]: checked,
+			}),
+		);
+	}
+	if (task.definitionOfDoneItems !== undefined) {
+		frontmatter[TASK_FRONTMATTER_FIELDS.DEFINITION_OF_DONE] = task.definitionOfDoneItems.map(
+			({ index, text, checked }) => ({
+				[CHECKLIST_FRONTMATTER_FIELDS.INDEX]: index,
+				[CHECKLIST_FRONTMATTER_FIELDS.TEXT]: text,
+				[CHECKLIST_FRONTMATTER_FIELDS.CHECKED]: checked,
+			}),
+		);
+	}
+	if (task.comments !== undefined) {
+		frontmatter[TASK_FRONTMATTER_FIELDS.COMMENTS] = task.comments.map(({ index, body, createdDate, author }) => ({
+			[COMMENT_FRONTMATTER_FIELDS.INDEX]: index,
+			[COMMENT_FRONTMATTER_FIELDS.BODY]: body,
+			[COMMENT_FRONTMATTER_FIELDS.CREATED_DATE]: createdDate,
+			...(author ? { [COMMENT_FRONTMATTER_FIELDS.AUTHOR]: author } : {}),
+		}));
 	}
 	return frontmatter;
 }
 
-function serializeMarkdownRecord(
-	content: string,
-	frontmatter: Record<string, unknown>,
-	ensureBlankLine = false,
-): string {
-	const serialized = stringifyFrontmatter(content, frontmatter);
-	return ensureBlankLine ? serialized.replace(/^(---\n(?:.*\n)*?---)\n(?!$)/, "$1\n\n") : serialized;
+function serializeMarkdownRecord(content: string, frontmatter: Record<string, unknown>): string {
+	return stringifyFrontmatter(content, frontmatter);
 }
 
-interface TextSectionUpdate {
-	key: EditableTaskSection;
-	requireContent?: boolean;
-	update: (content: string, value: string) => string;
+function serializeOpaqueRecord(content: string, frontmatter: Record<string, unknown>): string {
+	let serialized = serializeMarkdownRecord(content, frontmatter);
+	if (!content.startsWith("\n") && serialized.startsWith("\n")) serialized = serialized.slice(1);
+	if (!content.endsWith("\n") && serialized.endsWith("\n")) serialized = serialized.slice(0, -1);
+	return serialized;
 }
 
-interface ChecklistManager {
-	parseAllCriteria(content: string): AcceptanceCriterion[];
-	updateContent(content: string, items: AcceptanceCriterion[]): string;
-}
-
-interface ChecklistSectionUpdate {
-	key: "acceptanceCriteriaItems" | "definitionOfDoneItems";
-	manager: ChecklistManager;
-}
-
-const taskTextSections = {
-	description: { key: "description", requireContent: true, update: updateTaskDescription },
-	implementationPlan: { key: "implementationPlan", update: updateTaskImplementationPlan },
-	implementationNotes: { key: "implementationNotes", update: updateTaskImplementationNotes },
-	finalSummary: { key: "finalSummary", update: updateTaskFinalSummary },
-} satisfies Record<EditableTaskSection, TextSectionUpdate>;
-
-const checklistSectionUpdates: readonly ChecklistSectionUpdate[] = [
-	{ key: "acceptanceCriteriaItems", manager: AcceptanceCriteriaManager },
-	{ key: "definitionOfDoneItems", manager: DefinitionOfDoneManager },
-];
-
-function updateTextSection(content: string, rawContent: string, task: Task, section: TextSectionUpdate): string {
-	const value = task[section.key];
-	if (
-		typeof value !== "string" ||
-		(section.requireContent && value.trim() === "") ||
-		!sectionChanged(rawContent, section.key, value)
-	) {
-		return content;
-	}
-	return section.update(content, value);
-}
-
-export function serializeTask(task: Task): string {
-	normalizeAssignee(task);
-	const frontmatter = taskFrontmatter(task);
-
-	let contentBody = task.rawContent ?? "";
+export function serializeTask(task: Task, retainedFrontmatter?: Record<string, unknown>): string {
 	const rawContent = task.rawContent ?? "";
-	contentBody = updateTextSection(contentBody, rawContent, task, taskTextSections.description);
-	for (const section of checklistSectionUpdates) {
-		const items = task[section.key];
-		if (
-			Array.isArray(items) &&
-			(items.length === 0 || !checklistItemsEqual(section.manager.parseAllCriteria(rawContent), items))
-		) {
-			contentBody = section.manager.updateContent(contentBody, items);
-		}
-	}
-	contentBody = updateTextSection(contentBody, rawContent, task, taskTextSections.implementationPlan);
-	contentBody = updateTextSection(contentBody, rawContent, task, taskTextSections.implementationNotes);
-	if (Array.isArray(task.comments)) {
-		const existingComments = CommentsManager.parseAllComments(rawContent);
-		const hasExistingComments = existingComments.length > 0;
-		if ((task.comments.length > 0 || hasExistingComments) && !commentItemsEqual(existingComments, task.comments)) {
-			contentBody = updateTaskComments(contentBody, task.comments);
-		}
-	}
-	contentBody = updateTextSection(contentBody, rawContent, task, taskTextSections.finalSummary);
-	return serializeMarkdownRecord(contentBody, frontmatter, true);
+	const serialized = serializeMarkdownRecord(rawContent, taskFrontmatter(task, retainedFrontmatter));
+	return rawContent.endsWith("\n") || !serialized.endsWith("\n") ? serialized : serialized.slice(0, -1);
 }
 
-export function serializeDecision(decision: Decision): string {
-	const frontmatter = {
-		id: decision.id,
-		title: decision.title,
-		date: decision.date,
-		status: decision.status,
+export function serializeDecision(decision: Decision, retained: Record<string, unknown> = {}): string {
+	const frontmatter: Record<string, unknown> = {
+		...retained,
+		[DECISION_FRONTMATTER_FIELDS.SCHEMA_VERSION]: DECISION_FRONTMATTER_SCHEMA_VERSION,
+		[DECISION_FRONTMATTER_FIELDS.ID]: decision.id,
+		[DECISION_FRONTMATTER_FIELDS.TITLE]: decision.title,
+		[DECISION_FRONTMATTER_FIELDS.DATE]: decision.date,
+		[DECISION_FRONTMATTER_FIELDS.STATUS]: decision.status,
+		[DECISION_FRONTMATTER_FIELDS.CONTEXT]: decision.context,
+		[DECISION_FRONTMATTER_FIELDS.DECISION]: decision.decision,
+		[DECISION_FRONTMATTER_FIELDS.CONSEQUENCES]: decision.consequences,
 	};
+	delete frontmatter[DECISION_FRONTMATTER_FIELDS.ALTERNATIVES];
+	if (decision.alternatives !== undefined)
+		frontmatter[DECISION_FRONTMATTER_FIELDS.ALTERNATIVES] = decision.alternatives;
+	return serializeOpaqueRecord(decision.rawContent, frontmatter);
+}
 
-	let content = `## Context\n\n${decision.context}\n\n`;
-	content += `## Decision\n\n${decision.decision}\n\n`;
-	content += `## Consequences\n\n${decision.consequences}`;
-
-	if (decision.alternatives) {
-		content += `\n\n## Alternatives\n\n${decision.alternatives}`;
-	}
-
-	return serializeMarkdownRecord(content, frontmatter);
+export function serializeMilestone(milestone: Milestone, retained: Record<string, unknown> = {}): string {
+	const frontmatter: Record<string, unknown> = {
+		...retained,
+		[MILESTONE_FRONTMATTER_FIELDS.SCHEMA_VERSION]: MILESTONE_FRONTMATTER_SCHEMA_VERSION,
+		[MILESTONE_FRONTMATTER_FIELDS.ID]: milestone.id,
+		[MILESTONE_FRONTMATTER_FIELDS.TITLE]: milestone.title,
+		[MILESTONE_FRONTMATTER_FIELDS.DESCRIPTION]: milestone.description,
+	};
+	delete frontmatter[MILESTONE_FRONTMATTER_FIELDS.DUE_DATE];
+	if (milestone.dueDate) frontmatter[MILESTONE_FRONTMATTER_FIELDS.DUE_DATE] = milestone.dueDate;
+	return serializeOpaqueRecord(milestone.rawContent, frontmatter);
 }
 
 export function serializeDocument(document: Document): string {
 	const frontmatter = {
-		id: document.id,
-		title: document.title,
-		type: document.type,
-		created_date: document.createdDate,
-		...(document.updatedDate && { updated_date: document.updatedDate }),
-		...(document.tags && document.tags.length > 0 && { tags: document.tags }),
+		[DOCUMENT_FRONTMATTER_FIELDS.ID]: document.id,
+		[DOCUMENT_FRONTMATTER_FIELDS.TITLE]: document.title,
+		[DOCUMENT_FRONTMATTER_FIELDS.TYPE]: document.type,
+		[DOCUMENT_FRONTMATTER_FIELDS.CREATED_DATE]: document.createdDate,
+		...(document.updatedDate && { [DOCUMENT_FRONTMATTER_FIELDS.UPDATED_DATE]: document.updatedDate }),
+		...(document.tags && document.tags.length > 0 && { [DOCUMENT_FRONTMATTER_FIELDS.TAGS]: document.tags }),
 	};
 
 	return serializeMarkdownRecord(document.rawContent, frontmatter);
-}
-
-type EditableTaskSection = "description" | "implementationPlan" | "implementationNotes" | "finalSummary";
-
-function updateTaskSection(content: string, section: EditableTaskSection, value: string): string {
-	return updateStructuredSections(content, { ...getStructuredSections(content), [section]: value });
-}
-
-function updateTaskImplementationPlan(content: string, plan: string): string {
-	return updateTaskSection(content, "implementationPlan", plan);
-}
-
-export function updateTaskImplementationNotes(content: string, notes: string): string {
-	return updateTaskSection(content, "implementationNotes", notes);
-}
-
-function updateTaskFinalSummary(content: string, summary: string): string {
-	return updateTaskSection(content, "finalSummary", summary);
-}
-
-function updateTaskComments(content: string, comments: NonNullable<Task["comments"]>): string {
-	return CommentsManager.updateContent(content, comments);
-}
-
-export function updateTaskDescription(content: string, description: string): string {
-	return updateTaskSection(content, "description", description);
 }

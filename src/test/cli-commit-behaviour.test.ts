@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import { GitOperations } from "../git/operations.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 async function getCommitCountInTest(dir: string): Promise<number> {
 	const result = await $`git rev-list --count HEAD`.cwd(dir).quiet();
@@ -53,7 +53,7 @@ describe("CLI Auto-Commit Behavior with autoCommit: false", () => {
 	test("should not commit when creating a task if autoCommit is false", async () => {
 		const initialCommitCount = await getCommitCountInTest(TEST_DIR);
 
-		const result = await $`bun ${CLI_PATH} task create "No-commit Task"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "No-commit Task"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const finalCommitCount = await getCommitCountInTest(TEST_DIR);
@@ -66,7 +66,7 @@ describe("CLI Auto-Commit Behavior with autoCommit: false", () => {
 	test("should not commit when creating a document if autoCommit is false", async () => {
 		const initialCommitCount = await getCommitCountInTest(TEST_DIR);
 
-		const result = await $`bun ${CLI_PATH} doc create "No-commit Doc"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} doc create "No-commit Doc"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const finalCommitCount = await getCommitCountInTest(TEST_DIR);
@@ -79,7 +79,7 @@ describe("CLI Auto-Commit Behavior with autoCommit: false", () => {
 	test("should not commit when creating a decision if autoCommit is false", async () => {
 		const initialCommitCount = await getCommitCountInTest(TEST_DIR);
 
-		const result = await $`bun ${CLI_PATH} decision create "No-commit Decision"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} decision create "No-commit Decision"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const finalCommitCount = await getCommitCountInTest(TEST_DIR);
@@ -125,7 +125,7 @@ describe("CLI Auto-Commit Behavior with autoCommit: true", () => {
 	test("should commit when creating a document if autoCommit is true", async () => {
 		const initialCommitCount = await getCommitCountInTest(TEST_DIR);
 
-		const result = await $`bun ${CLI_PATH} doc create "Auto-commit Doc"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} doc create "Auto-commit Doc"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const finalCommitCount = await getCommitCountInTest(TEST_DIR);
@@ -138,7 +138,7 @@ describe("CLI Auto-Commit Behavior with autoCommit: true", () => {
 	test("should commit when creating a decision if autoCommit is true", async () => {
 		const initialCommitCount = await getCommitCountInTest(TEST_DIR);
 
-		const result = await $`bun ${CLI_PATH} decision create "Auto-commit Decision"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} decision create "Auto-commit Decision"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const finalCommitCount = await getCommitCountInTest(TEST_DIR);

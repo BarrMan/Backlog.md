@@ -1,6 +1,7 @@
 import { t } from "elysia";
 import { MilestoneWorkflow, MilestoneWorkflowError } from "../../core/milestone-workflow.ts";
 import { collectMilestoneAliasKeys } from "../../core/milestones.ts";
+import { API_ROUTES } from "../api-routes.ts";
 import { parseDueDate } from "../validation.ts";
 import { type ResourceDependencies, scopedResource } from "./api.ts";
 import { errorSchema, milestoneSchema } from "./schemas.ts";
@@ -40,7 +41,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		};
 	};
 	app.get(
-		"/api/milestones",
+		API_ROUTES.MILESTONES,
 		async ({ core }) => {
 			try {
 				return await core.filesystem.listMilestones();
@@ -52,7 +53,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		{ response: t.Array(milestoneSchema) },
 	);
 	app.get(
-		"/api/milestones/archived",
+		API_ROUTES.ARCHIVED_MILESTONES,
 		async ({ core }) => {
 			try {
 				return await core.filesystem.listArchivedMilestones();
@@ -64,7 +65,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		{ response: t.Array(milestoneSchema) },
 	);
 	app.post(
-		"/api/milestones",
+		API_ROUTES.MILESTONES,
 		async ({ body: input, core, set }) => {
 			try {
 				const title = input.title?.trim() ?? "";
@@ -97,7 +98,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		{ body, response: { 201: milestoneSchema, 400: errorSchema, 500: errorSchema } },
 	);
 	app.get(
-		"/api/milestones/:id",
+		API_ROUTES.MILESTONE(":id"),
 		async ({ params, core, set }) => {
 			try {
 				const value = await core.filesystem.loadMilestone(params.id);
@@ -112,7 +113,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		{ params, response: { 200: milestoneSchema, 404: errorSchema } },
 	);
 	app.put(
-		"/api/milestones/:id",
+		API_ROUTES.MILESTONE(":id"),
 		async ({ params, body: input, core, set }) => {
 			try {
 				const title = input.title?.trim() ?? "";
@@ -158,7 +159,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		},
 	);
 	app.delete(
-		"/api/milestones/:id",
+		API_ROUTES.MILESTONE(":id"),
 		async ({ params, body: input, core, set }) => {
 			try {
 				if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -203,7 +204,7 @@ export function milestonesResource({ services }: ResourceDependencies) {
 		},
 	);
 	app.post(
-		"/api/milestones/:id/archive",
+		API_ROUTES.MILESTONE_ARCHIVE(":id"),
 		async ({ params, core, set }) => {
 			try {
 				const result = await core.archiveMilestone(params.id);

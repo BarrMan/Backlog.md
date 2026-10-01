@@ -1,7 +1,7 @@
 import { DEFAULT_INIT_CONFIG, DEFAULT_STATUSES } from "../constants/index.ts";
 import type { FileSystem } from "../file-system/operations.ts";
 import type { GitOperations } from "../git/operations.ts";
-import type { Task } from "../types/index.ts";
+import { TASK_SOURCE, type Task } from "../types/index.ts";
 import { AmbiguousTaskIdError } from "../utils/task-path.ts";
 import { createTaskSearchIndex } from "../utils/task-search.ts";
 import { TaskCollectionParentNotFoundError } from "./domain-errors.ts";
@@ -31,7 +31,7 @@ export class PersistentTaskRead {
 			this.filesystem.listTasks(),
 			this.filesystem.listCompletedTasks(),
 		]);
-		const localTasks = activeTasks.map((task) => ({ ...task, source: "local" as const }));
+		const localTasks = activeTasks.map((task) => ({ ...task, source: TASK_SOURCE.LOCAL }));
 		const branchStateEntries = branches
 			? (
 					await new BranchTaskLoader(this.git).load(

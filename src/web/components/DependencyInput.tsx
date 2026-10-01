@@ -1,5 +1,6 @@
 import React, { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Task } from "../../types";
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 import { formatBrowserShortcut, matchesBrowserShortcut } from "../lib/keyboard-shortcuts";
 import { buildTaskIdIndex, resolveTaskReference } from "../utils/task-id-links";
 import { getDependencySuggestions, handleDependencyInputChange } from "./dependency-input-state";
@@ -26,7 +27,7 @@ const DependencyInput: React.FC<DependencyInputProps> = ({
 	availableTasks,
 	suggestableTasks,
 	currentTaskId,
-	label = "Dependencies",
+	label = TASK_FIELD_LABELS.DEPENDENCIES,
 	disabled,
 }) => {
 	const [inputValue, setInputValue] = useState("");

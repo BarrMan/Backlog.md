@@ -7,7 +7,7 @@ import {
 	filterTasksForKanban,
 	mergeUnifiedViewFilters,
 	type UnifiedViewFilters,
-} from "../ui/unified-view.ts";
+} from "../ui/unified/controller.ts";
 import { NO_MILESTONE_FILTER_VALUE } from "../utils/milestone-filter.ts";
 import { applyTaskFilters } from "../utils/task-search.ts";
 

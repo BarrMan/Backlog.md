@@ -2,10 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 const EXPECT_PATH = Bun.which("expect");
 const RUN_INTERACTIVE_TUI_TESTS = process.env.RUN_INTERACTIVE_TUI_TESTS === "1";
 
@@ -43,7 +43,7 @@ log_user 0
 set env(NO_COLOR) {1}
 set env(EDITOR) {${editorScriptPath}}
 set env(VISUAL) {${editorScriptPath}}
-spawn {bun} {${CLI_PATH}} init {CursorPty} --defaults --agent-instructions cursor
+spawn {bun} {${CLI_COMMAND}} init {CursorPty} --defaults --agent-instructions cursor
 expect {
 	-re {Initialization Summary} {}
 	timeout { exit 91 }

@@ -4,6 +4,7 @@ import { parseTask } from "../markdown/parser.ts";
 describe("Structured Acceptance Criteria parsing", () => {
 	it("parses acceptance criteria items with checked state and index", () => {
 		const content = `---
+task_schema_version: 2
 id: task-999
 title: Demo
 status: To Do
@@ -11,17 +12,17 @@ assignee: []
 created_date: 2025-01-01
 labels: []
 dependencies: []
+description: X
+acceptance_criteria:
+  - index: 1
+    text: First
+    checked: false
+  - index: 2
+    text: Second
+    checked: true
 ---
 
-## Description
-
-X
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [ ] #1 First
-- [x] #2 Second
-<!-- AC:END -->
+Free-form body.
 `;
 
 		const task = parseTask(content);

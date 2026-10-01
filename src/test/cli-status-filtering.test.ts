@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -20,7 +20,7 @@ const task = (id: string, title: string, status: string) => ({
 });
 
 describe("CLI status filtering", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("cli-status");
@@ -39,7 +39,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("filters by a single status", async () => {
-		const result = await $`bun ${cliPath} task list --status "To Do" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --status "To Do" --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -52,7 +52,7 @@ describe("CLI status filtering", () => {
 	// unfinished returned only whatever matched the last status — and silently, since an empty
 	// list looks exactly like having no such tasks.
 	it("returns tasks matching any status when the flag is repeated", async () => {
-		const result = await $`bun ${cliPath} task list --status "To Do" --status "In Progress" --plain`
+		const result = await $`${cliCommand} task list --status "To Do" --status "In Progress" --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -64,7 +64,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("accepts several statuses separated by commas", async () => {
-		const result = await $`bun ${cliPath} task list --status "To Do,Done" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --status "To Do,Done" --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -74,7 +74,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("matches statuses case-insensitively when several are given", async () => {
-		const result = await $`bun ${cliPath} task list --status "to do" --status "DONE" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --status "to do" --status "DONE" --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -83,7 +83,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("still honours exclude-status alongside several included statuses", async () => {
-		const result = await $`bun ${cliPath} task list --status "To Do" --status "Done" --exclude-status Done --plain`
+		const result = await $`${cliCommand} task list --status "To Do" --status "Done" --exclude-status Done --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -94,7 +94,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("returns tasks matching any repeated status in JSON output", async () => {
-		const result = await $`bun ${cliPath} task list --status "To Do" --status "Done" --json`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --status "To Do" --status "Done" --json`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr.toString()).toBe("");
@@ -105,7 +105,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("accepts comma-separated statuses in JSON output", async () => {
-		const result = await $`bun ${cliPath} task list --status "To Do,Done" --json`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --status "To Do,Done" --json`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const ids = JSON.parse(result.stdout.toString()).tasks.map((t: { id: string }) => t.id);
@@ -115,7 +115,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("search keeps every selected status in plain output when the flag is repeated", async () => {
-		const result = await $`bun ${cliPath} search work --type task --status "To Do" --status "Done" --plain`
+		const result = await $`${cliCommand} search work --type task --status "To Do" --status "Done" --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -127,7 +127,7 @@ describe("CLI status filtering", () => {
 	});
 
 	it("search accepts comma-separated statuses in plain output", async () => {
-		const result = await $`bun ${cliPath} search work --type task --status "to do,DONE" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} search work --type task --status "to do,DONE" --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();

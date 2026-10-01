@@ -3,15 +3,15 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 
 async function runCli(args: string[], cwd = TEST_DIR) {
-	return await $`bun ${[CLI_PATH, ...args]}`.cwd(cwd).nothrow().quiet();
+	return await $`${[...CLI_COMMAND, ...args]}`.cwd(cwd).nothrow().quiet();
 }
 
 describe("CLI JSON output", () => {
@@ -340,7 +340,7 @@ describe("CLI JSON output", () => {
 			"---\nid: TASK-99\ntitle: [unclosed\nstatus: Done\n---\n\nbroken\n",
 		);
 		const corpusReads = async (args: string[]) => {
-			const result = await $`bun ${[CLI_PATH, ...args]}`
+			const result = await $`${[...CLI_COMMAND, ...args]}`
 				.cwd(TEST_DIR)
 				.env({ ...process.env, DEBUG: "1" })
 				.quiet();
@@ -450,7 +450,7 @@ describe("CLI JSON output", () => {
 
 	it("is parseable through a shell pipe", async () => {
 		const result =
-			await $`bun ${CLI_PATH} task list --json | bun -e ${"const value = await Bun.stdin.json(); console.log(value.kind);"}`
+			await $`${CLI_COMMAND} task list --json | bun -e ${"const value = await Bun.stdin.json(); console.log(value.kind);"}`
 				.cwd(TEST_DIR)
 				.nothrow()
 				.quiet();

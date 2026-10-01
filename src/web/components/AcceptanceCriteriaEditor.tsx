@@ -1,6 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AcceptanceCriterion } from "../../types";
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 
 interface Props {
 	criteria: AcceptanceCriterion[];
@@ -13,7 +14,7 @@ interface Props {
 const AcceptanceCriteriaEditor: React.FC<Props> = ({
 	criteria: initial,
 	onChange,
-	label = "Acceptance Criteria",
+	label = TASK_FIELD_LABELS.ACCEPTANCE_CRITERIA,
 	preserveIndices = false,
 	disableToggle = false,
 }) => {

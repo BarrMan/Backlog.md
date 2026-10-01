@@ -4,11 +4,16 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { BacklogConfig } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = process.env.TUI_TEST_CLI_PATH?.trim() || getTestCliPath();
+const TUI_CLI_PATH = process.env.TUI_TEST_CLI_PATH?.trim();
 const CLI_RUNTIME = process.env.TUI_TEST_CLI_RUNTIME?.trim() ?? "bun";
+const CLI_COMMAND = TUI_CLI_PATH
+	? CLI_RUNTIME.length === 0
+		? [TUI_CLI_PATH]
+		: [CLI_RUNTIME, TUI_CLI_PATH]
+	: getTestCliCommand();
 const TRANSCRIPT_DIR = join(process.cwd(), "tmp", "tui-interactive-transcripts");
 const EXPECT_PATH = Bun.which("expect");
 const RUN_INTERACTIVE_TUI_TESTS = process.env.RUN_INTERACTIVE_TUI_TESTS === "1";
@@ -33,11 +38,7 @@ if (skipReason) {
 const itInteractive = skipReason ? it.skip : it;
 
 function buildSpawnCommand(cliArgs: string[]): string {
-	const argsSegment = cliArgs.map((arg) => `"${arg}"`).join(" ");
-	if (CLI_RUNTIME.length === 0) {
-		return `spawn {${CLI_PATH}} ${argsSegment}`;
-	}
-	return `spawn {${CLI_RUNTIME}} {${CLI_PATH}} ${argsSegment}`;
+	return `spawn ${[...CLI_COMMAND, ...cliArgs].map((part) => `{${part}}`).join(" ")}`;
 }
 
 describe("interactive task list --ready", () => {

@@ -1,8 +1,8 @@
 ---
 id: m-4
-title: "GUI Kanban Board Development"
+title: GUI Kanban Board Development
+milestone_schema_version: 1
+description: >-
+  This milestone focuses on building the graphical user interface (GUI) for the
+  Kanban board view in the Backlog.md tool.
 ---
-
-## Description
-
-This milestone focuses on building the graphical user interface (GUI) for the Kanban board view in the Backlog.md tool.

@@ -5,7 +5,7 @@ import {
 	runTaskEditWizard,
 	TaskWizardCancelledError,
 	type TaskWizardPromptRunner,
-} from "../commands/task-wizard.ts";
+} from "../cli/features/tasks/wizard.ts";
 import type { Task } from "../types/index.ts";
 
 type PromptResponses = Record<string, string | string[]>;

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { watch, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import type { BacklogConfig } from "../types/index.ts";
@@ -43,20 +43,6 @@ async function replaceConfigFile(content: string): Promise<void> {
 	const replacementPath = `${configPath}.replacement`;
 	await Bun.write(replacementPath, content);
 	await rename(replacementPath, configPath);
-}
-
-function observeConfigEvent(configPath: string): { observed: Promise<void>; stop: () => void } {
-	let resolveObserved: () => void = () => {};
-	const observed = new Promise<void>((resolve) => {
-		resolveObserved = resolve;
-	});
-	const watcher = watch(dirname(configPath), (_eventType, filename) => {
-		if (filename && basename(filename.toString()) === basename(configPath)) {
-			watcher.close();
-			resolveObserved();
-		}
-	});
-	return { observed, stop: () => watcher.close() };
 }
 
 describe("config watcher", () => {
@@ -506,14 +492,19 @@ describe("config watcher", () => {
 
 		let callbackCount = 0;
 		let resolvePublished: (config: BacklogConfig) => void = () => {};
+		let resolveNextPublished: (config: BacklogConfig) => void = () => {};
 		const publishedConfig = new Promise<BacklogConfig>((resolve) => {
 			resolvePublished = resolve;
+		});
+		const nextPublished = new Promise<BacklogConfig>((resolve) => {
+			resolveNextPublished = resolve;
 		});
 		const configWatcher = watchConfig(core, {
 			onConfigChanged: (config) => {
 				if (!config) return;
 				callbackCount += 1;
 				resolvePublished(config);
+				if (callbackCount === 2) resolveNextPublished(config);
 			},
 		});
 
@@ -523,11 +514,13 @@ describe("config watcher", () => {
 			expect((await core.filesystem.loadConfig())?.projectName).toBe("Changed before startup");
 			expect(callbackCount).toBe(1);
 
-			const event = observeConfigEvent(core.filesystem.configFilePath);
 			await replaceConfigFile(changedBeforeStartup);
-			await withTimeout(event.observed, "duplicate startup config event");
-			event.stop();
-			expect(callbackCount).toBe(1);
+			const changedAfterStartup = changedBeforeStartup.replace("Changed before startup", "Changed after startup");
+			await replaceConfigFile(changedAfterStartup);
+			expect((await withTimeout(nextPublished, "next startup config reconciliation")).projectName).toBe(
+				"Changed after startup",
+			);
+			expect(callbackCount).toBe(2);
 		} finally {
 			configWatcher.stop();
 		}
@@ -626,8 +619,12 @@ describe("config watcher", () => {
 		let callbackAttempts = 0;
 		const cachedProjectNames: string[] = [];
 		let resolvePublished: () => void = () => {};
+		let resolveNextPublished: (config: BacklogConfig | null) => void = () => {};
 		const published = new Promise<void>((resolve) => {
 			resolvePublished = resolve;
+		});
+		const nextPublished = new Promise<BacklogConfig | null>((resolve) => {
+			resolveNextPublished = resolve;
 		});
 		const configWatcher = watchConfig(core, {
 			onConfigChanged: async (config) => {
@@ -636,8 +633,9 @@ describe("config watcher", () => {
 				if (callbackAttempts <= 10) {
 					throw new Error("Injected publication failure");
 				}
-				expect(config?.projectName).toBe("Retried publication");
-				resolvePublished();
+				expect(config?.projectName).toBe(callbackAttempts === 11 ? "Retried publication" : "Next retried publication");
+				if (callbackAttempts === 11) resolvePublished();
+				if (callbackAttempts === 12) resolveNextPublished(config);
 			},
 		});
 
@@ -647,11 +645,13 @@ describe("config watcher", () => {
 			expect(callbackAttempts).toBe(11);
 			expect(cachedProjectNames).toEqual(Array.from({ length: 11 }, () => "Retried publication"));
 
-			const event = observeConfigEvent(core.filesystem.configFilePath);
 			await replaceConfigFile(updatedContent);
-			await withTimeout(event.observed, "duplicate retried config event");
-			event.stop();
-			expect(callbackAttempts).toBe(11);
+			const nextContent = updatedContent.replace("Retried publication", "Next retried publication");
+			await replaceConfigFile(nextContent);
+			expect((await withTimeout(nextPublished, "next retried config publication"))?.projectName).toBe(
+				"Next retried publication",
+			);
+			expect(callbackAttempts).toBe(12);
 		} finally {
 			configWatcher.stop();
 		}

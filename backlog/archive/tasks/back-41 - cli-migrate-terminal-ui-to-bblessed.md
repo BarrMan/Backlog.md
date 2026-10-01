@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-41
 title: 'CLI: Migrate terminal UI to bblessed'
 status: To Do
@@ -7,8 +8,13 @@ created_date: '2025-06-11'
 labels:
   - cli
 dependencies: []
+description: >-
+  Migrate all CLI interfaces to bblessed for a consistent terminal
+  experience.\n\n## Acceptance Criteria\n- [ ] Init wizard uses bblessed forms
+  and lists\n- [ ] Task view uses bblessed components\n- [ ] Doc view uses
+  bblessed components\n- [ ] Board view rendered with bblessed\n- [ ] Remove
+  prompts-based UI code\n- [ ] Works on Node and Bun
+acceptance_criteria: []
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-Migrate all CLI interfaces to bblessed for a consistent terminal experience.\n\n## Acceptance Criteria\n- [ ] Init wizard uses bblessed forms and lists\n- [ ] Task view uses bblessed components\n- [ ] Doc view uses bblessed components\n- [ ] Board view rendered with bblessed\n- [ ] Remove prompts-based UI code\n- [ ] Works on Node and Bun

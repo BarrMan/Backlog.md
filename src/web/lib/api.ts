@@ -1,6 +1,7 @@
 import type { DuplicateRepairPlan, DuplicateRepairResult } from "../../core/duplicate-task-repair.ts";
 import type { TaskStatistics } from "../../core/statistics.ts";
 import type { TaskDetail } from "../../core/task-detail.ts";
+import { API_ROUTES, HTTP_HEADER, HTTP_METHOD, MEDIA_TYPE, PROJECT_SCOPE_HEADER } from "../../server/api-routes.ts";
 import type {
 	BacklogConfig,
 	Decision,
@@ -12,9 +13,8 @@ import type {
 	Task,
 	TaskSummary,
 } from "../../types/index.ts";
+import type { BacklogConfigSource, BacklogDirectorySource } from "../../utils/backlog-directory.ts";
 import { setTaskDetailCacheCapacity, TaskDetailCache } from "./task-detail-cache";
-
-const API_BASE = "/api";
 
 export interface ReorderTaskPayload {
 	taskId: string;
@@ -85,8 +85,8 @@ export interface InitializationStatus {
 	projectScope?: string;
 	projectPath: string;
 	backlogDirectory?: string | null;
-	backlogDirectorySource?: "backlog" | ".backlog" | "custom" | null;
-	configLocation?: "folder" | "root" | null;
+	backlogDirectorySource?: BacklogDirectorySource | null;
+	configLocation?: BacklogConfigSource | null;
 	rootConfigPath?: string | null;
 }
 
@@ -197,7 +197,9 @@ export class ApiClient {
 		const { retries: configuredRetries = 3, timeout = 10000 } = this.config;
 		const retries =
 			retriesOverride ??
-			(options.method === undefined || options.method === "GET" || options.method === "HEAD" ? configuredRetries : 0);
+			(options.method === undefined || options.method === HTTP_METHOD.GET || options.method === HTTP_METHOD.HEAD
+				? configuredRetries
+				: 0);
 		let lastError: Error | undefined;
 
 		for (let attempt = 0; attempt <= retries; attempt++) {
@@ -233,7 +235,7 @@ export class ApiClient {
 			const response = await fetch(url, {
 				...options,
 				signal: controller.signal,
-				headers: { "Content-Type": "application/json", "X-Backlog-Project-Scope": scope, ...options.headers },
+				headers: { [HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON, [PROJECT_SCOPE_HEADER]: scope, ...options.headers },
 			});
 			if (response.ok) return response;
 			const errorData = await response.json().catch(() => null);
@@ -254,7 +256,7 @@ export class ApiClient {
 	}
 
 	private async fetchStatus(): Promise<InitializationStatus & { projectScope: string }> {
-		const response = await fetch(`${API_BASE}/status`, { headers: { "Content-Type": "application/json" } });
+		const response = await fetch(API_ROUTES.STATUS, { headers: { [HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON } });
 		if (!response.ok) throw await toApiError(response, "Failed to check initialization status");
 		const status = (await response.json()) as InitializationStatus;
 		if (!status.projectScope) throw new ApiError("Server did not provide a project scope");
@@ -302,7 +304,7 @@ export class ApiClient {
 		// Default to true for cross-branch loading to match TUI behavior
 		if (options?.crossBranch !== false) params.append("crossBranch", "true");
 
-		const url = `${API_BASE}/tasks${params.toString() ? `?${params.toString()}` : ""}`;
+		const url = `${API_ROUTES.TASKS}${params.toString() ? `?${params.toString()}` : ""}`;
 		return this.fetchJson<TaskSummary[]>(url);
 	}
 
@@ -313,11 +315,11 @@ export class ApiClient {
 	}
 
 	async fetchDrafts(): Promise<Task[]> {
-		return this.fetchJson<Task[]>(`${API_BASE}/drafts`);
+		return this.fetchJson<Task[]>(API_ROUTES.DRAFTS);
 	}
 
 	async promoteDraft(id: string): Promise<void> {
-		await this.fetchWithRetry(`${API_BASE}/drafts/${encodeURIComponent(id)}/promote`, { method: "POST" });
+		await this.fetchWithRetry(API_ROUTES.DRAFT_PROMOTE(encodeURIComponent(id)), { method: HTTP_METHOD.POST });
 	}
 
 	setTaskDetailCacheCapacity(capacity: number) {
@@ -326,18 +328,18 @@ export class ApiClient {
 
 	async search(options: SearchOptions = {}): Promise<SearchResult[]> {
 		const params = buildSearchParams(options);
-		const url = `${API_BASE}/search${params.toString() ? `?${params.toString()}` : ""}`;
+		const url = `${API_ROUTES.SEARCH}${params.toString() ? `?${params.toString()}` : ""}`;
 		return this.fetchJson<SearchResult[]>(url);
 	}
 
 	/** Reads one task through the detail path, so the response already carries its dependency graph. */
 	async fetchTask(id: string): Promise<TaskDetail> {
-		return this.fetchJson<TaskDetail>(`${API_BASE}/task/${encodeURIComponent(id)}`);
+		return this.fetchJson<TaskDetail>(API_ROUTES.LEGACY_TASK(encodeURIComponent(id)));
 	}
 
 	async createTask(task: Omit<Task, "id" | "createdDate">): Promise<Task> {
-		const created = await this.fetchJson<Task>(`${API_BASE}/tasks`, {
-			method: "POST",
+		const created = await this.fetchJson<Task>(API_ROUTES.TASKS, {
+			method: HTTP_METHOD.POST,
 			body: JSON.stringify(task),
 		});
 		this.detailCache.invalidate();
@@ -345,8 +347,8 @@ export class ApiClient {
 	}
 
 	async updateTask(id: string, updates: TaskUpdateRequest): Promise<Task> {
-		const updated = await this.fetchJson<Task>(`${API_BASE}/tasks/${id}`, {
-			method: "PUT",
+		const updated = await this.fetchJson<Task>(API_ROUTES.TASK(id), {
+			method: HTTP_METHOD.PUT,
 			body: JSON.stringify(updates),
 		});
 		this.detailCache.invalidate();
@@ -355,9 +357,9 @@ export class ApiClient {
 
 	async reorderTask(payload: ReorderTaskPayload): Promise<{ success: boolean; task: Task; changedTasks: Task[] }> {
 		const result = await this.fetchJson<{ success: boolean; task: Task; changedTasks: Task[] }>(
-			`${API_BASE}/tasks/reorder`,
+			API_ROUTES.TASK_REORDER,
 			{
-				method: "POST",
+				method: HTTP_METHOD.POST,
 				body: JSON.stringify(payload),
 			},
 		);
@@ -366,8 +368,8 @@ export class ApiClient {
 	}
 
 	async moveTasks(payload: MoveTasksPayload): Promise<MoveTasksResult> {
-		const result = await this.fetchJson<MoveTasksResult>(`${API_BASE}/tasks/move`, {
-			method: "POST",
+		const result = await this.fetchJson<MoveTasksResult>(API_ROUTES.TASK_MOVE, {
+			method: HTTP_METHOD.POST,
 			body: JSON.stringify(payload),
 		});
 		this.detailCache.invalidate();
@@ -377,8 +379,8 @@ export class ApiClient {
 	// Not retried, for the same reason demote is not: the second attempt would target a task the
 	// first attempt already archived, and its "not found" would replace the real outcome.
 	async archiveTask(id: string): Promise<TaskVacancyResponse> {
-		const response = await this.fetchWithoutRetry(`${API_BASE}/tasks/${id}`, {
-			method: "DELETE",
+		const response = await this.fetchWithoutRetry(API_ROUTES.TASK(id), {
+			method: HTTP_METHOD.DELETE,
 		});
 		const result = await response.json();
 		this.detailCache.invalidate();
@@ -386,15 +388,15 @@ export class ApiClient {
 	}
 
 	async completeTask(id: string): Promise<void> {
-		await this.fetchWithRetry(`${API_BASE}/tasks/${id}/complete`, {
-			method: "POST",
+		await this.fetchWithRetry(API_ROUTES.TASK_COMPLETE(id), {
+			method: HTTP_METHOD.POST,
 		});
 		this.detailCache.invalidate();
 	}
 
 	async demoteTask(id: string): Promise<TaskVacancyResponse> {
-		const response = await this.fetchWithoutRetry(`${API_BASE}/tasks/${encodeURIComponent(id)}/demote`, {
-			method: "POST",
+		const response = await this.fetchWithoutRetry(API_ROUTES.TASK_DEMOTE(encodeURIComponent(id)), {
+			method: HTTP_METHOD.POST,
 		});
 		const result = await response.json();
 		this.detailCache.invalidate();
@@ -408,7 +410,7 @@ export class ApiClient {
 		return this.fetchJson<{
 			count: number;
 			tasks: Array<{ id: string; title: string; updatedDate?: string; createdDate: string }>;
-		}>(`${API_BASE}/tasks/cleanup?age=${age}`);
+		}>(`${API_ROUTES.TASK_CLEANUP}?age=${age}`);
 	}
 
 	async executeCleanup(
@@ -420,48 +422,48 @@ export class ApiClient {
 			totalCount: number;
 			message: string;
 			failedTasks?: string[];
-		}>(`${API_BASE}/tasks/cleanup/execute`, {
-			method: "POST",
+		}>(API_ROUTES.TASK_CLEANUP_EXECUTE, {
+			method: HTTP_METHOD.POST,
 			body: JSON.stringify({ age }),
 		});
 	}
 
 	async fetchDuplicateTaskRepairPlan(): Promise<DuplicateRepairPlan> {
-		return await this.fetchJson<DuplicateRepairPlan>(`${API_BASE}/tasks/duplicates`);
+		return await this.fetchJson<DuplicateRepairPlan>(API_ROUTES.TASK_DUPLICATES);
 	}
 
 	async repairDuplicateTaskIds(fingerprint: string): Promise<DuplicateRepairResult> {
-		return await this.fetchJson<DuplicateRepairResult>(`${API_BASE}/tasks/duplicates`, {
-			method: "POST",
+		return await this.fetchJson<DuplicateRepairResult>(API_ROUTES.TASK_DUPLICATES, {
+			method: HTTP_METHOD.POST,
 			body: JSON.stringify({ fingerprint }),
 		});
 	}
 
 	async fetchStatuses(): Promise<string[]> {
-		const response = await this.fetchWithRetry(`${API_BASE}/statuses`);
+		const response = await this.fetchWithRetry(API_ROUTES.STATUSES);
 		return response.json();
 	}
 
 	async fetchConfig(): Promise<BacklogConfig> {
-		const response = await this.fetchWithRetry(`${API_BASE}/config`);
+		const response = await this.fetchWithRetry(API_ROUTES.CONFIG);
 		return response.json();
 	}
 
 	async updateConfig(config: BacklogConfig): Promise<BacklogConfig> {
-		const response = await this.fetchWithRetry(`${API_BASE}/config`, {
-			method: "PUT",
+		const response = await this.fetchWithRetry(API_ROUTES.CONFIG, {
+			method: HTTP_METHOD.PUT,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify(config),
 		});
 		const updated = await response.json();
-		this.adoptExplicitProjectScope(response.headers.get("X-Backlog-Project-Scope") ?? "");
+		this.adoptExplicitProjectScope(response.headers.get(PROJECT_SCOPE_HEADER) ?? "");
 		return updated;
 	}
 
 	async fetchDoc(filename: string): Promise<Document> {
-		const response = await this.fetchWithRetry(`${API_BASE}/docs/${encodeURIComponent(filename)}`);
+		const response = await this.fetchWithRetry(API_ROUTES.DOC(encodeURIComponent(filename)));
 		return response.json();
 	}
 
@@ -474,10 +476,10 @@ export class ApiClient {
 			payload.path = path;
 		}
 
-		const response = await this.fetchWithRetry(`${API_BASE}/docs/${encodeURIComponent(filename)}`, {
-			method: "PUT",
+		const response = await this.fetchWithRetry(API_ROUTES.DOC(encodeURIComponent(filename)), {
+			method: HTTP_METHOD.PUT,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify(payload),
 		});
@@ -485,10 +487,10 @@ export class ApiClient {
 	}
 
 	async createDoc(filename: string, content: string, path?: string): Promise<Document & { success?: boolean }> {
-		const response = await this.fetchWithRetry(`${API_BASE}/docs`, {
-			method: "POST",
+		const response = await this.fetchWithRetry(API_ROUTES.DOCS, {
+			method: HTTP_METHOD.POST,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify({ filename, content, path }),
 		});
@@ -496,25 +498,28 @@ export class ApiClient {
 	}
 
 	async fetchDecision(id: string): Promise<Decision> {
-		const response = await this.fetchWithRetry(`${API_BASE}/decisions/${encodeURIComponent(id)}`);
+		const response = await this.fetchWithRetry(API_ROUTES.DECISION(encodeURIComponent(id)));
 		return response.json();
 	}
 
-	async updateDecision(id: string, content: string): Promise<void> {
-		await this.fetchWithRetry(`${API_BASE}/decisions/${encodeURIComponent(id)}`, {
-			method: "PUT",
+	async updateDecision(
+		id: string,
+		decision: Pick<Decision, "title" | "context" | "decision" | "consequences" | "alternatives">,
+	): Promise<void> {
+		await this.fetchWithRetry(API_ROUTES.DECISION(encodeURIComponent(id)), {
+			method: HTTP_METHOD.PUT,
 			headers: {
-				"Content-Type": "text/plain",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
-			body: content,
+			body: JSON.stringify(decision),
 		});
 	}
 
 	async createDecision(title: string): Promise<Decision> {
-		const response = await this.fetchWithRetry(`${API_BASE}/decisions`, {
-			method: "POST",
+		const response = await this.fetchWithRetry(API_ROUTES.DECISIONS, {
+			method: HTTP_METHOD.POST,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify({ title }),
 		});
@@ -522,20 +527,20 @@ export class ApiClient {
 	}
 
 	async fetchMilestones(): Promise<Milestone[]> {
-		const response = await this.fetchWithRetry(`${API_BASE}/milestones`);
+		const response = await this.fetchWithRetry(API_ROUTES.MILESTONES);
 		return response.json();
 	}
 
 	async fetchArchivedMilestones(): Promise<Milestone[]> {
-		const response = await this.fetchWithRetry(`${API_BASE}/milestones/archived`);
+		const response = await this.fetchWithRetry(API_ROUTES.ARCHIVED_MILESTONES);
 		return response.json();
 	}
 
 	async createMilestone(title: string, description?: string, dueDate?: string): Promise<Milestone> {
-		const response = await this.fetchWithRetry(`${API_BASE}/milestones`, {
-			method: "POST",
+		const response = await this.fetchWithRetry(API_ROUTES.MILESTONES, {
+			method: HTTP_METHOD.POST,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify({ title, description, dueDate }),
 		});
@@ -547,10 +552,10 @@ export class ApiClient {
 		title: string,
 		dueDate?: string | null,
 	): Promise<{ success: boolean; milestone?: Milestone | null; message?: string }> {
-		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
-			method: "PUT",
+		const response = await this.fetchWithRetry(API_ROUTES.MILESTONE(encodeURIComponent(id)), {
+			method: HTTP_METHOD.PUT,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify({ title, dueDate }),
 		});
@@ -561,10 +566,10 @@ export class ApiClient {
 		id: string,
 		options: { taskHandling?: "clear" | "keep" | "reassign"; reassignTo?: string } = {},
 	): Promise<{ success: boolean; message?: string }> {
-		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
-			method: "DELETE",
+		const response = await this.fetchWithRetry(API_ROUTES.MILESTONE(encodeURIComponent(id)), {
+			method: HTTP_METHOD.DELETE,
 			headers: {
-				"Content-Type": "application/json",
+				[HTTP_HEADER.CONTENT_TYPE]: MEDIA_TYPE.JSON,
 			},
 			body: JSON.stringify(options),
 		});
@@ -572,8 +577,8 @@ export class ApiClient {
 	}
 
 	async archiveMilestone(id: string): Promise<{ success: boolean; milestone?: Milestone | null }> {
-		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}/archive`, {
-			method: "POST",
+		const response = await this.fetchWithRetry(API_ROUTES.MILESTONE_ARCHIVE(encodeURIComponent(id)), {
+			method: HTTP_METHOD.POST,
 		});
 		return response.json();
 	}
@@ -583,7 +588,7 @@ export class ApiClient {
 	> {
 		return this.fetchJson<
 			TaskStatistics & { statusCounts: Record<string, number>; priorityCounts: Record<string, number> }
-		>(`${API_BASE}/statistics`);
+		>(API_ROUTES.STATISTICS);
 	}
 
 	async checkStatus(): Promise<InitializationStatus> {
@@ -594,8 +599,8 @@ export class ApiClient {
 	async initializeProject(options: {
 		projectName: string;
 		backlogDirectory?: string;
-		backlogDirectorySource?: "backlog" | ".backlog" | "custom";
-		configLocation?: "folder" | "root";
+		backlogDirectorySource?: BacklogDirectorySource;
+		configLocation?: BacklogConfigSource;
 		integrationMode: "mcp" | "cli" | "none";
 		mcpClients?: ("claude" | "codex" | "gemini" | "kiro" | "guide")[];
 		agentInstructions?: ("CLAUDE.md" | "AGENTS.md" | "GEMINI.md" | ".github/copilot-instructions.md")[];
@@ -619,8 +624,8 @@ export class ApiClient {
 			projectName: string;
 			mcpResults?: Record<string, string>;
 			projectScope: string;
-		}>(`${API_BASE}/init`, {
-			method: "POST",
+		}>(API_ROUTES.INIT, {
+			method: HTTP_METHOD.POST,
 			body: JSON.stringify(options),
 		});
 		if (!result.success) throw new ApiError("Initialization failed");

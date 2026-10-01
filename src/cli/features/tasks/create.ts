@@ -8,8 +8,6 @@ import {
 	statusType,
 	taskType,
 } from "../../../commands/help-schema.ts";
-import { buildTaskCreateInput, createAndReportTask } from "../../../commands/task-create.ts";
-import { runTaskCreateWizard } from "../../../commands/task-wizard.ts";
 import { Core } from "../../../index.ts";
 import { resolveMilestoneInputForStorage } from "../../../utils/milestone-storage.ts";
 import { getValidStatuses } from "../../../utils/status.ts";
@@ -17,6 +15,8 @@ import type { CliRuntime } from "../../runtime.ts";
 import type { CliReadOutput } from "../read-output.ts";
 import { isPlainRequested } from "../read-output.ts";
 import { createMultiValueAccumulator, hasCreateFieldFlags } from "../task/edit-fields.ts";
+import { buildTaskCreateInput, createAndReportTask } from "./input.ts";
+import { runTaskCreateWizard } from "./wizard.ts";
 
 async function resolveMilestone(core: Core, milestone: string): Promise<string> {
 	const [activeMilestones, archivedMilestones] = await Promise.all([

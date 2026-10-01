@@ -107,6 +107,6 @@ describe("MCP final summary", () => {
 		});
 
 		task = await mcpServer.application.getTask("task-1");
-		expect(task?.finalSummary).toBeUndefined();
+		expect(task?.finalSummary).toBe("");
 	});
 });

@@ -18,6 +18,23 @@ For long lists, use `--max-count` and `--skip`, follow the printed `Next` comman
 
 For scripts, `task list`, `task view`, `task <id>`, and `search` accept versioned `--json` output instead of `--plain`. `task list --json --watch` emits complete replacement responses; read successive JSON values, not individual lines. Filters and local scope are unchanged; intermediate edits may be coalesced. Restart for a fresh snapshot.
 
+### Structured Markdown Records
+
+All application-owned structured fields live in versioned YAML frontmatter, not Markdown body sections: tasks and drafts use `task_schema_version: 2`, decisions use `decision_schema_version: 1`, and milestones use `milestone_schema_version: 1`. Bodies are opaque free-form Markdown.
+
+```yaml
+---
+task_schema_version: 2
+id: TASK-1
+title: Example task
+description: |
+  Structured task text belongs in frontmatter.
+---
+
+# Scratchpad
+- [ ] This is body content.
+```
+
 ### Required Guides
 
 Read the matching guide before taking these actions; this overview does not replace it:

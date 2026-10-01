@@ -1,5 +1,7 @@
 import { type ReactNode, useEffect, useState } from "react";
+import { DEFAULT_STATUSES } from "../../constants/index.ts";
 import type { Milestone, Task } from "../../types";
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 import type { TaskReadiness } from "../../utils/readiness";
 import { formatReadinessBlockers } from "../../utils/readiness";
 import type { TaskDetailFormState } from "../hooks/use-task-detail-form-state";
@@ -75,7 +77,7 @@ const StatusSelect = ({
 		apiClient
 			.fetchStatuses()
 			.then(setStatuses)
-			.catch(() => setStatuses(["To Do", "In Progress", "Done"]));
+			.catch(() => setStatuses([...DEFAULT_STATUSES]));
 	}, []);
 	const options = !current || statuses.includes(current) ? statuses : [current, ...statuses];
 	return (
@@ -133,7 +135,7 @@ function TaskMetadataDates({
 			)}
 			{mode !== "preview" && (
 				<MetadataCard>
-					<TaskDetailsSectionHeader title="Due" />
+					<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.DUE} />
 					<input
 						type="date"
 						value={dueDate}
@@ -163,7 +165,7 @@ function TaskMetadataIdentity({
 		<>
 			{task && (
 				<MetadataCard>
-					<TaskDetailsSectionHeader title="Title" />
+					<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.TITLE} />
 					<input
 						type="text"
 						value={title}
@@ -180,7 +182,7 @@ function TaskMetadataIdentity({
 				</MetadataCard>
 			)}
 			<MetadataCard>
-				<TaskDetailsSectionHeader title="Status" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.STATUS} />
 				<StatusSelect
 					current={status}
 					onChange={(value) => void onInlineMetaUpdate({ status: value })}
@@ -188,7 +190,7 @@ function TaskMetadataIdentity({
 				/>
 			</MetadataCard>
 			<MetadataCard>
-				<TaskDetailsSectionHeader title="Assignee" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.ASSIGNEE} />
 				<ChipInput
 					name="assignee"
 					label=""
@@ -199,7 +201,7 @@ function TaskMetadataIdentity({
 				/>
 			</MetadataCard>
 			<MetadataCard>
-				<TaskDetailsSectionHeader title="Labels" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.LABELS} />
 				<ChipInput
 					name="labels"
 					label=""
@@ -210,7 +212,7 @@ function TaskMetadataIdentity({
 				/>
 			</MetadataCard>
 			<MetadataCard>
-				<TaskDetailsSectionHeader title="Priority" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.PRIORITY} />
 				<select
 					className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? "opacity-60 cursor-not-allowed" : ""}`}
 					value={priority}
@@ -252,7 +254,7 @@ function TaskMetadataType({
 	const { taskType } = state;
 	return (
 		<MetadataCard>
-			<TaskDetailsSectionHeader title="Type" />
+			<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.TYPE} />
 			<select
 				aria-label="Task type"
 				aria-invalid={typeUpdateError ? true : undefined}
@@ -301,7 +303,7 @@ function TaskMetadataProject({
 	if (projectOptions.length === 0) return null;
 	return (
 		<MetadataCard>
-			<TaskDetailsSectionHeader title="Project" />
+			<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.PROJECT} />
 			<select
 				className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? "opacity-60 cursor-not-allowed" : ""}`}
 				aria-label="Task project"
@@ -343,7 +345,7 @@ function TaskMetadataMilestone({
 >) {
 	return (
 		<MetadataCard>
-			<TaskDetailsSectionHeader title="Milestone" />
+			<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.MILESTONE} />
 			<select
 				className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? "opacity-60 cursor-not-allowed" : ""}`}
 				value={milestoneSelectionValue}

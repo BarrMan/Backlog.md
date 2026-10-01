@@ -5,7 +5,6 @@ import type { FileSystem } from "../file-system/operations.ts";
 import { type DraftFileReference, isConfigValueError, isCreateLockError } from "../file-system/operations.ts";
 import type { GitOperations } from "../git/operations.ts";
 import { EntityType, type Task, type TaskUpdateInput } from "../types/index.ts";
-import { normalizeAssignee } from "../utils/assignee.ts";
 import { formatStoredDate } from "../utils/date.ts";
 import { normalizeId } from "../utils/prefix-config.ts";
 import { validateDependencies } from "../utils/task-builders.ts";
@@ -74,7 +73,6 @@ export class TaskLifecycleService {
 					filePath: undefined,
 					...(mutated || draft.status !== canonicalStatus ? { updatedDate: formatStoredDate() } : {}),
 				};
-				normalizeAssignee(promotedTask);
 				const savedPath = await this.filesystem.saveTask(promotedTask);
 				if (current.filePath) await unlink(current.filePath);
 				return { promotedTask, savedPath };
@@ -121,7 +119,6 @@ export class TaskLifecycleService {
 					filePath: undefined,
 					...(mutated || current.status !== "Draft" ? { updatedDate: formatStoredDate() } : {}),
 				};
-				normalizeAssignee(demotedDraft);
 				const savedPath = await this.filesystem.saveDraft(demotedDraft);
 				if (current.filePath) await unlink(current.filePath);
 				return { demotedDraft, savedPath };
@@ -211,7 +208,6 @@ export class TaskLifecycleService {
 								: draft.status,
 						filePath: undefined,
 					};
-					normalizeAssignee(promotedTask);
 					const savedPath = await this.filesystem.saveTask(promotedTask);
 					await unlink(sourcePath);
 					await this.filesystem.loadTask(promotedTask.id);

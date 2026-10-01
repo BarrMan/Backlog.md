@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
-import type { PromptRunner } from "../commands/advanced-config-wizard.ts";
-import { configureAdvancedSettings } from "../commands/configure-advanced-settings.ts";
+import type { PromptRunner } from "../cli/features/config/advanced-wizard.ts";
+import { configureAdvancedSettings } from "../cli/features/config/configure-advanced-settings.ts";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("Config commands", () => {
 	let core: Core;
@@ -158,25 +158,25 @@ describe("Config commands", () => {
 	});
 
 	it("exposes config list/get/set subcommands", async () => {
-		const listOutput = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).text();
+		const listOutput = await $`${CLI_COMMAND} config list`.cwd(TEST_DIR).text();
 		expect(listOutput).toContain("Configuration:");
 
-		await $`bun ${CLI_PATH} config set defaultPort 7001`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} config set defaultPort 7001`.cwd(TEST_DIR).quiet();
 
-		const portOutput = await $`bun ${CLI_PATH} config get defaultPort`.cwd(TEST_DIR).text();
+		const portOutput = await $`${CLI_COMMAND} config get defaultPort`.cwd(TEST_DIR).text();
 		expect(portOutput.trim()).toBe("7001");
 	});
 
 	it("round-trips hideEmptyColumns through config get/set/list", async () => {
-		const defaultGet = await $`bun ${CLI_PATH} config get hideEmptyColumns`.cwd(TEST_DIR).text();
+		const defaultGet = await $`${CLI_COMMAND} config get hideEmptyColumns`.cwd(TEST_DIR).text();
 		expect(defaultGet.trim()).toBe("false");
 
-		await $`bun ${CLI_PATH} config set hideEmptyColumns true`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} config set hideEmptyColumns true`.cwd(TEST_DIR).quiet();
 
-		const afterSet = await $`bun ${CLI_PATH} config get hideEmptyColumns`.cwd(TEST_DIR).text();
+		const afterSet = await $`${CLI_COMMAND} config get hideEmptyColumns`.cwd(TEST_DIR).text();
 		expect(afterSet.trim()).toBe("true");
 
-		const listOutput = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).text();
+		const listOutput = await $`${CLI_COMMAND} config list`.cwd(TEST_DIR).text();
 		expect(listOutput).toContain("hideEmptyColumns: true");
 	});
 
@@ -205,31 +205,31 @@ describe("Config commands", () => {
 		const existing = await Bun.file(configPath).text();
 		await Bun.write(configPath, `${existing.trimEnd()}\npriorities:\n  - Critical\n  - Normal\n`);
 
-		const priorities = await $`bun ${CLI_PATH} config get priorities`.cwd(TEST_DIR).text();
+		const priorities = await $`${CLI_COMMAND} config get priorities`.cwd(TEST_DIR).text();
 		expect(priorities.trim()).toBe("Critical, Normal");
 
-		const created = await $`bun ${CLI_PATH} task create "Block priority task" --priority Critical --plain`
+		const created = await $`${CLI_COMMAND} task create "Block priority task" --priority Critical --plain`
 			.cwd(TEST_DIR)
 			.text();
 		expect(created).toContain("Priority: Critical");
 	});
 
 	it("gives accurate guidance when setting list keys and consistent unknown-key lists", async () => {
-		const priorities = await $`bun ${CLI_PATH} config set priorities High`.cwd(TEST_DIR).nothrow().quiet();
+		const priorities = await $`${CLI_COMMAND} config set priorities High`.cwd(TEST_DIR).nothrow().quiet();
 		const prioritiesError = priorities.stderr.toString();
 		expect(priorities.exitCode).not.toBe(0);
 		expect(prioritiesError).toContain("priorities cannot be set directly");
 		expect(prioritiesError).toContain("backlog config get priorities");
 		expect(prioritiesError).not.toContain("list-priorities");
 
-		const types = await $`bun ${CLI_PATH} config set types bug`.cwd(TEST_DIR).nothrow().quiet();
+		const types = await $`${CLI_COMMAND} config set types bug`.cwd(TEST_DIR).nothrow().quiet();
 		const typesError = types.stderr.toString();
 		expect(types.exitCode).not.toBe(0);
 		expect(typesError).toContain("types cannot be set directly");
 		expect(typesError).not.toContain("Unknown config key");
 
-		const unknownGet = await $`bun ${CLI_PATH} config get nosuchkey`.cwd(TEST_DIR).nothrow().quiet();
-		const unknownSet = await $`bun ${CLI_PATH} config set nosuchkey value`.cwd(TEST_DIR).nothrow().quiet();
+		const unknownGet = await $`${CLI_COMMAND} config get nosuchkey`.cwd(TEST_DIR).nothrow().quiet();
+		const unknownSet = await $`${CLI_COMMAND} config set nosuchkey value`.cwd(TEST_DIR).nothrow().quiet();
 		const getKeys = unknownGet.stderr.toString().match(/Available keys: .*/)?.[0];
 		const setKeys = unknownSet.stderr.toString().match(/Available keys: .*/)?.[0];
 		expect(getKeys).toBeDefined();
@@ -239,10 +239,10 @@ describe("Config commands", () => {
 	it("surfaces milestones in config get/list from milestone files", async () => {
 		await core.filesystem.createMilestone("Release 1");
 
-		const milestonesOutput = await $`bun ${CLI_PATH} config get milestones`.cwd(TEST_DIR).text();
+		const milestonesOutput = await $`${CLI_COMMAND} config get milestones`.cwd(TEST_DIR).text();
 		expect(milestonesOutput.trim()).toBe("m-0");
 
-		const listOutput = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).text();
+		const listOutput = await $`${CLI_COMMAND} config list`.cwd(TEST_DIR).text();
 		expect(listOutput).toContain("milestones: [m-0]");
 	});
 
@@ -269,20 +269,20 @@ describe("Config commands", () => {
 	});
 
 	it("round-trips defaultAssignee through config set, get, and list", async () => {
-		const unset = await $`bun ${CLI_PATH} config get defaultAssignee`.cwd(TEST_DIR).nothrow().quiet();
+		const unset = await $`${CLI_COMMAND} config get defaultAssignee`.cwd(TEST_DIR).nothrow().quiet();
 		expect(unset.exitCode).toBe(0);
 		expect(unset.stdout.toString().trim()).toBe("");
 
-		const set = await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice, @bob"}`.cwd(TEST_DIR).nothrow().quiet();
+		const set = await $`${CLI_COMMAND} config set defaultAssignee ${"@alice, @bob"}`.cwd(TEST_DIR).nothrow().quiet();
 		expect(set.exitCode).toBe(0);
 
 		core.filesystem.invalidateConfigCache();
 		expect((await core.filesystem.loadConfig())?.defaultAssignee).toEqual(["@alice", "@bob"]);
 
-		const get = await $`bun ${CLI_PATH} config get defaultAssignee`.cwd(TEST_DIR).nothrow().quiet();
+		const get = await $`${CLI_COMMAND} config get defaultAssignee`.cwd(TEST_DIR).nothrow().quiet();
 		expect(get.stdout.toString().trim()).toBe("@alice, @bob");
 
-		const list = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).nothrow().quiet();
+		const list = await $`${CLI_COMMAND} config list`.cwd(TEST_DIR).nothrow().quiet();
 		expect(list.stdout.toString()).toContain("defaultAssignee: [@alice, @bob]");
 
 		const cleared = await runTestCli(["config", "set", "defaultAssignee", ""], { cwd: TEST_DIR });
@@ -310,7 +310,7 @@ describe("Config commands", () => {
 
 	it("round-trips a defaultAssignee containing characters that need YAML escaping", async () => {
 		const quoted = '@a"b\\c';
-		const set = await $`bun ${CLI_PATH} config set defaultAssignee ${quoted}`.cwd(TEST_DIR).nothrow().quiet();
+		const set = await $`${CLI_COMMAND} config set defaultAssignee ${quoted}`.cwd(TEST_DIR).nothrow().quiet();
 		expect(set.exitCode).toBe(0);
 
 		expect(await Bun.file(core.filesystem.configFilePath).text()).toContain('default_assignee: ["@a\\"b\\\\c"]');
@@ -452,7 +452,7 @@ describe("Config commands", () => {
 	});
 
 	it("reports a rejected config value without half-applying a draft or milestone mutation", async () => {
-		await $`bun ${CLI_PATH} draft create "Draftling" --plain`.cwd(TEST_DIR).nothrow().quiet();
+		await $`${CLI_COMMAND} draft create "Draftling" --plain`.cwd(TEST_DIR).nothrow().quiet();
 		await core.filesystem.createMilestone("Mile");
 		const configPath = core.filesystem.configFilePath;
 		const baseConfig = await Bun.file(configPath).text();
@@ -470,7 +470,7 @@ describe("Config commands", () => {
 			["milestone", "add", "Second"],
 			["milestone", "archive", "Mile"],
 		]) {
-			const result = await $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} ${args}`.cwd(TEST_DIR).nothrow().quiet();
 			const stderr = result.stderr.toString();
 			expect(result.exitCode).not.toBe(0);
 			expect(stderr).toContain("Backlog could not start because");
@@ -506,7 +506,7 @@ describe("Config commands", () => {
 		// Bare invocation must not report an initialized project as uninitialized, the empty-list fast
 		// path must not hide the failure, and MCP startup must not bury the message behind a summary.
 		for (const args of [["task", "list", "--plain"], ["--plain"], ["draft", "list", "--plain"], ["mcp", "start"]]) {
-			const result = await $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} ${args}`.cwd(TEST_DIR).nothrow().quiet();
 			const stderr = result.stderr.toString();
 			expect(result.exitCode).not.toBe(0);
 			expect(stderr).toStartWith("Backlog could not start because");
@@ -560,7 +560,7 @@ describe("Config commands", () => {
 
 		// First init without the flag: the EDITOR env fallback must still apply
 		const env = { ...process.env, EDITOR: "backlog-sentinel-editor", VISUAL: "backlog-sentinel-editor" };
-		const initial = await $`bun ${CLI_PATH} init "Editor Project" --defaults --integration-mode none`
+		const initial = await $`${CLI_COMMAND} init "Editor Project" --defaults --integration-mode none`
 			.cwd(initDir)
 			.env(env)
 			.nothrow()

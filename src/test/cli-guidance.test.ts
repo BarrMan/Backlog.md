@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { CLI_AGENT_NUDGE } from "../index.ts";
 import { BACKLOG_CWD_ENV } from "../utils/runtime-cwd.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 const normalizeCliOutput = (output: string) => output.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI Integration", () => {
 	beforeEach(async () => {
@@ -24,7 +24,7 @@ describe("CLI Integration", () => {
 
 	describe("root command", () => {
 		it("prints the root entry when --plain is passed without a subcommand", async () => {
-			const result = await $`bun ${CLI_PATH} --plain`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} --plain`.cwd(TEST_DIR).nothrow().quiet();
 			const output = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).toBe(0);
@@ -39,7 +39,7 @@ describe("CLI Integration", () => {
 
 	describe("backlog instructions command", () => {
 		it("prints the guide index by default", async () => {
-			const output = await $`bun ${CLI_PATH} instructions`.cwd(TEST_DIR).text();
+			const output = await $`${CLI_COMMAND} instructions`.cwd(TEST_DIR).text();
 
 			expect(output).toContain("Backlog.md instructions");
 			expect(output).toContain("Start here:");
@@ -60,7 +60,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("lists available instruction guides", async () => {
-			const output = await $`bun ${CLI_PATH} instructions --list`.cwd(TEST_DIR).text();
+			const output = await $`${CLI_COMMAND} instructions --list`.cwd(TEST_DIR).text();
 
 			expect(output).toContain("overview");
 			expect(output).toContain("task-creation");
@@ -70,15 +70,15 @@ describe("CLI Integration", () => {
 		});
 
 		it("prints selected instruction guides", async () => {
-			const overview = normalizeCliOutput(await $`bun ${CLI_PATH} instructions overview`.cwd(TEST_DIR).text());
-			const taskCreation = normalizeCliOutput(await $`bun ${CLI_PATH} instructions task-creation`.cwd(TEST_DIR).text());
+			const overview = normalizeCliOutput(await $`${CLI_COMMAND} instructions overview`.cwd(TEST_DIR).text());
+			const taskCreation = normalizeCliOutput(await $`${CLI_COMMAND} instructions task-creation`.cwd(TEST_DIR).text());
 			const taskExecution = normalizeCliOutput(
-				await $`bun ${CLI_PATH} instructions task-execution`.cwd(TEST_DIR).text(),
+				await $`${CLI_COMMAND} instructions task-execution`.cwd(TEST_DIR).text(),
 			);
 			const taskFinalization = normalizeCliOutput(
-				await $`bun ${CLI_PATH} instructions task-finalization`.cwd(TEST_DIR).text(),
+				await $`${CLI_COMMAND} instructions task-finalization`.cwd(TEST_DIR).text(),
 			);
-			const initRequired = normalizeCliOutput(await $`bun ${CLI_PATH} instructions init-required`.cwd(TEST_DIR).text());
+			const initRequired = normalizeCliOutput(await $`${CLI_COMMAND} instructions init-required`.cwd(TEST_DIR).text());
 
 			expect(overview).toContain("## Backlog.md Overview (CLI)");
 			expect(overview).toContain("### Find and Read Work");
@@ -211,11 +211,11 @@ describe("CLI Integration", () => {
 				].join("\n"),
 			);
 
-			const overview = await $`bun ${CLI_PATH} instructions overview`.cwd(TEST_DIR).text();
-			const taskCreation = await $`bun ${CLI_PATH} instructions task-creation`.cwd(TEST_DIR).text();
-			const createHelp = await $`bun ${CLI_PATH} task create --help`.cwd(TEST_DIR).text();
-			const listHelp = await $`bun ${CLI_PATH} task list --help`.cwd(TEST_DIR).text();
-			const editHelp = await $`bun ${CLI_PATH} task edit --help`.cwd(TEST_DIR).text();
+			const overview = await $`${CLI_COMMAND} instructions overview`.cwd(TEST_DIR).text();
+			const taskCreation = await $`${CLI_COMMAND} instructions task-creation`.cwd(TEST_DIR).text();
+			const createHelp = await $`${CLI_COMMAND} task create --help`.cwd(TEST_DIR).text();
+			const listHelp = await $`${CLI_COMMAND} task list --help`.cwd(TEST_DIR).text();
+			const editHelp = await $`${CLI_COMMAND} task edit --help`.cwd(TEST_DIR).text();
 
 			expect(overview).toContain("backlog task view FEAT-123 --plain");
 			expect(taskCreation).toContain('backlog task create -p FEAT-10 "Set up shell"');
@@ -247,9 +247,9 @@ describe("CLI Integration", () => {
 			await mkdir(outsideDir, { recursive: true });
 			const env = { ...process.env, [BACKLOG_CWD_ENV]: TEST_DIR };
 
-			const overview = await $`bun ${CLI_PATH} instructions overview`.cwd(outsideDir).env(env).text();
-			const createHelp = await $`bun ${CLI_PATH} task create --help`.cwd(outsideDir).env(env).text();
-			const editHelp = await $`bun ${CLI_PATH} task edit --help`.cwd(outsideDir).env(env).text();
+			const overview = await $`${CLI_COMMAND} instructions overview`.cwd(outsideDir).env(env).text();
+			const createHelp = await $`${CLI_COMMAND} task create --help`.cwd(outsideDir).env(env).text();
+			const editHelp = await $`${CLI_COMMAND} task edit --help`.cwd(outsideDir).env(env).text();
 
 			expect(overview).toContain("backlog task view FEAT-123 --plain");
 			expect(createHelp).toContain("status: one of configured statuses: Draft, Ready, Review, Closed");
@@ -263,7 +263,7 @@ describe("CLI Integration", () => {
 
 		it("explains completion as periodic cleanup in workflow guidance", async () => {
 			for (const name of ["overview", "task-finalization"]) {
-				const guide = await $`bun ${CLI_PATH} instructions ${name}`.cwd(TEST_DIR).text();
+				const guide = await $`${CLI_COMMAND} instructions ${name}`.cwd(TEST_DIR).text();
 				expect(guide).toContain("periodic cleanup");
 				expect(guide).toContain("backlog task complete");
 				expect(guide).toContain("record and dependency links");
@@ -274,7 +274,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("rejects unknown instruction guides with valid options", async () => {
-			const result = await $`bun ${CLI_PATH} instructions does-not-exist`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} instructions does-not-exist`.cwd(TEST_DIR).nothrow().quiet();
 			const output = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).toBe(1);
@@ -286,8 +286,8 @@ describe("CLI Integration", () => {
 
 	describe("command help input schemas", () => {
 		it("shows input schema details for init and instructions", async () => {
-			const initHelp = await $`bun ${CLI_PATH} init --help`.cwd(TEST_DIR).text();
-			const instructionsHelp = await $`bun ${CLI_PATH} instructions --help`.cwd(TEST_DIR).text();
+			const initHelp = await $`${CLI_COMMAND} init --help`.cwd(TEST_DIR).text();
+			const instructionsHelp = await $`${CLI_COMMAND} instructions --help`.cwd(TEST_DIR).text();
 
 			expect(initHelp).toContain("Input schema:");
 			expect(initHelp).toContain("projectName: String");
@@ -304,12 +304,12 @@ describe("CLI Integration", () => {
 		});
 
 		it("shows task command field types in help", async () => {
-			const createHelp = await $`bun ${CLI_PATH} task create --help`.cwd(TEST_DIR).text();
-			const listHelp = await $`bun ${CLI_PATH} task list --help`.cwd(TEST_DIR).text();
-			const editHelp = await $`bun ${CLI_PATH} task edit --help`.cwd(TEST_DIR).text();
+			const createHelp = await $`${CLI_COMMAND} task create --help`.cwd(TEST_DIR).text();
+			const listHelp = await $`${CLI_COMMAND} task list --help`.cwd(TEST_DIR).text();
+			const editHelp = await $`${CLI_COMMAND} task edit --help`.cwd(TEST_DIR).text();
 			const createHelpCompact = createHelp.replace(/\s+/g, " ");
 			const editHelpCompact = editHelp.replace(/\s+/g, " ");
-			const completeHelp = await $`bun ${CLI_PATH} task complete --help`.cwd(TEST_DIR).text();
+			const completeHelp = await $`${CLI_COMMAND} task complete --help`.cwd(TEST_DIR).text();
 
 			expect(createHelp).toContain("title: String");
 			expect(createHelp).toContain("description: Markdown");
@@ -373,13 +373,13 @@ describe("CLI Integration", () => {
 		});
 
 		it("documents real-newline handling once for every multiline Markdown flag", async () => {
-			const createHelp = await $`bun ${CLI_PATH} task create --help`.cwd(TEST_DIR).text();
-			const editHelp = await $`bun ${CLI_PATH} task edit --help`.cwd(TEST_DIR).text();
-			const listHelp = await $`bun ${CLI_PATH} task list --help`.cwd(TEST_DIR).text();
-			const docHelp = await $`bun ${CLI_PATH} doc update --help`.cwd(TEST_DIR).text();
-			const docCreateHelp = await $`bun ${CLI_PATH} doc create --help`.cwd(TEST_DIR).text();
-			const milestoneHelp = await $`bun ${CLI_PATH} milestone add --help`.cwd(TEST_DIR).text();
-			const draftHelp = (await $`bun ${CLI_PATH} draft create --help`.cwd(TEST_DIR).text()).replace(/\s+/g, " ");
+			const createHelp = await $`${CLI_COMMAND} task create --help`.cwd(TEST_DIR).text();
+			const editHelp = await $`${CLI_COMMAND} task edit --help`.cwd(TEST_DIR).text();
+			const listHelp = await $`${CLI_COMMAND} task list --help`.cwd(TEST_DIR).text();
+			const docHelp = await $`${CLI_COMMAND} doc update --help`.cwd(TEST_DIR).text();
+			const docCreateHelp = await $`${CLI_COMMAND} doc create --help`.cwd(TEST_DIR).text();
+			const milestoneHelp = await $`${CLI_COMMAND} milestone add --help`.cwd(TEST_DIR).text();
+			const draftHelp = (await $`${CLI_COMMAND} draft create --help`.cwd(TEST_DIR).text()).replace(/\s+/g, " ");
 
 			for (const help of [createHelp, editHelp]) {
 				expect(help).toContain("Markdown fields:");
@@ -434,10 +434,10 @@ describe("CLI Integration", () => {
 				].join("\n"),
 			);
 
-			const createHelp = await $`bun ${CLI_PATH} task create --help`.cwd(TEST_DIR).text();
-			const listHelp = await $`bun ${CLI_PATH} task list --help`.cwd(TEST_DIR).text();
-			const searchHelp = await $`bun ${CLI_PATH} search --help`.cwd(TEST_DIR).text();
-			const editHelp = await $`bun ${CLI_PATH} task edit --help`.cwd(TEST_DIR).text();
+			const createHelp = await $`${CLI_COMMAND} task create --help`.cwd(TEST_DIR).text();
+			const listHelp = await $`${CLI_COMMAND} task list --help`.cwd(TEST_DIR).text();
+			const searchHelp = await $`${CLI_COMMAND} search --help`.cwd(TEST_DIR).text();
+			const editHelp = await $`${CLI_COMMAND} task edit --help`.cwd(TEST_DIR).text();
 
 			expect(createHelp).toContain("status: one of configured statuses: Draft, Ready, Review, Closed");
 			expect(listHelp).toContain("status: one or more of configured statuses: Ready, Review, Closed");
@@ -449,10 +449,10 @@ describe("CLI Integration", () => {
 		});
 
 		it("shows document, config, search, and cleanup schemas in help", async () => {
-			const docHelp = await $`bun ${CLI_PATH} doc update --help`.cwd(TEST_DIR).text();
-			const configHelp = await $`bun ${CLI_PATH} config set --help`.cwd(TEST_DIR).text();
-			const searchHelp = await $`bun ${CLI_PATH} search --help`.cwd(TEST_DIR).text();
-			const cleanupHelp = await $`bun ${CLI_PATH} cleanup --help`.cwd(TEST_DIR).text();
+			const docHelp = await $`${CLI_COMMAND} doc update --help`.cwd(TEST_DIR).text();
+			const configHelp = await $`${CLI_COMMAND} config set --help`.cwd(TEST_DIR).text();
+			const searchHelp = await $`${CLI_COMMAND} search --help`.cwd(TEST_DIR).text();
+			const cleanupHelp = await $`${CLI_COMMAND} cleanup --help`.cwd(TEST_DIR).text();
 
 			expect(docHelp).toContain("content: Markdown");
 			expect(docHelp).toContain("path: Docs-relative path");
@@ -470,8 +470,8 @@ describe("CLI Integration", () => {
 
 	describe("self-correcting CLI errors", () => {
 		it("suggests likely commands and options", async () => {
-			const unknownCommand = await $`bun ${CLI_PATH} tesk list`.cwd(TEST_DIR).nothrow().quiet();
-			const unknownOption = await $`bun ${CLI_PATH} task list --statuz To Do`.cwd(TEST_DIR).nothrow().quiet();
+			const unknownCommand = await $`${CLI_COMMAND} tesk list`.cwd(TEST_DIR).nothrow().quiet();
+			const unknownOption = await $`${CLI_COMMAND} task list --statuz To Do`.cwd(TEST_DIR).nothrow().quiet();
 			const commandOutput = unknownCommand.stdout.toString() + unknownCommand.stderr.toString();
 			const optionOutput = unknownOption.stdout.toString() + unknownOption.stderr.toString();
 
@@ -486,7 +486,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("points missing required arguments to help", async () => {
-			const result = await $`bun ${CLI_PATH} task view`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} task view`.cwd(TEST_DIR).nothrow().quiet();
 			const output = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).not.toBe(0);
@@ -495,10 +495,10 @@ describe("CLI Integration", () => {
 		});
 
 		it("keeps validation errors concise and actionable", async () => {
-			await $`bun ${CLI_PATH} init ErrorProj --defaults --integration-mode none`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} init ErrorProj --defaults --integration-mode none`.cwd(TEST_DIR).quiet();
 
-			const priority = await $`bun ${CLI_PATH} task list --priority urgent`.cwd(TEST_DIR).nothrow().quiet();
-			const docPath = await $`bun ${CLI_PATH} doc create "Unsafe" -p ../outside`.cwd(TEST_DIR).nothrow().quiet();
+			const priority = await $`${CLI_COMMAND} task list --priority urgent`.cwd(TEST_DIR).nothrow().quiet();
+			const docPath = await $`${CLI_COMMAND} doc create "Unsafe" -p ../outside`.cwd(TEST_DIR).nothrow().quiet();
 			const priorityOutput = priority.stdout.toString() + priority.stderr.toString();
 			const docPathOutput = docPath.stdout.toString() + docPath.stderr.toString();
 

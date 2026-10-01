@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-200
 title: Add Claude Code integration with workflow commands during init
 status: To Do
@@ -12,22 +13,50 @@ dependencies:
   - task-24.1
   - task-208
 priority: medium
+description: >-
+  Enable users to leverage Claude Code's custom commands feature by generating a
+  .claude directory with pre-configured workflow prompts when running 'backlog
+  init'. This will streamline common backlog.md workflows like parsing PRDs,
+  planning tasks, managing branches, and conducting code reviews.
+
+
+  Based on contribution from PR #235:
+  https://github.com/MrLesk/Backlog.md/pull/235
+acceptance_criteria:
+  - index: 1
+    text: Claude Code template files are stored in src/templates/claude/
+    checked: false
+  - index: 2
+    text: >-
+      backlog init copies .claude directory to user's project with workflow
+      commands
+    checked: false
+  - index: 3
+    text: >-
+      Commands include: parse-prd, plan-task, suggest-next-task, daily-standup,
+      finish-task, branch-status, cleanup-branches, milestone-review
+    checked: false
+  - index: 4
+    text: Generated claude.yaml references local workflow markdown files correctly
+    checked: false
+  - index: 5
+    text: Documentation updated to explain Claude Code integration
+    checked: false
+  - index: 6
+    text: >-
+      init command prompts user whether to include Claude Code integration
+      (similar to agent instructions)
+    checked: false
+  - index: 7
+    text: >-
+      Init wizard asks user if they want to add Claude Code commands during
+      setup
+    checked: false
+  - index: 8
+    text: >-
+      If .claude/claude.yaml already exists, merge new commands intelligently
+      (append new commands, preserve existing ones)
+    checked: false
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-Enable users to leverage Claude Code's custom commands feature by generating a .claude directory with pre-configured workflow prompts when running 'backlog init'. This will streamline common backlog.md workflows like parsing PRDs, planning tasks, managing branches, and conducting code reviews.
-
-Based on contribution from PR #235: https://github.com/MrLesk/Backlog.md/pull/235
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [ ] #1 Claude Code template files are stored in src/templates/claude/
-- [ ] #2 backlog init copies .claude directory to user's project with workflow commands
-- [ ] #3 Commands include: parse-prd, plan-task, suggest-next-task, daily-standup, finish-task, branch-status, cleanup-branches, milestone-review
-- [ ] #4 Generated claude.yaml references local workflow markdown files correctly
-- [ ] #5 Documentation updated to explain Claude Code integration
-- [ ] #6 init command prompts user whether to include Claude Code integration (similar to agent instructions)
-- [ ] #7 Init wizard asks user if they want to add Claude Code commands during setup
-- [ ] #8 If .claude/claude.yaml already exists, merge new commands intelligently (append new commands, preserve existing ones)
-<!-- AC:END -->

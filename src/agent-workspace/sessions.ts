@@ -3,6 +3,7 @@ import { unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DEFAULT_IN_PROGRESS_STATUS, DEFAULT_STATUSES } from "../constants/index.ts";
 import type { Core } from "../core/backlog.ts";
+import { TASK_SOURCE } from "../types/index.ts";
 import { renderSessionBootstrap } from "./bootstrap.ts";
 import { resolveAgentConfiguration } from "./config.ts";
 import { hasEmptyHandoffInput } from "./handoff-input.ts";
@@ -11,10 +12,23 @@ import { type SessionState, SessionStore } from "./session-store.ts";
 import { fail, slug } from "./session-utils.ts";
 import { spawnSessionWorker } from "./session-worker-client.ts";
 import { ensureSessionWorktree } from "./session-worktree.ts";
-import type { AgentPreset, AgentSession, HandoffRequest, TaskSessions } from "./types.ts";
+import {
+	AGENT_SESSION_STATUS,
+	type AgentPreset,
+	type AgentSession,
+	HANDOFF_STATUS,
+	type HandoffRequest,
+	type HandoffStatus,
+	type TaskSessions,
+} from "./types.ts";
 
-const COMPLETED_HANDOFF_STATUS = "completed";
-const TERMINAL_HANDOFF_STATUSES = new Set([COMPLETED_HANDOFF_STATUS, "failed"]);
+const TERMINAL_HANDOFF_STATUSES = new Set<HandoffStatus>([HANDOFF_STATUS.COMPLETED, HANDOFF_STATUS.FAILED]);
+const COMPLETABLE_HANDOFF_STATUSES = new Set<HandoffStatus>([
+	HANDOFF_STATUS.REQUESTED,
+	HANDOFF_STATUS.FAILED,
+	HANDOFF_STATUS.READY,
+]);
+const REPLACEABLE_HANDOFF_STATUSES = new Set<HandoffStatus>([HANDOFF_STATUS.READY, HANDOFF_STATUS.FAILED]);
 
 export type { AgentSessionRunner } from "./session-process.ts";
 
@@ -65,9 +79,14 @@ export class AgentSessionService {
 		const paths = await this.store.paths(task.id);
 		let session: AgentSession | undefined;
 		await this.store.mutate(task.id, async (state) => {
-			if (state.handoff?.status === "replacing" && state.handoff.sessionId !== options.predecessorId)
+			if (state.handoff?.status === HANDOFF_STATUS.REPLACING && state.handoff.sessionId !== options.predecessorId)
 				throw new Error(`Task ${task.id} is replacing its agent session.`);
-			if (state.sessions.some((candidate) => candidate.status === "starting" || candidate.status === "running"))
+			if (
+				state.sessions.some(
+					(candidate) =>
+						candidate.status === AGENT_SESSION_STATUS.STARTING || candidate.status === AGENT_SESSION_STATUS.RUNNING,
+				)
+			)
 				throw new Error(`Task ${task.id} already has an active agent session.`);
 			const id = randomUUID();
 			const cwd =
@@ -83,7 +102,7 @@ export class AgentSessionService {
 				tmuxName: `backlog-${slug(task.id)}-${id.slice(0, 8)}`,
 				cwd,
 				createdAt: timestamp(),
-				status: "starting",
+				status: AGENT_SESSION_STATUS.STARTING,
 				ownerPid: process.pid,
 				...(options.predecessorId && { predecessorId: options.predecessorId }),
 				outputPath: join(paths.taskDir, `${id}.log`),
@@ -124,23 +143,23 @@ export class AgentSessionService {
 			}
 			await this.store.mutate(task.id, async (state) => {
 				const current = this.session(state, reserved.id);
-				current.status = "running";
+				current.status = AGENT_SESSION_STATUS.RUNNING;
 				current.ownerPid = undefined;
 				current.error = undefined;
 				state.hasSuccessfulSession = true;
 			});
-			reserved.status = "running";
+			reserved.status = AGENT_SESSION_STATUS.RUNNING;
 			return reserved;
 		} catch (error) {
 			await this.process.kill(reserved.tmuxName);
 			await this.store.mutate(task.id, async (state) => {
 				const current = this.session(state, reserved.id);
-				current.status = "failed";
+				current.status = AGENT_SESSION_STATUS.FAILED;
 				current.endedAt = timestamp();
 				current.error = error instanceof Error ? error.message : String(error);
 				if (state.activeSessionId === current.id) delete state.activeSessionId;
 			});
-			reserved.status = "failed";
+			reserved.status = AGENT_SESSION_STATUS.FAILED;
 			reserved.endedAt = timestamp();
 			reserved.error = error instanceof Error ? error.message : String(error);
 			throw error;
@@ -152,7 +171,7 @@ export class AgentSessionService {
 		await this.process.kill(session.tmuxName);
 		await this.store.mutate(task.id, async (state) => {
 			const current = this.session(state, session.id);
-			current.status = "stopped";
+			current.status = AGENT_SESSION_STATUS.STOPPED;
 			current.endedAt = timestamp();
 			if (state.activeSessionId === current.id) delete state.activeSessionId;
 		});
@@ -218,7 +237,7 @@ export class AgentSessionService {
 					sessionId: active.id,
 					documentPath: identity.path,
 					document: identity,
-					status: "requested",
+					status: HANDOFF_STATUS.REQUESTED,
 					createdAt: timestamp(),
 				};
 				request = next;
@@ -229,7 +248,7 @@ export class AgentSessionService {
 				id: randomUUID(),
 				sessionId: active.id,
 				documentPath: "",
-				status: "requested",
+				status: HANDOFF_STATUS.REQUESTED,
 				createdAt: timestamp(),
 			};
 			request = next;
@@ -247,11 +266,7 @@ export class AgentSessionService {
 		if (!content.trim()) throw new Error("Handoff content cannot be empty.");
 		const task = await this.requireTask(taskId);
 		await this.store.mutate(task.id, async (state) => {
-			if (
-				!state.handoff ||
-				state.handoff.id !== requestId ||
-				!["requested", "failed", "ready"].includes(state.handoff.status)
-			)
+			if (!state.handoff || state.handoff.id !== requestId || !COMPLETABLE_HANDOFF_STATUSES.has(state.handoff.status))
 				throw new Error(`No pending handoff request ${requestId} for task ${task.id}.`);
 			let document = state.handoff.document;
 			if (document) {
@@ -284,7 +299,7 @@ export class AgentSessionService {
 				path: document.path,
 				tags: document.tags,
 			};
-			state.handoff.status = "ready";
+			state.handoff.status = HANDOFF_STATUS.READY;
 			state.handoff.error = undefined;
 		});
 	}
@@ -293,14 +308,14 @@ export class AgentSessionService {
 		const task = await this.requireTask(taskId);
 		let predecessor: AgentSession | undefined;
 		await this.store.mutate(task.id, async (state) => {
-			if (!state.handoff || !["ready", "failed"].includes(state.handoff.status)) return;
+			if (!state.handoff || !REPLACEABLE_HANDOFF_STATUSES.has(state.handoff.status)) return;
 			if (
 				!state.handoff.document ||
 				!(await Bun.file(join(this.core.filesystem.docsDir, state.handoff.documentPath)).exists())
 			)
 				throw new Error("The completed handoff document is missing; save it before continuing.");
 			predecessor = this.session(state, state.handoff.sessionId);
-			state.handoff.status = "replacing";
+			state.handoff.status = HANDOFF_STATUS.REPLACING;
 			state.handoff.replacementOwnerPid = process.pid;
 		});
 		if (!predecessor) return null;
@@ -317,10 +332,10 @@ export class AgentSessionService {
 			});
 			await this.store.mutate(task.id, async (state) => {
 				const old = this.session(state, oldSession.id);
-				old.status = "handed-off";
+				old.status = AGENT_SESSION_STATUS.HANDED_OFF;
 				old.endedAt = timestamp();
 				if (state.handoff) {
-					state.handoff.status = COMPLETED_HANDOFF_STATUS;
+					state.handoff.status = HANDOFF_STATUS.COMPLETED;
 					delete state.handoff.replacementOwnerPid;
 				}
 			});
@@ -329,7 +344,7 @@ export class AgentSessionService {
 			await this.store.mutate(task.id, async (state) => {
 				this.stopSession(state, oldSession.id);
 				if (state.handoff) {
-					state.handoff.status = "failed";
+					state.handoff.status = HANDOFF_STATUS.FAILED;
 					delete state.handoff.replacementOwnerPid;
 					state.handoff.error = error instanceof Error ? error.message : String(error);
 				}
@@ -340,7 +355,7 @@ export class AgentSessionService {
 
 	private stopSession(state: SessionState, sessionId: string): void {
 		const session = this.session(state, sessionId);
-		session.status = "stopped";
+		session.status = AGENT_SESSION_STATUS.STOPPED;
 		session.endedAt = timestamp();
 		if (state.activeSessionId === session.id) delete state.activeSessionId;
 	}
@@ -349,52 +364,57 @@ export class AgentSessionService {
 		const task = await this.requireTask(taskId);
 		const state = await this.store.read(task.id);
 		for (const session of state.sessions.filter(
-			(candidate) => candidate.status === "starting" || candidate.status === "running",
+			(candidate) =>
+				candidate.status === AGENT_SESSION_STATUS.STARTING || candidate.status === AGENT_SESSION_STATUS.RUNNING,
 		)) {
-			if (session.status === "starting" && this.ownerIsAlive(session.ownerPid)) continue;
+			if (session.status === AGENT_SESSION_STATUS.STARTING && this.ownerIsAlive(session.ownerPid)) continue;
 			const alive = await this.runner.run(["tmux", "has-session", "-t", session.tmuxName]);
 			const dead =
 				alive.exitCode === 0
 					? await this.runner.run(["tmux", "list-panes", "-t", session.tmuxName, "-F", "#{pane_dead}"])
 					: alive;
-			if (alive.exitCode === 0 && dead.stdout.trim() !== "1" && session.status === "running") continue;
+			if (alive.exitCode === 0 && dead.stdout.trim() !== "1" && session.status === AGENT_SESSION_STATUS.RUNNING)
+				continue;
 			// An abandoned launch must not reserve the task forever, even if its placeholder pane survived.
-			if (session.status === "starting" && alive.exitCode === 0) await this.process.kill(session.tmuxName);
+			if (session.status === AGENT_SESSION_STATUS.STARTING && alive.exitCode === 0)
+				await this.process.kill(session.tmuxName);
 			await this.store.mutate(task.id, async (current) => {
 				const target = this.session(current, session.id);
-				target.status = target.status === "starting" ? "failed" : "stopped";
+				target.status =
+					target.status === AGENT_SESSION_STATUS.STARTING ? AGENT_SESSION_STATUS.FAILED : AGENT_SESSION_STATUS.STOPPED;
 				target.endedAt = timestamp();
-				target.error = target.status === "failed" ? "Session launch did not complete." : undefined;
+				target.error = target.status === AGENT_SESSION_STATUS.FAILED ? "Session launch did not complete." : undefined;
 				if (current.activeSessionId === target.id) delete current.activeSessionId;
 			});
 		}
 		await this.store.mutate(task.id, async (current) => {
 			const handoff = current.handoff;
-			if (handoff?.status !== "replacing" || this.ownerIsAlive(handoff.replacementOwnerPid)) return;
+			if (handoff?.status !== HANDOFF_STATUS.REPLACING || this.ownerIsAlive(handoff.replacementOwnerPid)) return;
 			const replacement = current.sessions.find(
-				(candidate) => candidate.predecessorId === handoff.sessionId && candidate.status === "running",
+				(candidate) =>
+					candidate.predecessorId === handoff.sessionId && candidate.status === AGENT_SESSION_STATUS.RUNNING,
 			);
 			if (replacement) {
-				handoff.status = COMPLETED_HANDOFF_STATUS;
+				handoff.status = HANDOFF_STATUS.COMPLETED;
 				const old = this.session(current, handoff.sessionId);
-				old.status = "handed-off";
+				old.status = AGENT_SESSION_STATUS.HANDED_OFF;
 				old.endedAt ??= timestamp();
 			} else {
-				handoff.status = "ready";
+				handoff.status = HANDOFF_STATUS.READY;
 			}
 			delete handoff.replacementOwnerPid;
 		});
 		const recovered = await this.store.read(task.id);
-		if (recovered.handoff?.status === "requested") {
+		if (recovered.handoff?.status === HANDOFF_STATUS.REQUESTED) {
 			await this.dispatchHandoff(task.id);
-		} else if (recovered.handoff && ["ready", "failed"].includes(recovered.handoff.status)) {
+		} else if (recovered.handoff && REPLACEABLE_HANDOFF_STATUSES.has(recovered.handoff.status)) {
 			await this.continueHandoff(task.id);
 		}
 	}
 
 	private async requireTask(taskId: string) {
 		const task = await this.core.loadTaskById(taskId, { includeCrossBranch: false });
-		if (!task || task.source === "remote" || task.source === "local-branch")
+		if (!task || task.source === TASK_SOURCE.REMOTE || task.source === TASK_SOURCE.LOCAL_BRANCH)
 			throw new Error(`Locally editable task not found: ${taskId}`);
 		return task;
 	}
@@ -408,7 +428,8 @@ export class AgentSessionService {
 				? this.active(state)
 				: state.sessions.find((candidate) => candidate.id === state.activeSessionId);
 		if (!session) throw new Error(`Agent session not found: ${sessionId ?? "active"}`);
-		if (activeOnly && session.status !== "running") throw new Error(`Agent session ${session.id} is not active.`);
+		if (activeOnly && session.status !== AGENT_SESSION_STATUS.RUNNING)
+			throw new Error(`Agent session ${session.id} is not active.`);
 		return { task, session };
 	}
 
@@ -420,7 +441,7 @@ export class AgentSessionService {
 
 	private active(state: SessionState): AgentSession {
 		const session = state.sessions.find(
-			(candidate) => candidate.id === state.activeSessionId && candidate.status === "running",
+			(candidate) => candidate.id === state.activeSessionId && candidate.status === AGENT_SESSION_STATUS.RUNNING,
 		);
 		if (!session) throw new Error(`Task ${state.taskId} has no active agent session.`);
 		return session;
@@ -440,7 +461,7 @@ export class AgentSessionService {
 		let claimed = false;
 		await this.store.mutate(taskId, async (state) => {
 			const handoff = state.handoff;
-			if (handoff?.status !== "requested" || (requestId && handoff.id !== requestId)) return;
+			if (handoff?.status !== HANDOFF_STATUS.REQUESTED || (requestId && handoff.id !== requestId)) return;
 			if (handoff.dispatchedAt || this.ownerIsAlive(handoff.dispatchOwnerPid)) return;
 			handoff.dispatchOwnerPid = process.pid;
 			claimed = true;
@@ -449,9 +470,9 @@ export class AgentSessionService {
 		try {
 			const state = await this.store.read(taskId);
 			const handoff = state.handoff;
-			if (handoff?.status !== "requested" || (requestId && handoff.id !== requestId)) return "skipped";
+			if (handoff?.status !== HANDOFF_STATUS.REQUESTED || (requestId && handoff.id !== requestId)) return "skipped";
 			const session = state.sessions.find(
-				(candidate) => candidate.id === handoff.sessionId && candidate.status === "running",
+				(candidate) => candidate.id === handoff.sessionId && candidate.status === AGENT_SESSION_STATUS.RUNNING,
 			);
 			if (!session) return "skipped";
 			const { initial, settled } = await this.process.settledCapture(session.tmuxName);
@@ -463,7 +484,7 @@ export class AgentSessionService {
 				!hasEmptyHandoffInput(session.presetSnapshot?.bootstrap ?? "prompt", settled.stdout, cursorRow)
 			) {
 				await this.store.mutate(taskId, async (current) => {
-					if (current.handoff?.id === handoff.id && current.handoff.status === "requested")
+					if (current.handoff?.id === handoff.id && current.handoff.status === HANDOFF_STATUS.REQUESTED)
 						current.handoff.error =
 							"Waiting for the agent input line to become empty; the handoff request will be sent automatically.";
 				});
@@ -477,7 +498,7 @@ export class AgentSessionService {
 			await this.process.paste(session.tmuxName, session.id, request);
 			await this.process.sendEnter(session.tmuxName, session.id);
 			await this.store.mutate(taskId, async (current) => {
-				if (current.handoff?.id === handoff.id && current.handoff.status === "requested") {
+				if (current.handoff?.id === handoff.id && current.handoff.status === HANDOFF_STATUS.REQUESTED) {
 					current.handoff.error = undefined;
 					current.handoff.dispatchedAt = timestamp();
 				}

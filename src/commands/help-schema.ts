@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
-import { DEFAULT_STATUSES } from "../constants/index.ts";
+import { DEFAULT_STATUSES, DRAFT_STATUS } from "../constants/index.ts";
 import { decodeConfigYaml } from "../file-system/config.ts";
 import { resolveBacklogDirectory } from "../utils/backlog-directory.ts";
 import { getPriorityLabels } from "../utils/priority-config.ts";
@@ -131,8 +131,8 @@ function getRuntimeConfigStartDir(): string {
 
 function includeDraftStatus(statuses: string[]): string[] {
 	const normalizedStatuses = normalizeStatusValues(statuses);
-	const hasDraft = normalizedStatuses.some((status) => status.toLowerCase() === "draft");
-	return hasDraft ? normalizedStatuses : ["Draft", ...normalizedStatuses];
+	const hasDraft = normalizedStatuses.some((status) => status.toLowerCase() === DRAFT_STATUS.toLowerCase());
+	return hasDraft ? normalizedStatuses : [DRAFT_STATUS, ...normalizedStatuses];
 }
 
 function normalizeStatusValues(statuses: string[]): string[] {

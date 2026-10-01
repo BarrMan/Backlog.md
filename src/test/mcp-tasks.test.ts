@@ -481,12 +481,12 @@ describe("MCP task tools (MVP)", () => {
 		expect(viewText).toContain("MCP comment body");
 	});
 
-	it("rejects reserved comment markers through task_edit", async () => {
+	it("stores comment markers and delimiter lines through task_edit", async () => {
 		await mcpServer.testInterface.callTool({
 			params: {
 				name: "task_create",
 				arguments: {
-					title: "Invalid comment marker task",
+					title: "Comment marker task",
 				},
 			},
 		});
@@ -496,17 +496,19 @@ describe("MCP task tools (MVP)", () => {
 				name: "task_edit",
 				arguments: {
 					id: "task-1",
-					commentsAppend: ["Invalid <!-- COMMENT:END --> marker"],
+					commentsAppend: ["<!-- COMMENT:END -->\n---\nStored as text"],
+					commentAuthor: "<!-- COMMENTS:BEGIN -->",
 				},
 			},
 		});
-		expect(editResult.isError).toBe(true);
-		expect(getText(editResult.content)).toContain("Comment body cannot contain Backlog comment markers.");
+		expect(editResult.isError).toBeFalsy();
+		expect(getText(editResult.content)).toContain("Stored as text");
 
 		const viewResult = await mcpServer.testInterface.callTool({
 			params: { name: "task_view", arguments: { id: "task-1" } },
 		});
-		expect(getText(viewResult.content)).not.toContain("Comments:");
+		expect(getText(viewResult.content)).toContain("<!-- COMMENT:END -->");
+		expect(getText(viewResult.content)).toContain("<!-- COMMENTS:BEGIN -->");
 	});
 
 	it("filters task_list by milestone using closest matching and combines with status", async () => {
@@ -911,12 +913,12 @@ describe("MCP task tools (MVP)", () => {
 		expect(editSchema?.properties?.definitionOfDoneCheck?.description).toContain("this task");
 	});
 
-	it("documents reserved comment delimiters in task_edit schema", async () => {
+	it("describes Markdown comments in the task_edit schema", async () => {
 		const tools = await mcpServer.testInterface.listTools();
 		const toolByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 		const editSchema = toolByName.get("task_edit")?.inputSchema as JsonSchema | undefined;
 
-		expect(editSchema?.properties?.commentsAppend?.description).toContain("standalone '---' lines are reserved");
+		expect(editSchema?.properties?.commentsAppend?.description).toBe("Append Markdown comments to the task.");
 	});
 
 	it("exposes ordinal in task schemas", async () => {

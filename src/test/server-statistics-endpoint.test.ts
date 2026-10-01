@@ -2,14 +2,50 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { $ } from "bun";
 import { FileSystem } from "../file-system/operations.ts";
+import { BrowserServices } from "../server/lifecycle.ts";
 import type { Task } from "../types/index.ts";
 import { createServerFixture } from "./server-fixture.ts";
-import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
+import { createUniqueTestDir, safeCleanup, withTimeout } from "./test-utils.ts";
 
 let testDir: string;
 let filesystem: FileSystem;
 let fixture: Awaited<ReturnType<typeof createServerFixture>> | null = null;
 let auxiliaryWorktreeDir: string | null = null;
+
+type WatchDiagnostic = { directory: string; path: string | null; reconciliation: string };
+
+let watchDiagnostics: WatchDiagnostic[] = [];
+let restoreWatchDiagnostics: (() => void) | null = null;
+
+function captureWatchDiagnostics(): void {
+	const prototype = BrowserServices.prototype as unknown as {
+		watchDirectory: (
+			watchers: Array<{ close: () => void }>,
+			directory: string,
+			callback: (path: string | null) => void,
+		) => boolean;
+		reconciling?: Promise<void>;
+	};
+	const original = prototype.watchDirectory;
+	prototype.watchDirectory = function (watchers, directory, callback) {
+		return original.call(this, watchers, directory, (path) => {
+			const diagnostic: WatchDiagnostic = { directory, path, reconciliation: "not requested" };
+			watchDiagnostics.push(diagnostic);
+			callback(path);
+			const reconciliation = this.reconciling;
+			if (!reconciliation) return;
+			diagnostic.reconciliation = "pending";
+			void reconciliation.then(
+				() => (diagnostic.reconciliation = "published"),
+				(error: unknown) => (diagnostic.reconciliation = `failed: ${String(error)}`),
+			);
+		});
+	};
+	restoreWatchDiagnostics = () => {
+		prototype.watchDirectory = original;
+		restoreWatchDiagnostics = null;
+	};
+}
 
 const createTask = (partial: Partial<Task>): Task => ({
 	id: "TASK-1",
@@ -90,6 +126,19 @@ async function addStatisticsBranchTask(task: Task): Promise<void> {
 	}
 }
 
+async function awaitBranchPublication(): Promise<void> {
+	if (!fixture) throw new Error("Server fixture not initialized");
+	const updated = fixture.awaitNextPublication("tasks-updated");
+	const failed = fixture.awaitNextPublication("error").then(() => {
+		throw new Error("Branch ref reconciliation published a lifecycle error");
+	});
+	try {
+		await withTimeout(Promise.race([updated, failed]), "branch ref tasks publication", 4_000);
+	} catch (error) {
+		throw new Error(`${String(error)}\nWatcher diagnostics: ${JSON.stringify(watchDiagnostics)}`, { cause: error });
+	}
+}
+
 describe("BacklogServer statistics endpoint", () => {
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("server-statistics");
@@ -117,6 +166,8 @@ describe("BacklogServer statistics endpoint", () => {
 	afterEach(async () => {
 		await fixture?.dispose();
 		fixture = null;
+		restoreWatchDiagnostics?.();
+		watchDiagnostics = [];
 		if (auxiliaryWorktreeDir) {
 			await $`git worktree remove --force ${auxiliaryWorktreeDir}`.cwd(testDir).quiet().nothrow();
 			await safeCleanup(auxiliaryWorktreeDir);
@@ -181,15 +232,24 @@ describe("BacklogServer statistics endpoint", () => {
 	});
 
 	it("refreshes statistics after an active branch ref moves", async () => {
-		await restartWithStatisticsBranch(
-			createTask({ id: "TASK-10", title: "Branch statistics task", status: "In Progress", priority: "Urgent" }),
+		captureWatchDiagnostics();
+		await withTimeout(
+			restartWithStatisticsBranch(
+				createTask({ id: "TASK-10", title: "Branch statistics task", status: "In Progress", priority: "Urgent" }),
+			),
+			"restart with Git branch",
+			4_000,
 		);
 		const initial = await requestStatistics();
 		expect(initial).toMatchObject({ totalTasks: 3, statusCounts: { "In Progress": 1 } });
 
-		const published = fixture?.awaitNextPublication("tasks-updated");
-		await addStatisticsBranchTask(
-			createTask({ id: "TASK-11", title: "Moved branch statistics task", status: "In Progress", priority: "Low" }),
+		const published = awaitBranchPublication();
+		await withTimeout(
+			addStatisticsBranchTask(
+				createTask({ id: "TASK-11", title: "Moved branch statistics task", status: "In Progress", priority: "Low" }),
+			),
+			"add branch commit",
+			4_000,
 		);
 		await published;
 

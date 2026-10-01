@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-470.3
 title: Add task comments to server API and Web UI
 status: Done
@@ -22,49 +23,68 @@ documentation:
 parent_task_id: BACK-470
 priority: medium
 ordinal: 29000
+description: >-
+  Add browser support for task comments using the same shared task model as CLI
+  and MCP. The Web UI should display comments read-only in task detail preview
+  and allow appending a new comment for local editable tasks only while the task
+  modal is in edit mode.
+implementation_plan: >-
+  1. Add server update payload handling for comment appends via the existing
+  task update endpoint.
+
+  2. Extend Web API typing through the shared Task model.
+
+  3. Add a comments section to the task modal preview that renders comments
+  read-only, with the append form available only in edit mode for local editable
+  tasks.
+
+  4. Add server/Web tests for display, append, refresh, and read-only state
+  where practical.
+implementation_notes: >-
+  Added server update payload handling, Web API typing, and TaskDetailsModal
+  comment display/add controls. Manual browser verification at
+  `http://localhost:6421` confirmed the Comments section, empty state, textarea,
+  Add comment action, and no console/page errors.
+final_summary: >-
+  Server API responses include comments and the Web task details modal displays
+  comments read-only in preview. Local editable tasks can append comments from
+  edit mode without the add action changing the modal mode, while cross-branch
+  read-only tasks keep the form hidden.
+acceptance_criteria:
+  - index: 1
+    text: >-
+      Server task responses include comments and a local editable task can
+      receive a new comment through the task update API.
+    checked: true
+  - index: 2
+    text: >-
+      Web task detail displays comments in chronological order with readable
+      author, timestamp, and markdown-rendered body.
+    checked: true
+  - index: 3
+    text: >-
+      Web users can add a comment while editing an editable task, and adding a
+      comment does not switch the modal out of edit mode.
+    checked: true
+  - index: 4
+    text: >-
+      Read-only cross-branch tasks display comments but do not allow comment
+      submission.
+    checked: true
+  - index: 5
+    text: >-
+      Web/API tests cover comment display, append behavior, refresh behavior,
+      and read-only disabling.
+    checked: true
+definition_of_done:
+  - index: 1
+    text: bunx tsc --noEmit passes when TypeScript touched
+    checked: true
+  - index: 2
+    text: bun run check . passes when formatting/linting touched
+    checked: true
+  - index: 3
+    text: bun test (or scoped test) passes
+    checked: true
+comments: []
 ---
-
-## Description
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
-Add browser support for task comments using the same shared task model as CLI and MCP. The Web UI should display comments read-only in task detail preview and allow appending a new comment for local editable tasks only while the task modal is in edit mode.
-<!-- SECTION:DESCRIPTION:END -->
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 Server task responses include comments and a local editable task can receive a new comment through the task update API.
-- [x] #2 Web task detail displays comments in chronological order with readable author, timestamp, and markdown-rendered body.
-- [x] #3 Web users can add a comment while editing an editable task, and adding a comment does not switch the modal out of edit mode.
-- [x] #4 Read-only cross-branch tasks display comments but do not allow comment submission.
-- [x] #5 Web/API tests cover comment display, append behavior, refresh behavior, and read-only disabling.
-<!-- AC:END -->
-
-
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Add server update payload handling for comment appends via the existing task update endpoint.
-2. Extend Web API typing through the shared Task model.
-3. Add a comments section to the task modal preview that renders comments read-only, with the append form available only in edit mode for local editable tasks.
-4. Add server/Web tests for display, append, refresh, and read-only state where practical.
-<!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Added server update payload handling, Web API typing, and TaskDetailsModal comment display/add controls. Manual browser verification at `http://localhost:6421` confirmed the Comments section, empty state, textarea, Add comment action, and no console/page errors.
-<!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Server API responses include comments and the Web task details modal displays comments read-only in preview. Local editable tasks can append comments from edit mode without the add action changing the modal mode, while cross-branch read-only tasks keep the form hidden.
-<!-- SECTION:FINAL_SUMMARY:END -->
-
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [x] #1 bunx tsc --noEmit passes when TypeScript touched
-- [x] #2 bun run check . passes when formatting/linting touched
-- [x] #3 bun test (or scoped test) passes
-<!-- DOD:END -->

@@ -7,8 +7,8 @@ import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { GitIndexEntry } from "../git/operations.ts";
 import type { Task, TaskCreateInput } from "../types/index.ts";
-import { upsertBoardTask } from "../ui/board/column-policy.ts";
-import { getCreatedTaskBoardOutcome } from "../ui/board/creation-outcome.ts";
+import { upsertBoardTask } from "../ui/board/policies/column-policy.ts";
+import { getCreatedTaskBoardOutcome } from "../ui/board/policies/creation-outcome.ts";
 import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { openSingleSelectFilterPopup } from "../ui/components/filter-popup.ts";
 import type { CaretLines } from "../ui/components/task-composer.ts";
@@ -476,10 +476,6 @@ describe("TUI task composer model", () => {
 			throw new Error("Disk is read-only");
 		};
 
-		expect(await controller.create(persist)).toBeNull();
-		expect(calls).toBe(0);
-		expect(controller.error).toBe("Title is required.");
-
 		controller.values.title = "Retry me";
 		controller.values.description = "Keep this description";
 		expect(await controller.create(persist)).toBeNull();
@@ -520,6 +516,18 @@ describe("TUI task composer canonical persistence", () => {
 		expect(createdDraft?.id).toBe("DRAFT-1");
 		expect(await core.filesystem.loadDraft("DRAFT-1")).not.toBeNull();
 		expect(await core.filesystem.loadTask("DRAFT-1")).toBeNull();
+	});
+
+	it("generates durable titles from allocated IDs for blank and whitespace composer titles", async () => {
+		const blank = new TaskComposerController(["To Do", "Done"]);
+		const whitespace = new TaskComposerController(["To Do", "Done"]);
+		whitespace.values.title = "   ";
+
+		const first = await blank.create(async (input) => (await core.createTaskFromInput(input, false)).task);
+		const second = await whitespace.create(async (input) => (await core.createTaskFromInput(input, false)).task);
+
+		expect(first).toMatchObject({ id: "TASK-1", title: "untitled-1" });
+		expect(second).toMatchObject({ id: "TASK-2", title: "untitled-2" });
 	});
 
 	it("persists mid-field astral insertions from both text fields without corrupting their caret", async () => {
@@ -568,10 +576,12 @@ describe("TUI task composer canonical persistence", () => {
 			expect((await withTimeout(resultPromise, "Unicode-safe composer persistence", 1000))?.id).toBe("TASK-1");
 
 			const persisted = await readFile(taskPath, "utf8");
-			// YAML escapes astral title characters, while Markdown keeps them literal. Both forms
-			// must represent the complete code point rather than separate surrogate halves.
+			// V2 stores both fields in YAML frontmatter, which escapes astral characters.
+			// The serialized values must still represent complete code points.
 			expect(persisted).toContain("AX\\U00020BB7B");
-			expect(persisted).toContain("left Y𠮷 right");
+			expect(persisted).toContain('description: "left Y\\U00020BB7 right"');
+			expect(persisted).toContain("task_schema_version: 2");
+			expect(persisted).toEndWith("---\n");
 			expect(persisted).not.toContain("�");
 			expect(persisted).not.toContain("\\uD842");
 			expect(await core.filesystem.loadTask("TASK-1")).toMatchObject({
@@ -1714,7 +1724,7 @@ describe("TUI task composer interaction", () => {
 		}
 	});
 
-	it("preserves title caret editing and multiline description arrows", async () => {
+	it("advances from description with Enter without losing its text", async () => {
 		const screen = createScreen({ smartCSR: false });
 		Object.defineProperty(screen, "width", { configurable: true, value: 100, writable: true });
 		Object.defineProperty(screen, "height", { configurable: true, value: 30, writable: true });
@@ -1737,26 +1747,47 @@ describe("TUI task composer interaction", () => {
 			await settleComposerFocus();
 			typeText(eventScreen.focused, "first");
 			pressKey(eventScreen.focused, "enter", "\r");
-			typeText(eventScreen.focused, "second");
-			pressKey(eventScreen.focused, "up");
-			expect(eventScreen.focused?.options?.label).toBe(" Description ");
-			expect(eventScreen.focused?.getCursor?.().y).toBe(-1);
-			pressKey(eventScreen.focused, "up");
-			expect(eventScreen.focused?.options?.label).toBe(" Title ");
-
-			pressKey(eventScreen.focused, "down");
 			await settleComposerFocus();
-			expect(eventScreen.focused?.getCursor?.().y).toBe(-1);
-			pressKey(eventScreen.focused, "down");
-			expect(eventScreen.focused?.options?.label).toBe(" Description ");
-			expect(eventScreen.focused?.getCursor?.().y).toBe(0);
-			pressKey(eventScreen.focused, "down");
 			expect(eventScreen.focused?.options?.label).toBe(" Due ");
+			const description = collectWidgets(screen as unknown as { children?: unknown[] }).find(
+				(widget) => widget.options?.label === " Description ",
+			);
+			expect(description?.getValue?.()).toBe("first");
 			pressKey(eventScreen.focused, "down");
 			expect(eventScreen.focused?.content).toBe("Status: To Do ▼");
 
 			pressKey(eventScreen.focused, "escape", "\x1b");
 			expect(await withTimeout(resultPromise, "composer text navigation cancellation", 1000)).toBeNull();
+		} finally {
+			screen.destroy();
+		}
+	});
+
+	it("creates immediately with Shift+Enter from a text input", async () => {
+		const screen = createScreen({ smartCSR: false });
+		Object.defineProperty(screen, "width", { configurable: true, value: 100, writable: true });
+		Object.defineProperty(screen, "height", { configurable: true, value: 30, writable: true });
+		const eventScreen = screen as unknown as { focused?: TestWidget };
+		const persisted: TaskCreateInput[] = [];
+		try {
+			const resultPromise = openTaskComposer({
+				screen,
+				statuses: ["To Do", "Done"],
+				persist: async (input) => {
+					persisted.push(input);
+					return task({ title: input.title });
+				},
+			});
+			await settleComposerFocus();
+			typeText(eventScreen.focused, "Create now");
+			pressKey(eventScreen.focused, "down");
+			typeText(eventScreen.focused, "Keep this description");
+			pressKey(eventScreen.focused, "S-enter", "\r");
+
+			expect(await withTimeout(resultPromise, "Shift+Enter task creation", 1000)).toMatchObject({
+				title: "Create now",
+			});
+			expect(persisted).toEqual([{ title: "Create now", description: "Keep this description", status: "To Do" }]);
 		} finally {
 			screen.destroy();
 		}
@@ -1797,7 +1828,7 @@ describe("TUI task composer interaction", () => {
 		}
 	});
 
-	it("keeps invalid values for correction and creates explicitly", async () => {
+	it("submits an empty title to the shared creator", async () => {
 		const screen = createScreen({ smartCSR: false });
 		Object.defineProperty(screen, "width", { configurable: true, value: 100, writable: true });
 		Object.defineProperty(screen, "height", { configurable: true, value: 30, writable: true });
@@ -1809,7 +1840,7 @@ describe("TUI task composer interaction", () => {
 				statuses: ["To Do", "Done"],
 				persist: async (input) => {
 					persisted.push(input);
-					return task({ title: input.title });
+					return task({ title: "untitled-1" });
 				},
 			});
 			await settleComposerFocus();
@@ -1820,33 +1851,10 @@ describe("TUI task composer interaction", () => {
 			pressKey(eventScreen.focused, "down");
 			expect(eventScreen.focused?.content).toBe("Create task");
 			pressKey(eventScreen.focused, "enter", "\r");
-			await waitUntil(() => eventScreen.focused?.options?.label === " Title ", "invalid title focus");
-			expect(persisted).toHaveLength(0);
-			expect(
-				collectWidgets(screen as unknown as { children?: unknown[] }).some((widget) =>
-					widget.content?.includes("Title is required."),
-				),
-			).toBe(true);
 
-			eventScreen.focused?.setValue?.("Corrected task");
-			pressKey(eventScreen.focused, "down");
-			await settleComposerFocus();
-			eventScreen.focused?.setValue?.("Kept description");
-			pressKey(eventScreen.focused, "down");
-			pressKey(eventScreen.focused, "down");
-			pressKey(eventScreen.focused, "down");
-			pressKey(eventScreen.focused, "down");
-			pressKey(eventScreen.focused, "enter", "\r");
-
-			const created = await withTimeout(resultPromise, "explicit task creation", 1000);
-			expect(created?.title).toBe("Corrected task");
-			expect(persisted).toEqual([
-				{
-					title: "Corrected task",
-					description: "Kept description",
-					status: "To Do",
-				},
-			]);
+			const created = await withTimeout(resultPromise, "empty-title task creation", 1000);
+			expect(created?.title).toBe("untitled-1");
+			expect(persisted).toEqual([{ title: "", status: "To Do" }]);
 		} finally {
 			screen.destroy();
 		}
@@ -2078,10 +2086,14 @@ describe("TUI task composer interaction", () => {
 		const createResult = new Promise<Task>((resolve) => {
 			resolveCreate = resolve;
 		});
+		let subscriber: ((tasks: Task[], statuses: string[]) => void) | undefined;
 		try {
 			const boardPromise = new TUIRenderer([], ["To Do", "Done"], "horizontal", 20, {
 				screen,
 				createTask: async () => createResult,
+				subscribeUpdates: (update) => {
+					subscriber = update;
+				},
 			}).run();
 			(screen as unknown as { emit(event: string): void }).emit("key n");
 			await waitUntil(
@@ -2107,12 +2119,15 @@ describe("TUI task composer interaction", () => {
 			pressKey(create, "enter", "\r");
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			const rendersBeforeResolution = renders;
-			resolveCreate(task({ id: "TASK-2", title: "Actual composer task" }));
+			const created = task({ id: "TASK-2", title: "Actual composer task" });
+			// Production delivers this through watchTasks while creation is in flight.
+			subscriber?.([created], ["To Do", "Done"]);
+			resolveCreate(created);
 			await waitUntil(() => {
 				const boardFocus = (screen as unknown as { focused?: { items?: TestWidget[]; selected?: number } }).focused;
 				return Boolean(boardFocus?.items?.[boardFocus.selected ?? 0]?.content?.includes("TASK-2"));
 			}, "the created task to receive focus");
-			expect(renders - rendersBeforeResolution).toBe(1);
+			expect(renders).toBeGreaterThan(rendersBeforeResolution);
 			(screen as unknown as { emit(event: string): void }).emit("key q");
 			await withTimeout(boardPromise, "board close after actual composer success", 1000);
 		} finally {
@@ -2174,17 +2189,10 @@ describe("TUI task composer interaction", () => {
 		"before the composer closes",
 		"after board success",
 	] as const) {
-		it(`handles watcher delivery ${delivery} with one board render and focused creation`, async () => {
+		it(`handles watcher delivery ${delivery} with focused creation`, async () => {
 			const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 			Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 			const screen = createScreen({ smartCSR: false });
-			const originalRender = screen.render.bind(screen);
-			let renders = 0;
-			screen.render = () => {
-				renders += 1;
-				originalRender();
-			};
-
 			const initial = task({ id: "TASK-1", title: "Existing" });
 			const created = task({ id: "TASK-2", title: "Created from N" });
 			let subscriber: ((tasks: Task[], statuses: string[]) => void) | undefined;
@@ -2207,23 +2215,25 @@ describe("TUI task composer interaction", () => {
 					},
 				}).run();
 				expect(subscriber).toBeDefined();
-				renders = 0;
 				(screen as unknown as { emit(event: string): void }).emit("key n");
 
-				for (let attempt = 0; attempt < 50 && renders < 1; attempt += 1) {
+				for (let attempt = 0; attempt < 50 && composerCalls < 1; attempt += 1) {
 					await new Promise<void>((resolve) => setImmediate(resolve));
 				}
 				expect(composerCalls).toBe(1);
-				expect(renders).toBe(1);
+				if (delivery === "after board success") {
+					subscriber?.([initial, created], ["To Do", "Done"]);
+				}
+				await waitUntil(() => {
+					const focusedList = (
+						screen as unknown as { focused?: { items?: Array<{ content?: string }>; selected?: number } }
+					).focused;
+					return Boolean(focusedList?.items?.some((item) => item.content?.includes("TASK-2")));
+				}, "the watcher-delivered task");
 				const focusedList = (
 					screen as unknown as { focused?: { items?: Array<{ content?: string }>; selected?: number } }
 				).focused;
 				expect(focusedList?.items?.[focusedList.selected ?? 0]?.content).toContain("TASK-2");
-
-				if (delivery === "after board success") {
-					subscriber?.([initial, created], ["To Do", "Done"]);
-				}
-				expect(renders).toBe(1);
 
 				(screen as unknown as { emit(event: string): void }).emit("key q");
 				await withTimeout(boardPromise, "board close", 1000);

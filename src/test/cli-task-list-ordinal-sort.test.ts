@@ -3,12 +3,12 @@ import { mkdir, rm } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import type { Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
-const cliPath = getTestCliPath();
+const cliCommand = getTestCliCommand();
 
 const createTask = (overrides: Partial<Task>): Task => ({
 	id: "task-1",
@@ -51,14 +51,14 @@ describe("CLI task list ordinal sorting", () => {
 	});
 
 	it("orders tasks by ordinal before task ID and leaves missing ordinals last", async () => {
-		const result = await $`bun ${cliPath} task list --sort ordinal --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --sort ordinal --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expectInOrder(result.stdout.toString(), ["TASK-3", "TASK-2", "TASK-4", "TASK-1"]);
 	});
 
 	it("shows ordinal in the invalid sort field message", async () => {
-		const result = await $`bun ${cliPath} task list --sort invalid --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${cliCommand} task list --sort invalid --plain`.cwd(TEST_DIR).nothrow().quiet();
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr.toString()).toContain("Invalid sort field: invalid");

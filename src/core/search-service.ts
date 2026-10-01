@@ -81,7 +81,9 @@ export function searchSnapshot(
 		id: decision.id,
 		type: "decision",
 		title: decision.title,
-		bodyText: decision.rawContent ?? "",
+		bodyText: [decision.context, decision.decision, decision.consequences, decision.alternatives, decision.rawContent]
+			.filter(Boolean)
+			.join("\n"),
 		decision,
 	}));
 	const { query = "", limit, types, filters } = options;

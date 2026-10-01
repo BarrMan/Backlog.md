@@ -8,11 +8,11 @@ import { searchJson } from "../formatters/json-output.ts";
 import { McpServer } from "../mcp/server.ts";
 import { registerTaskTools } from "../mcp/tools/tasks/index.ts";
 import { BacklogServer } from "../server/index.ts";
-import { generateDetailContent } from "../ui/task-viewer-with-search.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { generateDetailContent } from "../ui/task-viewer/detail-content.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup, withTimeout } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 /**
  * Readiness is derived once in core, and every surface renders that one verdict. These tests pin
@@ -97,7 +97,7 @@ describe("readiness agreement across surfaces", () => {
 		await safeCleanup(testDir);
 	});
 
-	const runCli = async (args: string[]) => await $`bun ${[CLI_PATH, ...args]}`.cwd(testDir).nothrow().quiet();
+	const runCli = async (args: string[]) => await $`${[...CLI_COMMAND, ...args]}`.cwd(testDir).nothrow().quiet();
 
 	const tuiCorpus = async (): Promise<TaskCorpus> => ({
 		// The corpus the interactive task list resolves against: the working copy it displays plus

@@ -1,6 +1,7 @@
 import { rename as moveFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseFrontmatter } from "../markdown/frontmatter.ts";
+import { DECISION_FRONTMATTER_FIELDS } from "../markdown/schema.ts";
 import type {
 	Decision,
 	Document,
@@ -64,8 +65,12 @@ export class ProjectContentService {
 		}
 	}
 
-	async createDecision(decision: Decision, autoCommit?: boolean): Promise<void> {
-		const { filepath, removedFilepaths } = await this.core.filesystem.saveDecision(decision);
+	async createDecision(
+		decision: Decision,
+		autoCommit?: boolean,
+		retainedFrontmatter?: Record<string, unknown>,
+	): Promise<void> {
+		const { filepath, removedFilepaths } = await this.core.filesystem.saveDecision(decision, retainedFrontmatter);
 		if (await this.core.shouldAutoCommit(autoCommit))
 			await this.core.commitWrittenFile(`backlog: Add decision ${decision.id}`, removedFilepaths, filepath);
 	}
@@ -73,21 +78,24 @@ export class ProjectContentService {
 	async updateDecisionFromContent(decisionId: string, content: string, autoCommit?: boolean): Promise<void> {
 		const existing = await this.core.filesystem.loadDecision(decisionId);
 		if (!existing) throw new Error(`Decision ${decisionId} not found`);
-		const frontmatter = parseFrontmatter(content).data as Partial<Pick<Decision, "title" | "status" | "date">>;
-		const section = (name: string) =>
-			content.match(new RegExp(`## ${name}\\s*([\\s\\S]*?)(?=## |$)`, "i"))?.[1]?.trim();
+		const parsed = parseFrontmatter(content);
+		const frontmatter = parsed.data as Partial<
+			Pick<Decision, "title" | "status" | "date" | "context" | "decision" | "consequences" | "alternatives">
+		>;
 		await this.createDecision(
 			{
 				...existing,
-				title: frontmatter.title || existing.title,
-				status: frontmatter.status || existing.status,
-				date: frontmatter.date || existing.date,
-				context: section("Context") || existing.context,
-				decision: section("Decision") || existing.decision,
-				consequences: section("Consequences") || existing.consequences,
-				alternatives: section("Alternatives") || existing.alternatives,
+				title: frontmatter[DECISION_FRONTMATTER_FIELDS.TITLE] || existing.title,
+				status: frontmatter[DECISION_FRONTMATTER_FIELDS.STATUS] || existing.status,
+				date: frontmatter[DECISION_FRONTMATTER_FIELDS.DATE] || existing.date,
+				context: frontmatter[DECISION_FRONTMATTER_FIELDS.CONTEXT] ?? existing.context,
+				decision: frontmatter[DECISION_FRONTMATTER_FIELDS.DECISION] ?? existing.decision,
+				consequences: frontmatter[DECISION_FRONTMATTER_FIELDS.CONSEQUENCES] ?? existing.consequences,
+				alternatives: frontmatter[DECISION_FRONTMATTER_FIELDS.ALTERNATIVES] ?? existing.alternatives,
+				rawContent: parsed.content,
 			},
 			autoCommit,
+			parsed.data,
 		);
 	}
 

@@ -11,13 +11,13 @@ import { collectAvailableLabels } from "../../utils/label-filter.ts";
 import { hasAnyPrefix } from "../../utils/prefix-config.ts";
 import { applyTaskFilters, createTaskSearchIndex } from "../../utils/task-search.ts";
 import { type TaskWatcherCallbacks, watchTasks } from "../../utils/task-watcher.ts";
-import { AgentWorkspaceController, createWorkspaceViewState } from "../agent-workspace.ts";
 import type { BoardSharedFilters } from "../board/configuration.ts";
 import { TUIRenderer } from "../board/tui-renderer.ts";
 import { createLoadingScreen } from "../loading.ts";
-import { buildTaskViewerMilestoneFilterModel, TaskViewerController } from "../task-viewer-with-search.ts";
+import { buildTaskViewerMilestoneFilterModel, TaskViewerController } from "../task-viewer/controller.ts";
 import { createScreen, formatTuiTitle, keepTuiInputAlive } from "../tui.ts";
 import type { ViewType } from "../view-switcher.ts";
+import { AgentWorkspaceController, createWorkspaceViewState } from "../workspace/controller.ts";
 import { UnifiedViewSession } from "./session.ts";
 
 export interface UnifiedViewOptions {

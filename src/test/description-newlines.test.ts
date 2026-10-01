@@ -2,66 +2,31 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-let TEST_DIR: string;
+let testDir: string;
+const cliCommand = getTestCliCommand();
+const description = "First line\nSecond line\n\nThird paragraph";
 
-describe("CLI description newline handling", () => {
-	const cliPath = getTestCliPath();
-
+describe("CLI description newlines", () => {
 	beforeEach(async () => {
-		TEST_DIR = createUniqueTestDir("test-desc-newlines");
-		await mkdir(TEST_DIR, { recursive: true });
+		testDir = createUniqueTestDir("description-newlines");
+		await mkdir(testDir, { recursive: true });
+		await initializeFilesystemTestProject(new Core(testDir), "Description newlines");
+	});
+	afterEach(async () => safeCleanup(testDir));
 
-		await $`git init`.cwd(TEST_DIR).quiet();
-
-		const core = new Core(TEST_DIR);
-		await initializeFilesystemTestProject(core, "Desc Newlines Test Project");
+	it("stores literal newlines in description frontmatter on create and edit", async () => {
+		await $`${cliCommand} task create "Multi-line" --desc ${description}`.cwd(testDir).quiet();
+		const core = new Core(testDir);
+		expect((await core.filesystem.loadTask("task-1"))?.description).toBe(description);
+		await $`${cliCommand} task edit 1 --desc ${"Replacement\ntext"}`.cwd(testDir).quiet();
+		expect((await core.filesystem.loadTask("task-1"))?.description).toBe("Replacement\ntext");
 	});
 
-	afterEach(async () => {
-		await safeCleanup(TEST_DIR);
-	});
-
-	it("should preserve literal newlines when creating task", async () => {
-		const desc = "First line\nSecond line\n\nThird paragraph";
-		await $`bun ${[cliPath, "task", "create", "Multi-line", "--desc", desc]}`.cwd(TEST_DIR).quiet();
-
-		const core = new Core(TEST_DIR);
-		const body = await core.getTaskContent("task-1");
-		expect(body).toContain(desc);
-	});
-
-	it("should preserve literal newlines when editing task", async () => {
-		const core = new Core(TEST_DIR);
-		await core.createTask(
-			{
-				id: "task-1",
-				title: "Edit me",
-				status: "To Do",
-				assignee: [],
-				createdDate: "2025-07-04",
-				labels: [],
-				dependencies: [],
-				description: "Original",
-			},
-			false,
-		);
-
-		const desc = "First line\nSecond line\n\nThird paragraph";
-		await $`bun ${[cliPath, "task", "edit", "1", "--desc", desc]}`.cwd(TEST_DIR).quiet();
-
-		const updatedBody = await core.getTaskContent("task-1");
-		expect(updatedBody).toContain(desc);
-	});
-
-	it("should not interpret \\n sequences as newlines", async () => {
-		const literal = "First line\\nSecond line";
-		await $`bun ${[cliPath, "task", "create", "Literal", "--desc", literal]}`.cwd(TEST_DIR).quiet();
-
-		const core = new Core(TEST_DIR);
-		const body = await core.getTaskContent("task-1");
-		expect(body).toContain("First line\\nSecond line");
+	it("does not interpret escaped newline text", async () => {
+		await $`${cliCommand} task create Literal --desc ${"First line\\nSecond line"}`.cwd(testDir).quiet();
+		expect((await new Core(testDir).filesystem.loadTask("task-1"))?.description).toBe("First line\\nSecond line");
 	});
 });

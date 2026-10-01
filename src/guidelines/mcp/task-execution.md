@@ -44,7 +44,7 @@
 - Work in short loops: implement, run the relevant tests, and record progress. Do not check acceptance criteria, write the final summary, or move the task to Done from this guide alone; first follow the Task Finalization Guide and verify each acceptance criterion with objective evidence.
 - Log progress with `task_edit` (notesAppend field) to document decisions, blockers, or learnings
 - Use `task_edit` (`commentsAppend` with optional `commentAuthor`) for task discussion, review questions, or handoff notes that are not part of the execution log
-- Comment bodies may contain Markdown, but standalone `---` lines are reserved as comment delimiters
+- Comment bodies may contain Markdown and are stored as YAML text values
 - Keep task status aligned with reality via `task_edit`
 
 ### Handling Scope Changes

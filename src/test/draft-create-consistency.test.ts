@@ -3,11 +3,11 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("Draft creation consistency", () => {
 	beforeEach(async () => {
@@ -23,8 +23,8 @@ describe("Draft creation consistency", () => {
 	});
 
 	it("keeps IDs and filenames consistent between draft create and task create --draft", async () => {
-		const first = await $`bun ${CLI_PATH} draft create "Hallo"`.cwd(TEST_DIR).quiet();
-		const second = await $`bun ${CLI_PATH} task create --draft "Goodbye"`.cwd(TEST_DIR).quiet();
+		const first = await $`${CLI_COMMAND} draft create "Hallo"`.cwd(TEST_DIR).quiet();
+		const second = await $`${CLI_COMMAND} task create --draft "Goodbye"`.cwd(TEST_DIR).quiet();
 
 		expect(first.stdout.toString()).toContain("Created draft DRAFT-1");
 		expect(second.stdout.toString()).toContain("Created draft DRAFT-2");
@@ -43,8 +43,8 @@ describe("Draft creation consistency", () => {
 	});
 
 	it("splits comma-separated and repeated assignees on draft create", async () => {
-		await $`bun ${CLI_PATH} draft create "Comma assignees" -a "@alice,@bob"`.cwd(TEST_DIR).quiet();
-		await $`bun ${CLI_PATH} draft create "Repeated assignees" -a @alice -a @bob,@carol`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Comma assignees" -a "@alice,@bob"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Repeated assignees" -a @alice -a @bob,@carol`.cwd(TEST_DIR).quiet();
 
 		const core = new Core(TEST_DIR);
 		expect((await core.filesystem.loadDraft("draft-1"))?.assignee).toEqual(["@alice", "@bob"]);
@@ -52,8 +52,8 @@ describe("Draft creation consistency", () => {
 	});
 
 	it("splits comma-separated and repeated labels on draft create", async () => {
-		await $`bun ${CLI_PATH} draft create "Comma labels" -l "ui,bug"`.cwd(TEST_DIR).quiet();
-		await $`bun ${CLI_PATH} draft create "Repeated labels" -l ui -l bug,api`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Comma labels" -l "ui,bug"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Repeated labels" -l ui -l bug,api`.cwd(TEST_DIR).quiet();
 
 		const core = new Core(TEST_DIR);
 		expect((await core.filesystem.loadDraft("draft-1"))?.labels).toEqual(["ui", "bug"]);
@@ -61,9 +61,9 @@ describe("Draft creation consistency", () => {
 	});
 
 	it("applies the configured defaultAssignee to drafts created without -a", async () => {
-		await $`bun ${CLI_PATH} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
-		await $`bun ${CLI_PATH} draft create "Default assignees"`.cwd(TEST_DIR).quiet();
-		await $`bun ${CLI_PATH} draft create "Explicit assignee" -a @carol`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} config set defaultAssignee ${"@alice,@bob"}`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Default assignees"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Explicit assignee" -a @carol`.cwd(TEST_DIR).quiet();
 		await runTestCli(["draft", "create", "Explicitly unassigned", "-a", ""], { cwd: TEST_DIR });
 
 		const core = new Core(TEST_DIR);
@@ -73,7 +73,7 @@ describe("Draft creation consistency", () => {
 	});
 
 	it("uses DRAFT IDs in plain output for task create --draft", async () => {
-		const result = await $`bun ${CLI_PATH} task create --draft "Plain sample" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create --draft "Plain sample" --plain`.cwd(TEST_DIR).quiet();
 		const output = result.stdout.toString();
 
 		expect(output).toContain("draft-1 - Plain-sample.md");

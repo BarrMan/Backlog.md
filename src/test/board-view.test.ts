@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { BoxInterface } from "neo-neo-bblessed";
 import type { Task } from "../types/index.ts";
-import { Board } from "../ui/board/board.ts";
-import { BoardView } from "../ui/board/board-view.ts";
+import { BoardView } from "../ui/board/components/board-view.ts";
+import { Board } from "../ui/board/models/board.ts";
 import { createScreen } from "../ui/tui.ts";
 
 function task(id: string, status: string): Task {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import { parseTask } from "../markdown/parser.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 const malformedDependencies = [
@@ -15,6 +15,7 @@ const malformedDependencies = [
 
 function taskMarkdown(dependencies: string, id = "TASK-2"): string {
 	return `---
+task_schema_version: 2
 id: ${id}
 title: dependent
 status: To Do
@@ -76,7 +77,7 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 		await Bun.write(taskPath, original);
 		const filenames = await readdir(core.filesystem.tasksDir);
 
-		const edited = await $`${process.execPath} ${getTestCliPath()} task edit TASK-2 --title "dependent v2"`
+		const edited = await $`${getTestCliCommand()} task edit TASK-2 --title "dependent v2"`
 			.cwd(testDir)
 			.quiet()
 			.nothrow();
@@ -136,7 +137,7 @@ describe("malformed dependencies cannot be rewritten by unrelated edits", () => 
 
 	it("allows unrelated CLI edits without changing valid dependency values", async () => {
 		await Bun.write(taskPath, taskMarkdown("dependencies: [task-001, BACK-2.3, 4]"));
-		const edited = await $`${process.execPath} ${getTestCliPath()} task edit TASK-2 --title "dependent v2"`
+		const edited = await $`${getTestCliCommand()} task edit TASK-2 --title "dependent v2"`
 			.cwd(testDir)
 			.quiet()
 			.nothrow();

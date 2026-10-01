@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 
 interface LabelFilterDropdownProps {
 	availableLabels: string[];
@@ -18,7 +19,7 @@ export default function LabelFilterDropdown({
 	onChange,
 	menuId,
 	className = "min-w-[200px]",
-	label = "Labels",
+	label = TASK_FIELD_LABELS.LABELS,
 	emptyLabel = "All",
 	noOptionsLabel = "No labels",
 	clearLabel = "Clear label filter",

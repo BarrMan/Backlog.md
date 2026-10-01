@@ -1,7 +1,14 @@
 import { basename, join } from "node:path";
 import type { Task } from "../types/index.ts";
 import { AmbiguousIdError } from "./entity-id.ts";
-import { buildFilenameIdRegex, buildGlobPattern, escapeRegex, extractAnyPrefix, normalizeId } from "./prefix-config.ts";
+import {
+	buildFilenameIdRegex,
+	buildGlobPattern,
+	DRAFT_PREFIX,
+	escapeRegex,
+	extractAnyPrefix,
+	normalizeId,
+} from "./prefix-config.ts";
 import { canonicalTaskId, normalizeTaskId, taskIdsEqual } from "./task-id.ts";
 
 export { canonicalTaskId, normalizeTaskId, taskIdsEqual } from "./task-id.ts";
@@ -112,14 +119,11 @@ async function findMatchingTaskPaths(directory: string, taskId: string): Promise
 		return [];
 	}
 }
-/** Default prefix for drafts */
-const DEFAULT_DRAFT_PREFIX = "draft";
-
 /**
  * Normalize a draft ID by ensuring the draft prefix is present (uppercase).
  */
 function normalizeDraftId(draftId: string): string {
-	return normalizeId(draftId, DEFAULT_DRAFT_PREFIX);
+	return normalizeId(draftId, DRAFT_PREFIX);
 }
 
 /**
@@ -137,10 +141,10 @@ export function draftIdsMatchLoosely(inputId: string, filename: string): boolean
  * Extracts the draft ID from a filename.
  */
 export function extractDraftIdFromFilename(filename: string): string | null {
-	const regex = buildFilenameIdRegex(DEFAULT_DRAFT_PREFIX);
+	const regex = buildFilenameIdRegex(DRAFT_PREFIX);
 	const match = filename.match(regex);
 	if (!match?.[1]) return null;
-	return normalizeDraftId(`${DEFAULT_DRAFT_PREFIX}-${match[1]}`);
+	return normalizeDraftId(`${DRAFT_PREFIX}-${match[1]}`);
 }
 
 /**
@@ -151,13 +155,13 @@ export function extractDraftIdFromFilename(filename: string): string | null {
  */
 function draftIdentityKey(id: string): string {
 	const trimmed = id.trim().toLowerCase();
-	const match = trimmed.match(new RegExp(`^(?:${escapeRegex(DEFAULT_DRAFT_PREFIX)}-)?(\\d+(?:\\.\\d+)*)$`));
+	const match = trimmed.match(new RegExp(`^(?:${escapeRegex(DRAFT_PREFIX)}-)?(\\d+(?:\\.\\d+)*)$`));
 	if (!match?.[1]) return trimmed;
 	const body = match[1]
 		.split(".")
 		.map((segment) => segment.replace(/^0+(?=\d)/, "") || "0")
 		.join(".");
-	return `${DEFAULT_DRAFT_PREFIX}-${body}`;
+	return `${DRAFT_PREFIX}-${body}`;
 }
 
 /**

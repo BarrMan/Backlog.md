@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Task } from "../types/index.ts";
+import { taskViewerEmptyState } from "../ui/task-viewer/controller.ts";
 import { TaskViewerSession } from "../ui/task-viewer/session.ts";
-import { taskViewerEmptyState } from "../ui/task-viewer-with-search.ts";
 import { createMilestoneFilterValueResolver } from "../utils/milestone-filter.ts";
 
 const filters = {

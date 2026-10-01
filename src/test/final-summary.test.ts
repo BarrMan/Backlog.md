@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { extractStructuredSection } from "../markdown/structured-sections.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -28,32 +27,5 @@ describe("Final Summary", () => {
 		});
 
 		expect(task.rawContent).not.toContain("## Final Summary");
-	});
-
-	it("ignores Final Summary examples nested inside Description", () => {
-		const content = [
-			"## Description",
-			"",
-			"<!-- SECTION:DESCRIPTION:BEGIN -->",
-			"Here is an example:",
-			"```markdown",
-			"## Final Summary",
-			"",
-			"<!-- SECTION:FINAL_SUMMARY:BEGIN -->",
-			"### Example",
-			"- Not the real summary",
-			"<!-- SECTION:FINAL_SUMMARY:END -->",
-			"```",
-			"<!-- SECTION:DESCRIPTION:END -->",
-			"",
-			"## Final Summary",
-			"",
-			"<!-- SECTION:FINAL_SUMMARY:BEGIN -->",
-			"Real summary content",
-			"<!-- SECTION:FINAL_SUMMARY:END -->",
-			"",
-		].join("\n");
-
-		expect(extractStructuredSection(content, "finalSummary")).toBe("Real summary content");
 	});
 });

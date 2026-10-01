@@ -14,6 +14,7 @@ import { transformCodePaths } from "../code-path.ts";
 import { formatHeading } from "../heading.ts";
 import { formatProjectBadge } from "../project.ts";
 import { formatStatusWithIcon, getStatusColor, getStatusIcon, wrapStatusColor } from "../status-icon.ts";
+import { TASK_FIELD_LABELS } from "../task-labels.ts";
 import { formatTaskTypeBadge } from "../task-type.ts";
 
 export interface TaskDetailContentOptions {
@@ -97,14 +98,14 @@ function identityMetadataFields(task: Task | TaskDetail, dateFormat: string | un
 				: undefined,
 		},
 		{ kind: "text", value: task.type ? `{bold}Type:{/bold} ${formatTaskTypeBadge(task.type)}` : undefined },
-		{ kind: "people", label: "Assignee", value: task.assignee },
+		{ kind: "people", label: TASK_FIELD_LABELS.ASSIGNEE, value: task.assignee },
 		{
 			kind: "text",
 			value: task.labels?.length
 				? `{bold}Labels:{/bold} ${task.labels.map((label) => `{yellow-fg}[${label}]{/}`).join(" ")}`
 				: undefined,
 		},
-		{ kind: "people", label: "Reporter", value: task.reporter ? [task.reporter] : undefined },
+		{ kind: "people", label: TASK_FIELD_LABELS.REPORTER, value: task.reporter ? [task.reporter] : undefined },
 	];
 }
 
@@ -213,21 +214,21 @@ export function generateDetailContent(task: Task | TaskDetail, options: TaskDeta
 		detailMetadata(task, options).join("\n"),
 		"",
 		...(dependencyGraphLines.length ? [formatHeading("Dependency Graph", 2), dependencyGraphLines.join("\n"), ""] : []),
-		...textDetailSection("Description", task.description, "{gray-fg}No description provided{/}"),
-		...referenceDetailSection("References", task.references),
+		...textDetailSection(TASK_FIELD_LABELS.DESCRIPTION, task.description, "{gray-fg}No description provided{/}"),
+		...referenceDetailSection(TASK_FIELD_LABELS.REFERENCES, task.references),
 		...referenceDetailSection("Documentation", task.documentation),
 		...checklistDetailSection(
-			"Acceptance Criteria",
+			TASK_FIELD_LABELS.ACCEPTANCE_CRITERIA,
 			buildAcceptanceCriteriaItems(task),
 			"No acceptance criteria defined",
 		),
 		...checklistDetailSection(
-			"Definition of Done",
+			TASK_FIELD_LABELS.DEFINITION_OF_DONE,
 			formatDefinitionOfDoneChecklist(task),
 			"No Definition of Done items defined",
 		),
-		...textDetailSection("Implementation Plan", task.implementationPlan),
-		...textDetailSection("Implementation Notes", task.implementationNotes),
+		...textDetailSection(TASK_FIELD_LABELS.IMPLEMENTATION_PLAN, task.implementationPlan),
+		...textDetailSection(TASK_FIELD_LABELS.IMPLEMENTATION_NOTES, task.implementationNotes),
 	];
 	const comments = (task.comments ?? []).filter((comment) => comment.body.trim().length > 0);
 	if (comments.length) {
@@ -242,6 +243,7 @@ export function generateDetailContent(task: Task | TaskDetail, options: TaskDeta
 		}
 	}
 	const finalSummary = task.finalSummary?.trim();
-	if (finalSummary) bodyContent.push(formatHeading("Final Summary", 2), transformCodePaths(finalSummary), "");
+	if (finalSummary)
+		bodyContent.push(formatHeading(TASK_FIELD_LABELS.FINAL_SUMMARY, 2), transformCodePaths(finalSummary), "");
 	return { headerContent, bodyContent };
 }

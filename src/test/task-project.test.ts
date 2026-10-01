@@ -150,19 +150,6 @@ describe("task project field", () => {
 	});
 
 	describe("back-compat for unassigned-project tasks", () => {
-		it("should parse legacy frontmatter without a project key", () => {
-			const legacy = [
-				"---",
-				"id: task-1",
-				"title: Legacy",
-				"status: To Do",
-				"created_date: 2026-01-01",
-				"---",
-				"",
-			].join("\n");
-			expect(parseTask(legacy).project).toBeUndefined();
-		});
-
 		it("should not write a project key for tasks without a project", async () => {
 			const config = await core.filesystem.loadConfig();
 			if (!config) throw new Error("Config not found");

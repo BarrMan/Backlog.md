@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("CLI exclude-status filtering", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("cli-exclude-status");
@@ -66,7 +66,7 @@ describe("CLI exclude-status filtering", () => {
 	});
 
 	it("excludes configured statuses from task list output", async () => {
-		const result = await $`bun ${cliPath} task list --exclude-status Done --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --exclude-status Done --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -76,7 +76,7 @@ describe("CLI exclude-status filtering", () => {
 	});
 
 	it("combines excluded statuses with included status filters case-insensitively", async () => {
-		const result = await $`bun ${cliPath} task list --status "In Progress" --exclude-status done --plain`
+		const result = await $`${cliCommand} task list --status "In Progress" --exclude-status done --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -88,7 +88,7 @@ describe("CLI exclude-status filtering", () => {
 	});
 
 	it("excludes configured statuses from task search output", async () => {
-		const result = await $`bun ${cliPath} search visible --type task --exclude-status Done --plain`
+		const result = await $`${cliCommand} search visible --type task --exclude-status Done --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -107,7 +107,7 @@ describe("CLI exclude-status filtering", () => {
 		}
 		await core.filesystem.saveConfig({ ...config, statuses: [] });
 
-		const result = await $`bun ${cliPath} task list --exclude-status Done --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --exclude-status Done --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -117,7 +117,7 @@ describe("CLI exclude-status filtering", () => {
 	});
 
 	it("rejects invalid excluded statuses", async () => {
-		const result = await $`bun ${cliPath} task list --exclude-status Blocked --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${cliCommand} task list --exclude-status Blocked --plain`.cwd(TEST_DIR).nothrow().quiet();
 		const output = result.stdout.toString() + result.stderr.toString();
 
 		expect(result.exitCode).toBe(1);

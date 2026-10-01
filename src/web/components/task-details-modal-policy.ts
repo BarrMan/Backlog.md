@@ -1,7 +1,7 @@
 import type { MouseEvent } from "react";
 import { DEFAULT_STATUSES } from "../../constants/index.ts";
 import { type TaskDetail, taskDependencyGraph, taskReadiness } from "../../core/task-detail";
-import { isLocalEditableTask, type Milestone, type Task } from "../../types";
+import { isLocalEditableTask, type Milestone, TASK_SOURCE, type Task } from "../../types";
 import { resolveProjectValue } from "../../utils/project-config";
 import { findDirectSubtasks, findParentTask, summarizeSubtaskProgress } from "../../utils/task-subtasks";
 import { resolveTaskTypeValue } from "../../utils/task-type-config";
@@ -135,7 +135,7 @@ export function taskDetailsDerivedState({
 				!isDraftMode &&
 				!isOpenDraft &&
 				isLocalEditableTask(task) &&
-				task.source !== "completed" &&
+				task.source !== TASK_SOURCE.COMPLETED &&
 				!isFromOtherBranch,
 		),
 	};

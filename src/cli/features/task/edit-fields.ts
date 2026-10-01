@@ -180,11 +180,7 @@ export function addEditFieldOptions(cmd: Command) {
 		.option("--clear-ac", "remove all acceptance criteria (cannot combine with acceptance criteria mutation options)")
 		.option("--plan <text>", "set implementation plan")
 		.option("--notes <text>", "set implementation notes (replaces existing)")
-		.option(
-			"--comment <text>",
-			"append a task comment; standalone '---' lines are reserved (can be used multiple times)",
-			createMultiValueAccumulator(),
-		)
+		.option("--comment <text>", "append a task comment (can be used multiple times)", createMultiValueAccumulator())
 		.option("--comment-author <author>", "author to record for appended comments")
 		.option("--final-summary <text>", "set final summary (replaces existing)")
 		.option(

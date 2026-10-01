@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { initializeFilesystemTestProject } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI parent shorthand option", () => {
 	let testDir: string;
@@ -28,10 +28,10 @@ describe("CLI parent shorthand option", () => {
 
 	it("should accept -p as shorthand for --parent", async () => {
 		// Create parent task
-		const createParent = await $`bun ${CLI_PATH} task create "Parent Task"`.cwd(testDir).quiet().nothrow();
+		const createParent = await $`${CLI_COMMAND} task create "Parent Task"`.cwd(testDir).quiet().nothrow();
 		expect(createParent.exitCode).toBe(0);
 
-		const createSubtaskShort = await $`bun ${CLI_PATH} task create -p task-1 "Subtask with -p"`
+		const createSubtaskShort = await $`${CLI_COMMAND} task create -p task-1 "Subtask with -p"`
 			.cwd(testDir)
 			.quiet()
 			.nothrow();
@@ -51,7 +51,7 @@ describe("CLI parent shorthand option", () => {
 	});
 
 	it("should show -p in help text", async () => {
-		const helpResult = await $`bun ${CLI_PATH} task create --help`.cwd(testDir).quiet().nothrow();
+		const helpResult = await $`${CLI_COMMAND} task create --help`.cwd(testDir).quiet().nothrow();
 
 		expect(helpResult.exitCode).toBe(0);
 		const stdout = helpResult.stdout.toString();

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Task } from "../types/index.ts";
-import { Board } from "../ui/board/board.ts";
-import { Filter } from "../ui/board/filter.ts";
+import { Board } from "../ui/board/models/board.ts";
+import { Filter } from "../ui/board/models/filter.ts";
 
 const task = (id: string, status: string, ordinal: number, branch?: string): Task => ({
 	id,

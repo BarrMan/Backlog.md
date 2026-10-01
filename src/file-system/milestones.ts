@@ -1,7 +1,8 @@
 import { mkdir, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { collectMilestoneAliasKeys } from "../core/milestones.ts";
-import { parseMilestone } from "../markdown/parser.ts";
+import { FrontmatterSchemaError, parseMarkdown, parseMilestone } from "../markdown/parser.ts";
+import { serializeMilestone } from "../markdown/serializer.ts";
 import type { Milestone } from "../types/index.ts";
 import { normalizeDueDate } from "../utils/due-date.ts";
 
@@ -29,24 +30,6 @@ function filename(id: string, title: string): string {
 		.replace(/\s+/g, "-")
 		.toLowerCase()
 		.slice(0, 50)}.md`;
-}
-
-function serialize(id: string, title: string, rawContent: string, dueDate?: string): string {
-	return `---
-id: ${id}
-title: "${title.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
-${dueDate ? `due_date: "${dueDate}"\n` : ""}---
-
-${rawContent.trim()}
-`;
-}
-
-function rewriteDefaultDescription(rawContent: string, previousTitle: string, nextTitle: string): string {
-	const pattern = /(##\s+Description\s*(?:\r?\n)+)([\s\S]*?)(?=(?:\r?\n)##\s+|$)/i;
-	return rawContent.replace(pattern, (section, heading: string, body: string) => {
-		if (body.trim() !== `Milestone: ${previousTitle}`) return section;
-		return `${heading}Milestone: ${nextTitle}${body.match(/\s*$/)?.[0] ?? ""}`;
-	});
 }
 
 function canonicalIdentifier(input: string): string | null {
@@ -103,7 +86,8 @@ export class MilestoneStore {
 			try {
 				content = await Bun.file(filepath).text();
 				milestone = parseMilestone(content);
-			} catch {
+			} catch (error) {
+				if (error instanceof FrontmatterSchemaError) throw error;
 				continue;
 			}
 			const match = { file, filepath, content, milestone };
@@ -142,7 +126,8 @@ export class MilestoneStore {
 			if (file.toLowerCase() === "readme.md") continue;
 			try {
 				milestones.push(parseMilestone(await Bun.file(join(directory, file)).text()));
-			} catch {
+			} catch (error) {
+				if (error instanceof FrontmatterSchemaError) throw error;
 				/* Ignore malformed files. */
 			}
 		}
@@ -152,14 +137,16 @@ export class MilestoneStore {
 	async listActive(): Promise<Milestone[]> {
 		try {
 			return await this.list(await this.directory("active"));
-		} catch {
+		} catch (error) {
+			if (error instanceof FrontmatterSchemaError) throw error;
 			return [];
 		}
 	}
 	async listArchived(): Promise<Milestone[]> {
 		try {
 			return await this.list(await this.directory("archived"));
-		} catch {
+		} catch (error) {
+			if (error instanceof FrontmatterSchemaError) throw error;
 			return [];
 		}
 	}
@@ -169,7 +156,8 @@ export class MilestoneStore {
 	async load(identifier: string): Promise<Milestone | null> {
 		try {
 			return (await this.find(identifier))?.milestone ?? null;
-		} catch {
+		} catch (error) {
+			if (error instanceof FrontmatterSchemaError) throw error;
 			return null;
 		}
 	}
@@ -192,7 +180,8 @@ export class MilestoneStore {
 								/^m-(\d+)$/i,
 							)?.[1];
 							return id ? Number.parseInt(id, 10) : match?.[1] ? Number.parseInt(match[1], 10) : null;
-						} catch {
+						} catch (error) {
+							if (error instanceof FrontmatterSchemaError) throw error;
 							return match?.[1] ? Number.parseInt(match[1], 10) : null;
 						}
 					}),
@@ -200,12 +189,13 @@ export class MilestoneStore {
 			);
 			const next = ids.filter((id): id is number => typeof id === "number" && id >= 0);
 			const id = `m-${next.length ? Math.max(...next) + 1 : 0}`;
-			const content = serialize(
+			const content = serializeMilestone({
 				id,
 				title,
-				`## Description\n\n${description || `Milestone: ${title}`}`,
-				normalizedDueDate,
-			);
+				dueDate: normalizedDueDate,
+				description: description || `Milestone: ${title}`,
+				rawContent: "",
+			});
 			await Bun.write(join(active, filename(id, title)), content);
 			return parseMilestone(content);
 		});
@@ -225,11 +215,17 @@ export class MilestoneStore {
 			sourcePath = found.filepath;
 			targetPath = join(await this.directory("active"), filename(found.milestone.id, normalizedTitle));
 			original = found.content;
-			const content = serialize(
-				found.milestone.id,
-				normalizedTitle,
-				rewriteDefaultDescription(found.milestone.rawContent, found.milestone.title, normalizedTitle),
-				dueDate === undefined ? found.milestone.dueDate : normalizedDueDate,
+			const content = serializeMilestone(
+				{
+					...found.milestone,
+					title: normalizedTitle,
+					dueDate: dueDate === undefined ? found.milestone.dueDate : normalizedDueDate,
+					description:
+						found.milestone.description === `Milestone: ${found.milestone.title}`
+							? `Milestone: ${normalizedTitle}`
+							: found.milestone.description,
+				},
+				parseMarkdown(found.content).frontmatter,
 			);
 			if (sourcePath !== targetPath) {
 				if (await Bun.file(targetPath).exists()) return { success: false };
@@ -245,8 +241,9 @@ export class MilestoneStore {
 				previousTitle: found.milestone.title,
 				previousDueDate: found.milestone.dueDate,
 			};
-		} catch {
+		} catch (error) {
 			await this.restoreRename(sourcePath, targetPath, original, moved);
+			if (error instanceof FrontmatterSchemaError) throw error;
 			return { success: false };
 		}
 	}
@@ -260,7 +257,8 @@ export class MilestoneStore {
 			await this.context.ensureDirectory(dirname(targetPath));
 			await rename(found.filepath, targetPath);
 			return { success: true, sourcePath: found.filepath, targetPath, milestone: found.milestone };
-		} catch {
+		} catch (error) {
+			if (error instanceof FrontmatterSchemaError) throw error;
 			return { success: false };
 		}
 	}

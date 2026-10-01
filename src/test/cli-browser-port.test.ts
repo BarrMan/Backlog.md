@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import type { Readable } from "node:stream";
-import { $ } from "bun";
+import { text } from "node:stream/consumers";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import {
 	closeServer,
 	createUniqueTestDir,
@@ -14,7 +14,7 @@ import {
 } from "./test-utils.ts";
 
 // This suite exercises browser assets that are embedded only in the compiled release binary.
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 type BrowserProcess = ChildProcessByStdio<null, Readable, Readable>;
 
 let TEST_DIR: string;
@@ -82,11 +82,15 @@ describe("browser command port selection", () => {
 
 	it("auto-selects the next available port without prompting in non-TTY runs", async () => {
 		const { server, port } = await listenOnEphemeralPort();
-		const child = spawn("bun", [CLI_PATH, "browser", "--port", String(port), "--no-open"], {
-			cwd: TEST_DIR,
-			env: { ...process.env, NO_COLOR: "1" },
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+		const child = spawn(
+			CLI_COMMAND[0] as string,
+			[...CLI_COMMAND.slice(1), "browser", "--port", String(port), "--no-open"],
+			{
+				cwd: TEST_DIR,
+				env: { ...process.env, NO_COLOR: "1" },
+				stdio: ["ignore", "pipe", "pipe"],
+			},
+		);
 
 		try {
 			const output = await waitForOutput(child, "browser interface running");
@@ -101,7 +105,14 @@ describe("browser command port selection", () => {
 	});
 
 	it("documents the local-machine-only bind without offering a public host override", async () => {
-		const output = await $`bun ${CLI_PATH} browser --help`.cwd(TEST_DIR).text();
+		const child = spawn(CLI_COMMAND[0] as string, [...CLI_COMMAND.slice(1), "browser", "--help"], {
+			cwd: TEST_DIR,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+		const [output, error, exitCode] = await Promise.all([text(child.stdout), text(child.stderr), exited]);
+		expect(exitCode).toBe(0);
+		expect(error).toBe("");
 
 		expect(output).toContain("this machine only at 127.0.0.1");
 		expect(output).not.toContain("--host");

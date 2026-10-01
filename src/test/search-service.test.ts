@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Core } from "../core/backlog.ts";
-import type { Task, TaskSearchResult } from "../types/index.ts";
+import type { Decision, Task, TaskSearchResult } from "../types/index.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 const directories: string[] = [];
@@ -72,5 +72,27 @@ describe("snapshot search", () => {
 
 		await core.filesystem.saveTask(task("TASK-1", "Updated", "replacement"));
 		expect(titles(await core.searchPersistently({ query: "replacement", types: ["task"] }))).toEqual(["Updated"]);
+	});
+
+	it("searches structured decision fields without depending on opaque content", async () => {
+		const core = await createProject();
+		const decision: Decision = {
+			id: "decision-1",
+			title: "Choose storage",
+			date: "2026-09-30",
+			status: "accepted",
+			context: "Needle context",
+			decision: "Use frontmatter fields",
+			consequences: "Needle consequence",
+			alternatives: "Needle alternative",
+			rawContent: "Opaque body",
+		};
+		await core.createDecision(decision, false);
+
+		for (const query of ["context", "consequence", "alternative"]) {
+			const results = await core.searchPersistently({ query, types: ["decision"] });
+			expect(results).toHaveLength(1);
+			expect(results[0]).toMatchObject({ type: "decision", decision: { id: decision.id } });
+		}
 	});
 });

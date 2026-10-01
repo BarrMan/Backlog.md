@@ -64,21 +64,24 @@ describe("server runtime scope binding", () => {
 			},
 		};
 		const services = new BrowserServices(new Core(root), hub as never);
-		await services.initialize();
+		try {
+			await services.initialize();
 
-		const initializer = new Core(root);
-		await initializer.filesystem.ensureBacklogStructure();
-		await initializer.filesystem.saveConfig({
-			projectName: "External initialization",
-			statuses: ["To Do", "Done"],
-			labels: [],
-			milestones: [],
-			dateFormat: "YYYY-MM-DD",
-			remoteOperations: false,
-			checkActiveBranches: false,
-		});
-		await withTimeout(configPublished, "external initialization config notification", 3_000);
-		await services.dispose();
+			const initializer = new Core(root);
+			await initializer.filesystem.ensureBacklogStructure();
+			await initializer.filesystem.saveConfig({
+				projectName: "External initialization",
+				statuses: ["To Do", "Done"],
+				labels: [],
+				milestones: [],
+				dateFormat: "YYYY-MM-DD",
+				remoteOperations: false,
+				checkActiveBranches: false,
+			});
+			await withTimeout(configPublished, "external initialization config notification", 3_000);
+		} finally {
+			await services.dispose();
+		}
 	});
 
 	it("recovers watcher notifications after an external malformed config is repaired", async () => {

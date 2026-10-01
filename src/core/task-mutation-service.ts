@@ -1,7 +1,6 @@
 import type { FileSystem } from "../file-system/operations.ts";
 import type { GitOperations } from "../git/operations.ts";
-import { EntityType, type Task, type TaskUpdateInput } from "../types/index.ts";
-import { normalizeAssignee } from "../utils/assignee.ts";
+import { EntityType, TASK_SOURCE, type Task, type TaskUpdateInput } from "../types/index.ts";
 import { formatStoredDate } from "../utils/date.ts";
 import { generateNextId, generateNextSubtaskId, getPrefixForType } from "../utils/prefix-config.ts";
 import { formatValidPriorityValues, resolvePriorityValue } from "../utils/priority-config.ts";
@@ -228,7 +227,7 @@ export class ProjectTaskMutations {
 					branch: "local",
 					path: task.filePath ?? `${this.filesystem.tasksDir}/${task.id}`,
 					lastModified: task.lastModified ?? new Date(0),
-					task: { ...task, source: "local" as const },
+					task: { ...task, source: TASK_SOURCE.LOCAL },
 					workingCopy: true,
 				})),
 				...completed.map((task) =>
@@ -248,7 +247,6 @@ export class ProjectTaskMutations {
 	}
 
 	async saveTask(task: Task, autoCommit?: boolean): Promise<string> {
-		normalizeAssignee(task);
 		const original = await this.filesystem.loadTask(task.id);
 		const previousStatus = original?.status ?? "";
 		const statusChanged = previousStatus !== (task.status ?? "");

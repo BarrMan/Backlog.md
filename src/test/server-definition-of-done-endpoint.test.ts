@@ -72,9 +72,9 @@ describe("BacklogServer Definition of Done index updates", () => {
 		for (const value of [[String(index)], [index, String(index)], [null], [true], [{}], [[]], "1", 1, null, true, {}]) {
 			const response = await put({ [field]: value });
 			expect(response.status).toBe(400);
-			const body = (await response.json()) as { error: string };
+			const body = (await response.json()) as { code: string; error: string };
+			expect(body.code).toBe("VALIDATION_ERROR");
 			expect(body.error).toContain(field);
-			expect(body.error).toContain("array of finite numbers");
 			expect(await readFile(taskPath)).toEqual(before);
 		}
 	});
@@ -88,7 +88,10 @@ describe("BacklogServer Definition of Done index updates", () => {
 		});
 
 		expect(response.status).toBe(400);
-		expect(await response.json()).toEqual({ error: expect.stringContaining(field) });
+		expect(await response.json()).toMatchObject({
+			code: "VALIDATION_ERROR",
+			error: expect.stringContaining(field),
+		});
 		expect(await readFile(taskPath)).toEqual(before);
 	});
 
@@ -101,7 +104,10 @@ describe("BacklogServer Definition of Done index updates", () => {
 				body: `{"${field}":[1e309]}`,
 			});
 			expect(response.status).toBe(400);
-			expect(await response.json()).toEqual({ error: expect.stringContaining(field) });
+			expect(await response.json()).toMatchObject({
+				code: "VALIDATION_ERROR",
+				error: expect.stringContaining(field),
+			});
 			expect(await readFile(taskPath)).toEqual(before);
 		}
 	});

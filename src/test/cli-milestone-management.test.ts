@@ -4,10 +4,10 @@ import { $ } from "bun";
 import { Core } from "../index.ts";
 import { MilestoneHandlers } from "../mcp/tools/milestones/handlers.ts";
 import type { CallToolResult } from "../mcp/types.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
-const cliPath = getTestCliPath();
+const cliCommand = getTestCliCommand();
 
 let TEST_DIR: string;
 let cleanupDirs: string[];
@@ -51,7 +51,7 @@ describe("CLI milestone management", () => {
 	it("adds milestone files with descriptions and rejects duplicate aliases", async () => {
 		const core = new Core(TEST_DIR);
 
-		const add = await $`bun ${cliPath} milestone add "Release CLI" --description "Custom release scope"`
+		const add = await $`${cliCommand} milestone add "Release CLI" --description "Custom release scope"`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -63,7 +63,7 @@ describe("CLI milestone management", () => {
 		expect(milestones[0]?.title).toBe("Release CLI");
 		expect(milestones[0]?.description).toBe("Custom release scope");
 
-		const duplicate = await $`bun ${cliPath} milestone add " release cli "`.cwd(TEST_DIR).quiet().nothrow();
+		const duplicate = await $`${cliCommand} milestone add " release cli "`.cwd(TEST_DIR).quiet().nothrow();
 		const duplicateOutput = duplicate.stdout.toString() + duplicate.stderr.toString();
 
 		expect(duplicate.exitCode).toBe(1);
@@ -85,7 +85,7 @@ describe("CLI milestone management", () => {
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m "baseline"`.cwd(TEST_DIR).quiet();
 
-		const add = await $`bun ${cliPath} milestone add "Committed Release"`.cwd(TEST_DIR).quiet();
+		const add = await $`${cliCommand} milestone add "Committed Release"`.cwd(TEST_DIR).quiet();
 
 		expect(add.exitCode).toBe(0);
 		expect(add.stdout.toString()).toContain('Created milestone "Committed Release" (m-0).');
@@ -96,11 +96,11 @@ describe("CLI milestone management", () => {
 	it("renames milestones and updates local task references by default", async () => {
 		const core = new Core(TEST_DIR);
 
-		await $`bun ${cliPath} milestone add "Release A"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task create "Task A" --milestone "Release A" --plain`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Release A"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Task A" --milestone "Release A" --plain`.cwd(TEST_DIR).quiet();
 		await core.editTask("task-1", { milestone: "Release A" }, false);
 
-		const rename = await $`bun ${cliPath} milestone rename "Release A" "Release Prime"`.cwd(TEST_DIR).quiet();
+		const rename = await $`${cliCommand} milestone rename "Release A" "Release Prime"`.cwd(TEST_DIR).quiet();
 
 		expect(rename.exitCode).toBe(0);
 		expect(rename.stdout.toString()).toContain('Renamed milestone "Release A" (m-0) → "Release Prime" (m-0).');
@@ -116,11 +116,11 @@ describe("CLI milestone management", () => {
 	it("supports disabling task updates during milestone rename", async () => {
 		const core = new Core(TEST_DIR);
 
-		await $`bun ${cliPath} milestone add "Legacy Release"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task create "Legacy task" --milestone "Legacy Release" --plain`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Legacy Release"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Legacy task" --milestone "Legacy Release" --plain`.cwd(TEST_DIR).quiet();
 		await core.editTask("task-1", { milestone: "Legacy Release" }, false);
 
-		const rename = await $`bun ${cliPath} milestone rename "Legacy Release" "Renamed Release" --no-update-tasks`
+		const rename = await $`${cliCommand} milestone rename "Legacy Release" "Renamed Release" --no-update-tasks`
 			.cwd(TEST_DIR)
 			.quiet();
 
@@ -134,10 +134,10 @@ describe("CLI milestone management", () => {
 	it("removes milestones and clears matching task values by default", async () => {
 		const core = new Core(TEST_DIR);
 
-		await $`bun ${cliPath} milestone add "Release A"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task create "Task A" --milestone "Release A" --plain`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Release A"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Task A" --milestone "Release A" --plain`.cwd(TEST_DIR).quiet();
 
-		const clear = await $`bun ${cliPath} milestone remove "Release A"`.cwd(TEST_DIR).quiet();
+		const clear = await $`${cliCommand} milestone remove "Release A"`.cwd(TEST_DIR).quiet();
 
 		expect(clear.exitCode).toBe(0);
 		expect(clear.stdout.toString()).toContain("Cleared milestone for 1 local task: TASK-1");
@@ -147,10 +147,10 @@ describe("CLI milestone management", () => {
 	it("removes milestones and keeps task values when requested", async () => {
 		const core = new Core(TEST_DIR);
 
-		await $`bun ${cliPath} milestone add "Keep Value"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task create "Task A" --milestone "Keep Value" --plain`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Keep Value"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Task A" --milestone "Keep Value" --plain`.cwd(TEST_DIR).quiet();
 
-		const keep = await $`bun ${cliPath} milestone remove "Keep Value" --task-handling keep`.cwd(TEST_DIR).quiet();
+		const keep = await $`${cliCommand} milestone remove "Keep Value" --task-handling keep`.cwd(TEST_DIR).quiet();
 
 		expect(keep.exitCode).toBe(0);
 		expect(keep.stdout.toString()).toContain("Kept task milestone values unchanged (taskHandling=keep).");
@@ -160,12 +160,12 @@ describe("CLI milestone management", () => {
 	it("removes milestones and reassigns matching task values when requested", async () => {
 		const core = new Core(TEST_DIR);
 
-		await $`bun ${cliPath} milestone add "Release A"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} milestone add "Release B"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task create "Task A" --milestone "Release A" --plain`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Release A"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Release B"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Task A" --milestone "Release A" --plain`.cwd(TEST_DIR).quiet();
 
 		const reassign =
-			await $`bun ${cliPath} milestone remove "Release A" --task-handling reassign --reassign-to "Release B"`
+			await $`${cliCommand} milestone remove "Release A" --task-handling reassign --reassign-to "Release B"`
 				.cwd(TEST_DIR)
 				.quiet();
 
@@ -176,13 +176,13 @@ describe("CLI milestone management", () => {
 	});
 
 	it("validates remove task-handling flags and required reassign targets", async () => {
-		await $`bun ${cliPath} milestone add "Release A"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} milestone add "Release A"`.cwd(TEST_DIR).quiet();
 
-		const invalid = await $`bun ${cliPath} milestone remove "Release A" --task-handling punt`
+		const invalid = await $`${cliCommand} milestone remove "Release A" --task-handling punt`
 			.cwd(TEST_DIR)
 			.quiet()
 			.nothrow();
-		const missingTarget = await $`bun ${cliPath} milestone remove "Release A" --task-handling reassign`
+		const missingTarget = await $`${cliCommand} milestone remove "Release A" --task-handling reassign`
 			.cwd(TEST_DIR)
 			.quiet()
 			.nothrow();
@@ -195,11 +195,11 @@ describe("CLI milestone management", () => {
 
 	it("documents milestone command schemas in help output", async () => {
 		const helpByCommand = new Map([
-			["list", await $`bun ${cliPath} milestone list --help`.cwd(TEST_DIR).text()],
-			["add", await $`bun ${cliPath} milestone add --help`.cwd(TEST_DIR).text()],
-			["rename", await $`bun ${cliPath} milestone rename --help`.cwd(TEST_DIR).text()],
-			["remove", await $`bun ${cliPath} milestone remove --help`.cwd(TEST_DIR).text()],
-			["archive", await $`bun ${cliPath} milestone archive --help`.cwd(TEST_DIR).text()],
+			["list", await $`${cliCommand} milestone list --help`.cwd(TEST_DIR).text()],
+			["add", await $`${cliCommand} milestone add --help`.cwd(TEST_DIR).text()],
+			["rename", await $`${cliCommand} milestone rename --help`.cwd(TEST_DIR).text()],
+			["remove", await $`${cliCommand} milestone remove --help`.cwd(TEST_DIR).text()],
+			["archive", await $`${cliCommand} milestone archive --help`.cwd(TEST_DIR).text()],
 		]);
 
 		for (const [command, help] of helpByCommand) {
@@ -223,15 +223,15 @@ describe("CLI milestone management", () => {
 		const mcpCore = await setupProject(mcpDir, "MCP Milestone Parity Project");
 		const mcpHandlers = new MilestoneHandlers(mcpCore);
 
-		const cliAdd = await $`bun ${cliPath} milestone add "Parity A"`.cwd(TEST_DIR).quiet();
+		const cliAdd = await $`${cliCommand} milestone add "Parity A"`.cwd(TEST_DIR).quiet();
 		const mcpAdd = await mcpHandlers.addMilestone({ name: "Parity A" });
 		expect(cliAdd.stdout.toString().trim()).toBe(toolText(mcpAdd).trim());
 
-		const cliRename = await $`bun ${cliPath} milestone rename "Parity A" "Parity B"`.cwd(TEST_DIR).quiet();
+		const cliRename = await $`${cliCommand} milestone rename "Parity A" "Parity B"`.cwd(TEST_DIR).quiet();
 		const mcpRename = await mcpHandlers.renameMilestone({ from: "Parity A", to: "Parity B" });
 		expect(normalizeRenamePaths(cliRename.stdout.toString())).toBe(normalizeRenamePaths(toolText(mcpRename)));
 
-		const cliRemove = await $`bun ${cliPath} milestone remove "Parity B" --task-handling keep`.cwd(TEST_DIR).quiet();
+		const cliRemove = await $`${cliCommand} milestone remove "Parity B" --task-handling keep`.cwd(TEST_DIR).quiet();
 		const mcpRemove = await mcpHandlers.removeMilestone({ name: "Parity B", taskHandling: "keep" });
 		expect(cliRemove.stdout.toString().trim()).toBe(toolText(mcpRemove).trim());
 	});

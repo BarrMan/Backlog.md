@@ -1,4 +1,4 @@
-import { DEFAULT_STATUSES } from "../../constants/index.ts";
+import { DEFAULT_STATUSES, DRAFT_STATUS } from "../../constants/index.ts";
 import type { BacklogConfig } from "../../types/index.ts";
 import { getPriorityLabels } from "../../utils/priority-config.ts";
 import { getProjectValues } from "../../utils/project-config.ts";
@@ -12,8 +12,8 @@ function getStatusFieldEnumValues(config: Pick<BacklogConfig, "statuses">): stri
 	const configuredStatuses =
 		config.statuses && config.statuses.length > 0 ? [...config.statuses] : [...DEFAULT_STATUSES];
 	const normalizedStatuses = configuredStatuses.map((status) => status.trim());
-	const hasDraft = normalizedStatuses.some((status) => status.toLowerCase() === "draft");
-	return hasDraft ? normalizedStatuses : ["Draft", ...normalizedStatuses];
+	const hasDraft = normalizedStatuses.some((status) => status.toLowerCase() === DRAFT_STATUS.toLowerCase());
+	return hasDraft ? normalizedStatuses : [DRAFT_STATUS, ...normalizedStatuses];
 }
 
 /**
@@ -430,8 +430,7 @@ export function generateTaskEditSchema(config: BacklogConfig): JsonSchema {
 					maxLength: 5000,
 				},
 				maxItems: 20,
-				description:
-					"Append comments to the task. Comment bodies may contain Markdown, but standalone '---' lines are reserved as comment delimiters.",
+				description: "Append Markdown comments to the task.",
 			},
 			commentAuthor: {
 				type: "string",

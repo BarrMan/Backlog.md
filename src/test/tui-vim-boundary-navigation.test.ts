@@ -4,7 +4,7 @@ import type { Task } from "../types/index.ts";
 import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { openMultiSelectFilterPopup, openSingleSelectFilterPopup } from "../ui/components/filter-popup.ts";
 import { GenericList } from "../ui/components/generic-list.ts";
-import { resolveListBoundaryNavigation } from "../ui/task-viewer-with-search.ts";
+import { resolveListBoundaryNavigation } from "../ui/task-viewer/controller.ts";
 import { createScreen } from "../ui/tui.ts";
 import { withTimeout } from "./test-utils.ts";
 
@@ -41,7 +41,7 @@ function task(id: string, status = "To Do"): Task {
 describe("vim keys stay inside the task list at boundaries", () => {
 	function createTaskListHarness(screen: ScreenInterface) {
 		const searchHandoffs: Array<"up" | "down"> = [];
-		// Mirrors the task viewer's boundary callback (src/ui/task-viewer-with-search.ts).
+		// Mirrors the task viewer's boundary callback (src/ui/task-viewer/controller.ts).
 		const list = new GenericList({
 			parent: screen,
 			items: [{ id: "TASK-1" }, { id: "TASK-2" }],

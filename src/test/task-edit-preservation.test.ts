@@ -3,13 +3,13 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("Task edit section preservation", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-task-edit-preservation");
@@ -30,6 +30,7 @@ describe("Task edit section preservation", () => {
 		await Bun.write(
 			taskPath,
 			`---
+task_schema_version: 2
 id: task-1
 title: hello world
 status: To Do
@@ -49,7 +50,7 @@ Keep me exactly.
 `,
 		);
 
-		await $`bun ${cliPath} task edit 1 --label foo`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 1 --label foo`.cwd(TEST_DIR).quiet();
 
 		const files = await readdir(tasksDir);
 		expect(files).toContain("task-1 - hello world.md");
@@ -89,16 +90,16 @@ Keep me exactly.
 		);
 
 		// Add acceptance criteria
-		await $`bun ${cliPath} task edit 1 --ac "Criterion 1,Criterion 2"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 1 --ac "Criterion 1,Criterion 2"`.cwd(TEST_DIR).quiet();
 
 		// Add implementation plan
-		await $`bun ${cliPath} task edit 1 --plan "Step 1\nStep 2\nStep 3"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 1 --plan "Step 1\nStep 2\nStep 3"`.cwd(TEST_DIR).quiet();
 
 		// Add implementation notes
-		await $`bun ${cliPath} task edit 1 --notes "Original implementation notes"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 1 --notes "Original implementation notes"`.cwd(TEST_DIR).quiet();
 
 		// Verify all sections exist
-		let result = await $`bun ${cliPath} task 1 --plain`.cwd(TEST_DIR).text();
+		let result = await $`${cliCommand} task 1 --plain`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("Original description");
 		expect(result).toContain("Criterion 1");
@@ -109,10 +110,10 @@ Keep me exactly.
 		expect(result).toContain("Original implementation notes");
 
 		// Update just the description
-		await $`bun ${cliPath} task edit 1 -d "UPDATED description"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 1 -d "UPDATED description"`.cwd(TEST_DIR).quiet();
 
 		// Verify ALL sections are preserved
-		result = await $`bun ${cliPath} task 1 --plain`.cwd(TEST_DIR).text();
+		result = await $`${cliCommand} task 1 --plain`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("UPDATED description");
 		expect(result).toContain("Criterion 1");
@@ -141,15 +142,15 @@ Keep me exactly.
 		);
 
 		// Add all sections
-		await $`bun ${cliPath} task edit 2 --ac "Original criterion"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task edit 2 --plan "Original plan"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task edit 2 --notes "Original notes"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 2 --ac "Original criterion"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 2 --plan "Original plan"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 2 --notes "Original notes"`.cwd(TEST_DIR).quiet();
 
 		// Add new acceptance criteria (now adds instead of replacing)
-		await $`bun ${cliPath} task edit 2 --ac "Updated criterion 1" --ac "Updated criterion 2"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 2 --ac "Updated criterion 1" --ac "Updated criterion 2"`.cwd(TEST_DIR).quiet();
 
 		// Verify all sections are preserved
-		const result = await $`bun ${cliPath} task 2 --plain`.cwd(TEST_DIR).text();
+		const result = await $`${cliCommand} task 2 --plain`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("Test description");
 		expect(result).toContain("Original criterion"); // Now preserved
@@ -177,15 +178,15 @@ Keep me exactly.
 		);
 
 		// Add all sections
-		await $`bun ${cliPath} task edit 3 --ac "Test criterion"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task edit 3 --plan "Original plan"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task edit 3 --notes "Original notes"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 3 --ac "Test criterion"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 3 --plan "Original plan"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 3 --notes "Original notes"`.cwd(TEST_DIR).quiet();
 
 		// Update implementation plan
-		await $`bun ${cliPath} task edit 3 --plan "Updated plan step 1\nUpdated plan step 2"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 3 --plan "Updated plan step 1\nUpdated plan step 2"`.cwd(TEST_DIR).quiet();
 
 		// Verify all sections are preserved
-		const result = await $`bun ${cliPath} task 3 --plain`.cwd(TEST_DIR).text();
+		const result = await $`${cliCommand} task 3 --plain`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("Test description");
 		expect(result).toContain("Test criterion");
@@ -213,15 +214,15 @@ Keep me exactly.
 		);
 
 		// Add all sections
-		await $`bun ${cliPath} task edit 4 --ac "Test criterion"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task edit 4 --plan "Test plan"`.cwd(TEST_DIR).quiet();
-		await $`bun ${cliPath} task edit 4 --notes "Original notes"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 4 --ac "Test criterion"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 4 --plan "Test plan"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 4 --notes "Original notes"`.cwd(TEST_DIR).quiet();
 
 		// Update implementation notes (should overwrite existing)
-		await $`bun ${cliPath} task edit 4 --notes "Additional notes"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 4 --notes "Additional notes"`.cwd(TEST_DIR).quiet();
 
 		// Verify all sections are preserved and notes are appended
-		const result = await $`bun ${cliPath} task 4 --plain`.cwd(TEST_DIR).text();
+		const result = await $`${cliCommand} task 4 --plain`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("Test description");
 		expect(result).toContain("Test criterion");
@@ -248,10 +249,10 @@ Keep me exactly.
 		);
 
 		// Update description
-		await $`bun ${cliPath} task edit 5 -d "Updated minimal description"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 5 -d "Updated minimal description"`.cwd(TEST_DIR).quiet();
 
 		// Should have updated description and default AC text
-		const result = await $`bun ${cliPath} task 5 --plain`.cwd(TEST_DIR).text();
+		const result = await $`${cliCommand} task 5 --plain`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("Updated minimal description");
 		expect(result).toContain("No acceptance criteria defined");

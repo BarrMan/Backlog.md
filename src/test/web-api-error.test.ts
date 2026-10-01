@@ -4,10 +4,10 @@ import { ApiError } from "../web/lib/api.ts";
 describe("Web API errors", () => {
 	it("uses server error payloads as the user-facing message", () => {
 		const error = ApiError.fromResponse(new Response(null, { status: 400, statusText: "Bad Request" }), {
-			error: "Comment body cannot contain standalone '---' delimiter lines.",
+			error: "Comment body is required.",
 		});
 
-		expect(error.message).toBe("Comment body cannot contain standalone '---' delimiter lines.");
+		expect(error.message).toBe("Comment body is required.");
 		expect(error.status).toBe(400);
 	});
 

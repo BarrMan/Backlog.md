@@ -1,25 +1,39 @@
 ---
+task_schema_version: 2
 id: BACK-3
-title: "CLI: Implement `backlog init` Command"
+title: 'CLI: Implement `backlog init` Command'
 status: Done
-assignee: @MrLesk
-reporter: @MrLesk
-created_date: 2025-06-04
-labels: ["cli", "command"]
+assignee:
+  - '@MrLesk'
+reporter: '@MrLesk'
+created_date: '2025-06-04'
+labels:
+  - cli
+  - command
 milestone: m-1
-dependencies: ["task-2"]
+dependencies:
+  - task-2
+description: >-
+  Implement the `backlog init <project-name>` command in the CLI. This command
+  will set up the `.backlog` directory structure and a `config.yml` in the
+  current Git repository.
+acceptance_criteria:
+  - index: 1
+    text: >-
+      `backlog init <project-name>` command creates all necessary subdirectories
+      within `.backlog`.
+    checked: true
+  - index: 2
+    text: >-
+      `backlog init <project-name>` creates an initial commit for the `.backlog`
+      structure.
+    checked: true
+  - index: 3
+    text: Command provides appropriate user feedback.
+    checked: true
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-Implement the `backlog init <project-name>` command in the CLI. This command will set up the `.backlog` directory structure and a `config.yml` in the current Git repository.
-
-## Acceptance Criteria
-
-- [x] `backlog init <project-name>` command creates all necessary subdirectories within `.backlog`.
-- [x] `backlog init <project-name>` creates an initial commit for the `.backlog` structure.
-- [x] Command provides appropriate user feedback.
-
 ## Implementation Summary
 
 ✅ **CLI Implementation Recovered & Complete**

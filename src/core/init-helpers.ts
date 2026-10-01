@@ -13,7 +13,11 @@ import {
 } from "../constants/index.ts";
 import { FileSystem } from "../file-system/operations.ts";
 import type { BacklogConfig } from "../types/index.ts";
-import { normalizeProjectBacklogDirectory } from "../utils/backlog-directory.ts";
+import {
+	BACKLOG_CONFIG_SOURCE,
+	BACKLOG_DIRECTORY_SOURCE,
+	normalizeProjectBacklogDirectory,
+} from "../utils/backlog-directory.ts";
 import {
 	formatMcpClientSetupCommand,
 	getMcpClientSetupCommand,
@@ -192,9 +196,9 @@ function inferBacklogDirectorySource(
 	backlogDirectory: string | null,
 ): InitializeProjectOptions["backlogDirectorySource"] | undefined {
 	if (!backlogDirectory) return undefined;
-	if (backlogDirectory === ".backlog") return ".backlog";
-	if (backlogDirectory === "backlog") return "backlog";
-	return "custom";
+	if (backlogDirectory === BACKLOG_DIRECTORY_SOURCE.HIDDEN) return BACKLOG_DIRECTORY_SOURCE.HIDDEN;
+	if (backlogDirectory === BACKLOG_DIRECTORY_SOURCE.DEFAULT) return BACKLOG_DIRECTORY_SOURCE.DEFAULT;
+	return BACKLOG_DIRECTORY_SOURCE.CUSTOM;
 }
 
 function resolveBacklogDirectorySource(
@@ -206,7 +210,7 @@ function resolveBacklogDirectorySource(
 		throw new Error("Backlog directory source and backlog directory value must agree.");
 	}
 	const source = options.backlogDirectorySource ?? inferredSource;
-	if (source === "custom" && !backlogDirectory) {
+	if (source === BACKLOG_DIRECTORY_SOURCE.CUSTOM && !backlogDirectory) {
 		throw new Error("Backlog directory must be a valid project-relative path.");
 	}
 	return source;
@@ -216,8 +220,10 @@ function resolveConfigLocation(
 	source: InitializeProjectOptions["backlogDirectorySource"] | undefined,
 	configLocation: InitializeProjectOptions["configLocation"],
 ): "folder" | "root" {
-	const location = configLocation ?? (source === "custom" ? "root" : "folder");
-	if (source === "custom" && location !== "root") {
+	const location =
+		configLocation ??
+		(source === BACKLOG_DIRECTORY_SOURCE.CUSTOM ? BACKLOG_CONFIG_SOURCE.ROOT : BACKLOG_CONFIG_SOURCE.FOLDER);
+	if (source === BACKLOG_DIRECTORY_SOURCE.CUSTOM && location !== BACKLOG_CONFIG_SOURCE.ROOT) {
 		throw new Error("Custom backlog directories require root config discovery.");
 	}
 	return location;
@@ -230,7 +236,9 @@ function resolveProjectDirectories(options: InitializeProjectOptions): {
 	const backlogDirectory = normalizeProjectBacklogDirectory(options.backlogDirectory);
 	const source = resolveBacklogDirectorySource(options, backlogDirectory);
 	return {
-		backlogDirectory: backlogDirectory ?? (source === ".backlog" ? ".backlog" : "backlog"),
+		backlogDirectory:
+			backlogDirectory ??
+			(source === BACKLOG_DIRECTORY_SOURCE.HIDDEN ? BACKLOG_DIRECTORY_SOURCE.HIDDEN : BACKLOG_DIRECTORY_SOURCE.DEFAULT),
 		configLocation: resolveConfigLocation(source, options.configLocation),
 	};
 }

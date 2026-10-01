@@ -241,6 +241,20 @@ describe("Git Operations", () => {
 			const scriptPath = join(directory, "hang.sh");
 			const pidPath = join(directory, "child.pid");
 			let childPid: number | undefined;
+			let deadlineCallback: (() => void) | undefined;
+			const originalSetTimeout = globalThis.setTimeout;
+			const deadlineTimer = (...[callback, delay, ...args]: Parameters<typeof setTimeout>) => {
+				if (delay === 500) {
+					deadlineCallback = () => {
+						if (typeof callback === "function") callback(...args);
+					};
+					return originalSetTimeout(() => {}, 60_000);
+				}
+				return originalSetTimeout(callback, delay, ...args);
+			};
+			const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(
+				Object.assign(deadlineTimer, originalSetTimeout),
+			);
 
 			try {
 				await writeFile(
@@ -255,17 +269,27 @@ wait "$child_pid"
 					{ mode: 0o755 },
 				);
 
-				await expect(
-					internals.execGit(["-c", `alias.hang=!${scriptPath}`, "hang"], {
-						timeoutMs: 500,
-						env: { BACKLOG_TIMEOUT_PID_FILE: pidPath },
-					}),
-				).rejects.toThrow("Git command timeout after 500ms");
-
-				childPid = Number((await readFile(pidPath, "utf8")).trim());
+				const command = internals.execGit(["-c", `alias.hang=!${scriptPath}`, "hang"], {
+					timeoutMs: 500,
+					env: { BACKLOG_TIMEOUT_PID_FILE: pidPath },
+				});
+				const readinessDeadline = Date.now() + 5_000;
+				while (childPid === undefined) {
+					try {
+						childPid = Number((await readFile(pidPath, "utf8")).trim());
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					}
+					if (Date.now() >= readinessDeadline) throw new Error("Timed-out Git child did not become ready");
+					await Bun.sleep(10);
+				}
 				expect(Number.isSafeInteger(childPid)).toBe(true);
+				expect(deadlineCallback).toBeDefined();
+				deadlineCallback?.();
+				await expect(command).rejects.toThrow("Git command timeout after 500ms");
 				await waitForProcessExit(childPid);
 			} finally {
+				setTimeoutSpy.mockRestore();
 				if (childPid && isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
 				await rm(directory, { recursive: true, force: true });
 			}

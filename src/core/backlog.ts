@@ -3,7 +3,6 @@ import { isAbsolute, join, relative } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_STATUSES, FALLBACK_STATUS } from "../constants/index.ts";
 import { type DraftFileReference, FileSystem, isConfigValueError } from "../file-system/operations.ts";
 import { GitOperations } from "../git/operations.ts";
-import { assertValidChecklistMarks } from "../markdown/structured-sections.ts";
 import {
 	type AcceptanceCriterion,
 	type Decision,
@@ -14,12 +13,12 @@ import {
 	type Milestone,
 	type SearchOptions,
 	type SearchResult,
+	TASK_DIRECTORY,
 	type Task,
 	type TaskCreateInput,
 	type TaskListFilter,
 	type TaskUpdateInput,
 } from "../types/index.ts";
-import { normalizeAssignee } from "../utils/assignee.ts";
 import { formatStoredDate } from "../utils/date.ts";
 import { decisionIdKey } from "../utils/decision-id.ts";
 import { documentIdKey } from "../utils/document-id.ts";
@@ -497,9 +496,9 @@ export class Core {
 	): Promise<BranchTaskStateEntry[]> {
 		const idRegex = buildIdRegex(taskPrefix);
 		const globPattern = buildGlobPattern(taskPrefix.toLowerCase());
-		const directories: Array<{ path: string; type: "task" | "completed" }> = [
-			{ path: join(projectRoot, backlogDir, DEFAULT_DIRECTORIES.TASKS), type: "task" },
-			{ path: join(projectRoot, backlogDir, DEFAULT_DIRECTORIES.COMPLETED), type: "completed" },
+		const directories: Array<{ path: string; type: typeof TASK_DIRECTORY.TASK | typeof TASK_DIRECTORY.COMPLETED }> = [
+			{ path: join(projectRoot, backlogDir, DEFAULT_DIRECTORIES.TASKS), type: TASK_DIRECTORY.TASK },
+			{ path: join(projectRoot, backlogDir, DEFAULT_DIRECTORIES.COMPLETED), type: TASK_DIRECTORY.COMPLETED },
 		];
 		const entries: BranchTaskStateEntry[] = [];
 
@@ -543,7 +542,7 @@ export class Core {
 		const occupiedIds = new Set(snapshot.identityIndex.getOccupiedIds());
 		for (const task of completedTasks) occupiedIds.add(task.id);
 		for (const entry of worktreeEntries) {
-			if (entry.type === "task" || entry.type === "completed") occupiedIds.add(entry.id);
+			if (entry.type === TASK_DIRECTORY.TASK || entry.type === TASK_DIRECTORY.COMPLETED) occupiedIds.add(entry.id);
 		}
 		return [...occupiedIds];
 	}
@@ -584,11 +583,9 @@ export class Core {
 	async writePreparedTask(task: Task, isDraft: boolean): Promise<string> {
 		if (isDraft) {
 			task.status = "Draft";
-			normalizeAssignee(task);
 			return await this.fs.saveDraft(task);
 		}
 
-		normalizeAssignee(task);
 		return await this.fs.saveTask(task);
 	}
 
@@ -686,7 +683,6 @@ export class Core {
 	async updateDraft(task: Task, autoCommit?: boolean): Promise<string> {
 		// Drafts always keep status Draft
 		task.status = "Draft";
-		normalizeAssignee(task);
 		task.updatedDate = formatStoredDate();
 
 		const previousPath = task.filePath;
@@ -1189,7 +1185,6 @@ export class Core {
 	): Promise<T> {
 		const task = await this.fs.loadTask(taskId);
 		if (!task) throw new Error(`Task not found: ${taskId}`);
-		assertValidChecklistMarks(task.rawContent ?? "", "AC");
 		const { items, result } = mutate(
 			Array.isArray(task.acceptanceCriteriaItems) ? [...task.acceptanceCriteriaItems] : [],
 		);

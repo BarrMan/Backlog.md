@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ScreenInterface } from "neo-neo-bblessed";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types/index.ts";
-import { type ColumnData, filterVisibleColumns } from "../ui/board/column-policy.ts";
+import { type ColumnData, filterVisibleColumns } from "../ui/board/policies/column-policy.ts";
 import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { getHelpShortcuts } from "../ui/components/help-popup.ts";
 import { createScreen } from "../ui/tui.ts";

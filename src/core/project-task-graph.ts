@@ -1,4 +1,4 @@
-import type { Task } from "../types/index.ts";
+import { TASK_SOURCE, type Task } from "../types/index.ts";
 import {
 	buildDependencyGraph,
 	createDependencyGraphContext,
@@ -28,7 +28,7 @@ export class ProjectTaskGraph {
 	constructor(snapshot: TaskCorpusSnapshot) {
 		this.identityIndex = snapshot.identityIndex;
 		const completedTasks = snapshot.identityIndex
-			? snapshot.identityIndex.getTasks(true).filter((task) => task.source === "completed")
+			? snapshot.identityIndex.getTasks(true).filter((task) => task.source === TASK_SOURCE.COMPLETED)
 			: snapshot.completedTasks;
 		const index = createTaskRecordIndex({
 			tasks: snapshot.tasks,

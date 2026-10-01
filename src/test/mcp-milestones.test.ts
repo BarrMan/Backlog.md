@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
+import { serializeMilestone } from "../markdown/serializer.ts";
 import { McpServer } from "../mcp/server.ts";
 import { registerMilestoneTools } from "../mcp/tools/milestones/index.ts";
 import { registerTaskTools } from "../mcp/tools/tasks/index.ts";
@@ -34,16 +35,7 @@ async function writeLegacyMilestoneFile(
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "");
 	const filename = `${id} - ${slug || "milestone"}.md`;
-	const escapedTitle = title.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-	const content = `---
-id: ${id}
-title: "${escapedTitle}"
----
-
-## Description
-
-${description}
-`;
+	const content = serializeMilestone({ id, title, description, rawContent: "" });
 	await Bun.write(join(mcpServer.application.filesystem.milestonesDir, filename), content);
 }
 
@@ -548,7 +540,7 @@ describe("MCP milestone tools", () => {
 
 		const renamedPath = join(server.application.filesystem.milestonesDir, "m-0 - release-2.0.md");
 		const updatedContent = await Bun.file(renamedPath).text();
-		expect(updatedContent).toContain("## Description\n\nMilestone: Release 2.0");
+		expect(updatedContent).toContain("description: 'Milestone: Release 2.0'");
 		expect(updatedContent).toContain(`## Notes\n\n${notesLine}`);
 		expect(updatedContent).not.toContain("## Notes\n\nKeep reference Milestone: Release 2.0 in notes");
 	});
@@ -984,15 +976,12 @@ describe("MCP milestone tools", () => {
 	it("allocates new milestone IDs from milestone frontmatter IDs before filename IDs", async () => {
 		await Bun.write(
 			join(server.application.filesystem.milestonesDir, "m-0 - mismatched-frontmatter-id.md"),
-			`---
-id: m-7
-title: "Legacy frontmatter ID"
----
-
-## Description
-
-Milestone: Legacy frontmatter ID
-`,
+			serializeMilestone({
+				id: "m-7",
+				title: "Legacy frontmatter ID",
+				description: "Milestone: Legacy frontmatter ID",
+				rawContent: "",
+			}),
 		);
 
 		const add = await server.testInterface.callTool({

@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-527
 title: Add ordinal sorting to task list views
 status: Done
@@ -19,41 +20,38 @@ modified_files:
   - src/test/cli-priority-filtering.test.ts
   - src/test/cli.test.ts
 ordinal: 167000
+description: >-
+  The browser task list and CLI list commands should expose ordinal sorting so
+  users can review tasks in the same deliberate sequence used by the board view.
+implementation_plan: |-
+  1. Rebase the PR branch onto latest main.
+  2. Add ordinal as a supported browser list sort column.
+  3. Add ordinal as a valid CLI list sort field and update help text.
+  4. Add focused tests for browser and CLI ordinal sorting.
+  5. Run focused and full validation before handoff.
+implementation_notes: >-
+  Implemented in PR #645. Updated src/web/components/TaskList.tsx, src/cli.ts,
+  and focused CLI/Web tests.
+
+
+  Validation on the rebased branch passed: bun test --timeout=10000
+  src/test/cli-task-list-ordinal-sort.test.ts
+  src/test/cli-priority-filtering.test.ts
+  src/test/web-task-list-labels-menu.test.tsx (19 pass, 0 fail).
+final_summary: >-
+  PR #645 adds ordinal sorting to the browser task list and CLI list commands,
+  with focused tests for ordinal column rendering, sort behavior, and CLI sort
+  validation.
+acceptance_criteria:
+  - index: 1
+    text: The browser task list exposes a sortable ordinal column.
+    checked: true
+  - index: 2
+    text: CLI task and draft list commands accept --sort ordinal.
+    checked: true
+  - index: 3
+    text: Focused CLI and browser tests pass for ordinal sorting behavior.
+    checked: true
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
-The browser task list and CLI list commands should expose ordinal sorting so users can review tasks in the same deliberate sequence used by the board view.
-<!-- SECTION:DESCRIPTION:END -->
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 The browser task list exposes a sortable ordinal column.
-- [x] #2 CLI task and draft list commands accept --sort ordinal.
-- [x] #3 Focused CLI and browser tests pass for ordinal sorting behavior.
-<!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Rebase the PR branch onto latest main.
-2. Add ordinal as a supported browser list sort column.
-3. Add ordinal as a valid CLI list sort field and update help text.
-4. Add focused tests for browser and CLI ordinal sorting.
-5. Run focused and full validation before handoff.
-<!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Implemented in PR #645. Updated src/web/components/TaskList.tsx, src/cli.ts, and focused CLI/Web tests.
-
-Validation on the rebased branch passed: bun test --timeout=10000 src/test/cli-task-list-ordinal-sort.test.ts src/test/cli-priority-filtering.test.ts src/test/web-task-list-labels-menu.test.tsx (19 pass, 0 fail).
-<!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-PR #645 adds ordinal sorting to the browser task list and CLI list commands, with focused tests for ordinal column rendering, sort behavior, and CLI sort validation.
-<!-- SECTION:FINAL_SUMMARY:END -->

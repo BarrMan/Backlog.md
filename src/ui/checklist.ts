@@ -1,5 +1,7 @@
 /* Checklist alignment utilities for consistent checkbox display */
 
+import { TASK_FIELD_LABELS } from "./task-labels.ts";
+
 export interface ChecklistItem {
 	text: string;
 	checked: boolean;
@@ -70,7 +72,7 @@ export function alignAcceptanceCriteria(criteriaSection: string): string[] {
  * Extract and format acceptance criteria from markdown content
  */
 export function extractAndFormatAcceptanceCriteria(content: string): string[] {
-	const criteriaSection = extractSection(content, "Acceptance Criteria");
+	const criteriaSection = extractSection(content, TASK_FIELD_LABELS.ACCEPTANCE_CRITERIA);
 	if (!criteriaSection) return [];
 
 	return alignAcceptanceCriteria(criteriaSection);

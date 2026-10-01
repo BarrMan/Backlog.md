@@ -10,7 +10,7 @@ import { AgentSessionService } from "../agent-workspace/sessions.ts";
 import type { AgentConfigScope, AgentConfiguration, AgentPreset } from "../agent-workspace/types.ts";
 import { spawnSessionWorker } from "../agent-workspace/worker.ts";
 import type { Core } from "../core/backlog.ts";
-import { UnifiedViewController } from "../ui/unified-view.ts";
+import { UnifiedViewController } from "../ui/unified/controller.ts";
 import { addHelpSchema, choiceType } from "./help-schema.ts";
 
 const SCOPES = ["root", "project", "card"] as const;

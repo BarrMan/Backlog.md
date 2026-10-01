@@ -10,6 +10,7 @@ import { DRAFT_PREFIX, extractAnyPrefix } from "../../utils/prefix-config.ts";
 import { getValidStatuses } from "../../utils/status.ts";
 import { isValidTaskId } from "../../utils/task-id.ts";
 import { isAmbiguousTaskIdError, LOCAL_TASK_LOOKUP_HINT } from "../../utils/task-path.ts";
+import { API_ROUTES } from "../api-routes.ts";
 import { listTaskCollection, taskCollectionQuery } from "../task-collection.ts";
 import { demotionFailureCause, movedState } from "../transport.ts";
 import { normalizeAcceptanceCriteriaItems, parseDueDate, parseTaskUpdate } from "../validation.ts";
@@ -157,7 +158,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		}
 	};
 	app.get(
-		"/api/tasks",
+		API_ROUTES.TASKS,
 		({ query, core, graph }) => {
 			if (!graph) throw new Error("Browser services must initialize before accepting requests");
 			return listTaskCollection(query, core, graph);
@@ -168,7 +169,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		},
 	);
 	app.post(
-		"/api/tasks",
+		API_ROUTES.TASKS,
 		async ({ body: input, core, status }) => {
 			if (typeof input.title !== "string" || !input.title.trim()) return status(400, { error: "Title is required" });
 			const due = parseDueDate(input.dueDate, false);
@@ -209,16 +210,16 @@ export function tasksResource({ services }: ResourceDependencies) {
 		return graph.getTaskDetail(value.task);
 	};
 	const detailResponse = { 200: taskDetailSchema, 400: error, 404: error, 409: error };
-	app.get("/api/task/:id", ({ params, core, graph, set }) => get(core, graph, params.id, set), {
+	app.get(API_ROUTES.LEGACY_TASK(":id"), ({ params, core, graph, set }) => get(core, graph, params.id, set), {
 		params,
 		response: detailResponse,
 	});
-	app.get("/api/tasks/:id", ({ params, core, graph, set }) => get(core, graph, params.id, set), {
+	app.get(API_ROUTES.TASK(":id"), ({ params, core, graph, set }) => get(core, graph, params.id, set), {
 		params,
 		response: detailResponse,
 	});
 	app.put(
-		"/api/tasks/:id",
+		API_ROUTES.TASK(":id"),
 		async ({ params, body: input, core, scope, status }) => {
 			const parsed = parseTaskUpdate(input);
 			if ("error" in parsed) return status(400, { error: parsed.error });
@@ -249,7 +250,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ params, body: taskUpdateBody, response: { 200: taskSchema, 400: error, 409: error, 500: error } },
 	);
 	app.delete(
-		"/api/tasks/:id",
+		API_ROUTES.TASK(":id"),
 		async ({ params, core, status }) => {
 			try {
 				const result = await core.archiveTask(params.id);
@@ -263,7 +264,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ params, response: { 200: moved, 400: error, 404: error, 409: error } },
 	);
 	app.post(
-		"/api/tasks/:id/complete",
+		API_ROUTES.TASK_COMPLETE(":id"),
 		async ({ params, core, status }) => {
 			try {
 				if (!(await core.completeTask(params.id))) return status(404, { error: "Task not found" });
@@ -277,7 +278,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ params, response: { 200: success, 404: error, 409: error, 500: error } },
 	);
 	app.post(
-		"/api/tasks/:id/demote",
+		API_ROUTES.TASK_DEMOTE(":id"),
 		async ({ params, core, scope, status }) => {
 			try {
 				const result = await core.demoteTask(params.id);
@@ -294,9 +295,9 @@ export function tasksResource({ services }: ResourceDependencies) {
 		},
 		{ params, response: { 200: moved, 404: error, 409: error, 500: error } },
 	);
-	app.get("/api/statuses", ({ core }) => getValidStatuses(core), { response: t.Array(t.String()) });
+	app.get(API_ROUTES.STATUSES, ({ core }) => getValidStatuses(core), { response: t.Array(t.String()) });
 	app.get(
-		"/api/drafts",
+		API_ROUTES.DRAFTS,
 		async ({ core }) => {
 			try {
 				return await core.filesystem.listDrafts();
@@ -307,7 +308,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ response: t.Array(taskSchema) },
 	);
 	app.post(
-		"/api/drafts/:id/promote",
+		API_ROUTES.DRAFT_PROMOTE(":id"),
 		async ({ params, core, status }) => {
 			try {
 				return (await core.promoteDraft(params.id)) ? { success: true } : status(404, { error: "Draft not found" });
@@ -323,7 +324,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ params, response: { 200: success, 404: error, 409: error, 500: error } },
 	);
 	app.post(
-		"/api/tasks/reorder",
+		API_ROUTES.TASK_REORDER,
 		async ({ body: input, core, status }) => {
 			try {
 				const taskId = typeof input.taskId === "string" ? input.taskId : "";
@@ -362,7 +363,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ body: reorderBody, response: { 200: reorderResult, 400: error, 409: error, 500: error } },
 	);
 	app.post(
-		"/api/tasks/move",
+		API_ROUTES.TASK_MOVE,
 		async ({ body: input, core, status }) => {
 			try {
 				const taskIds = Array.isArray(input.taskIds)
@@ -404,7 +405,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 	}
 
 	app.get(
-		"/api/tasks/cleanup",
+		API_ROUTES.TASK_CLEANUP,
 		async ({ query, core, status }) => {
 			const result = parseCleanupAge(query.age);
 			if ("error" in result) return status(400, result);
@@ -422,7 +423,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		{ query: cleanupQuery, response: { 200: cleanupPreview, 400: error, 500: error } },
 	);
 	app.post(
-		"/api/tasks/cleanup/execute",
+		API_ROUTES.TASK_CLEANUP_EXECUTE,
 		async ({ body: input, core, status }) => {
 			const result = parseCleanupAge(input.age);
 			if ("error" in result) return status(400, result);
@@ -467,7 +468,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		},
 	);
 	app.get(
-		"/api/tasks/duplicates",
+		API_ROUTES.TASK_DUPLICATES,
 		async ({ core, status }) => {
 			try {
 				return await core.previewDuplicateTaskIdRepair();
@@ -486,7 +487,7 @@ export function tasksResource({ services }: ResourceDependencies) {
 		},
 	);
 	app.post(
-		"/api/tasks/duplicates",
+		API_ROUTES.TASK_DUPLICATES,
 		async ({ body: input, core, status }) => {
 			try {
 				const fingerprint = typeof input.fingerprint === "string" ? input.fingerprint.trim() : "";

@@ -1,6 +1,6 @@
 import { rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { parseDecision, parseDocument } from "../markdown/parser.ts";
+import { FrontmatterSchemaError, parseDecision, parseDocument, parseMarkdown } from "../markdown/parser.ts";
 import { serializeDecision, serializeDocument } from "../markdown/serializer.ts";
 import type { Decision, Document } from "../types/index.ts";
 import { findDecisionById } from "../utils/decision-id.ts";
@@ -12,30 +12,40 @@ export interface ContentRepositoryContext {
 	decisionsDirectory(): Promise<string>;
 	documentsDirectory(): Promise<string>;
 	ensureDirectory(directory: string): Promise<void>;
+	withCreateLock?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export class ContentRepository {
 	constructor(private readonly context: ContentRepositoryContext) {}
 
-	async saveDecision(decision: Decision): Promise<{ filepath: string; removedFilepaths: string[] }> {
-		const normalizedId = decision.id.replace(/^decision-/, "");
-		const filename = `decision-${normalizedId} - ${sanitizeFilename(decision.title)}.md`;
-		const directory = await this.context.decisionsDirectory();
-		const filepath = join(directory, filename);
-		await this.context.ensureDirectory(dirname(filepath));
-		const removedFilepaths: string[] = [];
-		for (const match of await Array.fromAsync(
-			new Bun.Glob("decision-*.md").scan({ cwd: directory, followSymlinks: true }),
-		)) {
-			if (match === filename || !match.startsWith(`decision-${normalizedId} -`)) continue;
-			try {
-				const path = join(directory, match);
-				await unlink(path);
-				removedFilepaths.push(path);
-			} catch {}
-		}
-		await Bun.write(filepath, serializeDecision(decision));
-		return { filepath, removedFilepaths };
+	async saveDecision(
+		decision: Decision,
+		retainedFrontmatter?: Record<string, unknown>,
+	): Promise<{ filepath: string; removedFilepaths: string[] }> {
+		const save = async () => {
+			const normalizedId = decision.id.replace(/^decision-/, "");
+			const filename = `decision-${normalizedId} - ${sanitizeFilename(decision.title)}.md`;
+			const directory = await this.context.decisionsDirectory();
+			const filepath = join(directory, filename);
+			await this.context.ensureDirectory(dirname(filepath));
+			const removedFilepaths: string[] = [];
+			let storedFrontmatter: Record<string, unknown> = {};
+			for (const match of await Array.fromAsync(
+				new Bun.Glob("decision-*.md").scan({ cwd: directory, followSymlinks: true }),
+			)) {
+				if (!match.startsWith(`decision-${normalizedId} -`)) continue;
+				try {
+					const path = join(directory, match);
+					storedFrontmatter = parseMarkdown(await Bun.file(path).text()).frontmatter;
+					if (match === filename) continue;
+					await unlink(path);
+					removedFilepaths.push(path);
+				} catch {}
+			}
+			await Bun.write(filepath, serializeDecision(decision, retainedFrontmatter ?? storedFrontmatter));
+			return { filepath, removedFilepaths };
+		};
+		return await (this.context.withCreateLock?.(save) ?? save());
 	}
 
 	async listDecisions(unreadable?: string[]): Promise<Decision[]> {
@@ -48,12 +58,14 @@ export class ContentRepository {
 				if (file.toLowerCase() === "readme.md") continue;
 				try {
 					decisions.push({ ...parseDecision(await Bun.file(join(directory, file)).text()), path: file });
-				} catch {
+				} catch (error) {
+					if (error instanceof FrontmatterSchemaError) throw error;
 					unreadable?.push(file);
 				}
 			}
 			return sortByTaskId(decisions);
 		} catch (error) {
+			if (error instanceof FrontmatterSchemaError) throw error;
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable?.push("");
 			return [];
 		}

@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-76.1
 title: Assess neo-neo-blessed API compatibility and differences
 status: Done
@@ -11,30 +12,51 @@ labels:
   - analysis
 dependencies: []
 parent_task_id: task-76
+description: >-
+  Conduct a thorough assessment of neo-neo-blessed to understand its API
+  compatibility with the current blessed implementation and identify any
+  breaking changes or differences that need to be addressed during migration.
+
+
+  This research phase will:
+
+  - Compare the APIs of blessed vs neo-neo-blessed
+
+  - Identify all current blessed usage patterns in the codebase
+
+  - Document any breaking changes or API differences
+
+  - Assess the impact on existing functionality
+
+  - Create a migration plan based on findings
+acceptance_criteria:
+  - index: 1
+    text: Review neo-neo-blessed documentation and source code
+    checked: true
+  - index: 2
+    text: Create a comprehensive list of all blessed API calls used in the project
+    checked: true
+  - index: 3
+    text: Document any API differences between blessed and neo-neo-blessed
+    checked: true
+  - index: 4
+    text: Identify potential breaking changes that will require code modifications
+    checked: true
+  - index: 5
+    text: Test basic neo-neo-blessed functionality in a minimal example
+    checked: true
+  - index: 6
+    text: Create a migration checklist of required changes
+    checked: true
+  - index: 7
+    text: Document any features that may need alternative implementations
+    checked: true
+  - index: 8
+    text: Assess impact on binary packaging and distribution
+    checked: true
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-Conduct a thorough assessment of neo-neo-blessed to understand its API compatibility with the current blessed implementation and identify any breaking changes or differences that need to be addressed during migration.
-
-This research phase will:
-- Compare the APIs of blessed vs neo-neo-blessed
-- Identify all current blessed usage patterns in the codebase
-- Document any breaking changes or API differences
-- Assess the impact on existing functionality
-- Create a migration plan based on findings
-
-## Acceptance Criteria
-
-- [x] Review neo-neo-blessed documentation and source code
-- [x] Create a comprehensive list of all blessed API calls used in the project
-- [x] Document any API differences between blessed and neo-neo-blessed
-- [x] Identify potential breaking changes that will require code modifications
-- [x] Test basic neo-neo-blessed functionality in a minimal example
-- [x] Create a migration checklist of required changes
-- [x] Document any features that may need alternative implementations
-- [x] Assess impact on binary packaging and distribution
-
 ## Assessment Report
 
 ### Critical Finding: neo-neo-blessed does NOT support ESM

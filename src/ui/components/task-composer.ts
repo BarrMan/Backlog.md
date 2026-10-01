@@ -1,20 +1,19 @@
 import type { BoxInterface, ScreenInterface, TextboxInterface } from "neo-neo-bblessed";
 import { box, textarea, textbox } from "neo-neo-bblessed";
-import { DEFAULT_STATUSES } from "../../constants/index.ts";
+import { DEFAULT_STATUSES, DRAFT_STATUS } from "../../constants/index.ts";
 import type { Task, TaskCreateInput } from "../../types/index.ts";
 import { normalizeDueDate } from "../../utils/due-date.ts";
 import { getPriorityOptions } from "../../utils/priority-config.ts";
 import { getProjectValues } from "../../utils/project-config.ts";
 import { getTaskTypeValues } from "../../utils/task-type-config.ts";
 import { formatKeymap, keymapKeys } from "../keymap.ts";
+import { TASK_FIELD_LABELS } from "../task-labels.ts";
 import {
 	createPopupChrome,
 	createScrollableViewport,
 	type FilterPopupChoice,
 	openSingleSelectFilterPopup,
 } from "./filter-popup.ts";
-
-const DRAFT_STATUS = "Draft";
 
 /** Tab order, matching the top-to-bottom reading order of the composer. */
 const FIELD_ORDER = ["title", "description", "dueDate", "status", "type", "priority", "create", "cancel"] as const;
@@ -185,11 +184,13 @@ function getSelectorContentWidths(options: TaskComposerLayoutOptions): {
 	longestCompactColumn: number;
 } {
 	const selectors: Array<[string, FilterPopupChoice[]]> = [
-		["Status", getTaskComposerStatusChoices(options.statuses ?? DEFAULT_STATUSES)],
-		["Type", getTaskComposerTypeChoices(options.types)],
-		["Priority", getTaskComposerPriorityChoices(options.priorities)],
+		[TASK_FIELD_LABELS.STATUS, getTaskComposerStatusChoices(options.statuses ?? DEFAULT_STATUSES)],
+		[TASK_FIELD_LABELS.TYPE, getTaskComposerTypeChoices(options.types)],
+		[TASK_FIELD_LABELS.PRIORITY, getTaskComposerPriorityChoices(options.priorities)],
 		...(getProjectValues(options.projects).length > 0
-			? ([["Project", getTaskComposerProjectChoices(options.projects)]] as Array<[string, FilterPopupChoice[]]>)
+			? ([[TASK_FIELD_LABELS.PROJECT, getTaskComposerProjectChoices(options.projects)]] as Array<
+					[string, FilterPopupChoice[]]
+				>)
 			: []),
 	];
 	let longest = 0;
@@ -198,7 +199,8 @@ function getSelectorContentWidths(options: TaskComposerLayoutOptions): {
 		for (const choice of choices) {
 			const width = Bun.stringWidth(selectorContent(label, choice.value));
 			longest = Math.max(longest, width);
-			if (label === "Type" || label === "Priority") longestCompactColumn = Math.max(longestCompactColumn, width);
+			if (label === TASK_FIELD_LABELS.TYPE || label === TASK_FIELD_LABELS.PRIORITY)
+				longestCompactColumn = Math.max(longestCompactColumn, width);
 		}
 	}
 	return { longest, longestCompactColumn };
@@ -414,7 +416,6 @@ export function createTaskComposerValues(statuses: readonly string[]): TaskCompo
 
 export function toTaskCreateInput(values: TaskComposerValues): TaskCreateInput {
 	const title = values.title.trim();
-	if (!title) throw new Error("Title is required.");
 	const description = values.description.trim();
 	const dueDate = normalizeDueDate(values.dueDate, "Due date");
 	return {
@@ -598,10 +599,10 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 				keys: true,
 				mouse: true,
 			});
-		const statusField = createSelector("Status", controller.values.status);
+		const statusField = createSelector(TASK_FIELD_LABELS.STATUS, controller.values.status);
 		const typeField = createSelector("Type", controller.values.type);
-		const priorityField = createSelector("Priority", controller.values.priority);
-		const projectField = createSelector("Project", controller.values.project);
+		const priorityField = createSelector(TASK_FIELD_LABELS.PRIORITY, controller.values.priority);
+		const projectField = createSelector(TASK_FIELD_LABELS.PROJECT, controller.values.project);
 
 		const actionsLabel = box({
 			parent: form,
@@ -700,9 +701,21 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 		};
 
 		const syncInputs = () => {
-			controller.values.title = titleInput.getValue();
-			controller.values.description = descriptionInput.getValue();
-			controller.values.dueDate = dueDateInput.getValue();
+			const inputs = [
+				["title", titleInput],
+				["description", descriptionInput],
+				["dueDate", dueDateInput],
+			] as const;
+			for (const [field, input] of inputs) {
+				const value = input.getValue();
+				controller.values[field] = value;
+			}
+		};
+		const typedInputValues = { title: "", description: "", dueDate: "" };
+		const fieldForInput = (input: TextboxInterface): "title" | "description" | "dueDate" => {
+			if (input === titleInput) return "title";
+			if (input === descriptionInput) return "description";
+			return "dueDate";
 		};
 		const cancelInputIfReading = (input: TextboxInterface) => {
 			if ((input as TextboxInterface & { _reading?: boolean })._reading) input.cancel();
@@ -748,13 +761,13 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			if (hasProjects) {
 				mutableProjectField.show();
 				setFieldGeometry(projectField, { top: tops.project, left: 3, width: "100%-6" });
-				projectField.setContent(selectorContent("Project", controller.values.project));
+				projectField.setContent(selectorContent(TASK_FIELD_LABELS.PROJECT, controller.values.project));
 			} else {
 				mutableProjectField.hide();
 			}
-			statusField.setContent(selectorContent("Status", controller.values.status));
+			statusField.setContent(selectorContent(TASK_FIELD_LABELS.STATUS, controller.values.status));
 			typeField.setContent(selectorContent("Type", controller.values.type));
-			priorityField.setContent(selectorContent("Priority", controller.values.priority));
+			priorityField.setContent(selectorContent(TASK_FIELD_LABELS.PRIORITY, controller.values.priority));
 			scrollFieldIntoView(activeField);
 		};
 
@@ -822,9 +835,14 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			options.screen.render();
 		};
 
-		const submit = async () => {
+		const submit = async (preserveActiveInput = false) => {
 			if (pickerOpen || controller.submitting) return;
-			syncInputs();
+			if (
+				!preserveActiveInput &&
+				(activeField === "title" || activeField === "description" || activeField === "dueDate")
+			) {
+				controller.values[activeField] = (widgets[activeField] as TextboxInterface).getValue();
+			}
 			errorBox.setContent(" Creating task...");
 			options.screen.render();
 			const task = await controller.create(options.persist);
@@ -852,7 +870,13 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 							? getTaskComposerPriorityChoices(options.priorities)
 							: getTaskComposerProjectChoices(options.projects);
 			const fieldLabel =
-				field === "status" ? "Status" : field === "type" ? "Type" : field === "priority" ? "Priority" : "Project";
+				field === "status"
+					? TASK_FIELD_LABELS.STATUS
+					: field === "type"
+						? TASK_FIELD_LABELS.TYPE
+						: field === "priority"
+							? TASK_FIELD_LABELS.PRIORITY
+							: TASK_FIELD_LABELS.PROJECT;
 			try {
 				const selected = await openSingleSelectFilterPopup({
 					screen: options.screen,
@@ -882,6 +906,11 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 		popup.key(keymapKeys("shared", "escape"), escapeHandler);
 		for (const widget of Object.values(widgets)) {
 			widget.key(keymapKeys("shared", "escape"), escapeHandler);
+			widget.key(["S-enter"], () => {
+				Object.assign(controller.values, typedInputValues);
+				void submit(true);
+				return false;
+			});
 			widget.key(keymapKeys("shared", "tab"), () => {
 				moveFocus(1);
 				return false;
@@ -914,6 +943,7 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			input.setCursor?.(0, 0);
 			input.setValue(value);
 			syncInputs();
+			typedInputValues[fieldForInput(input)] = value;
 			const lines = readCaretLines(input, value);
 			const cursor = cursorFromCaretIndex(value, caret, lines);
 			input.setCursor?.(cursor.x, cursor.y);
@@ -946,17 +976,23 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 		 * with UTF-16 slicing, and their deletion behavior also differs between textbox and textarea.
 		 * Owning both paths keeps every mutation on a code-point boundary.
 		 */
-		const ownedInputKeys = new Set(["tab", "backspace", "delete"]);
+		const ownedInputKeys = new Set(["tab", "backspace", "delete", "enter"]);
 		const isTextInsertion = (ch: string): boolean => {
 			if (!ch) return false;
 			if (ch.length > 1) return true;
 			const code = ch.charCodeAt(0);
 			return code > 0x1f && code !== 0x7f;
 		};
-		const ownInputKeys = (input: ComposerInput) => {
+		const ownInputKeys = (input: ComposerInput, onEnter: () => void) => {
 			const listener = input._listener?.bind(input);
 			if (!listener) return;
 			input._listener = (ch, key) => {
+				if (key.name === "enter") {
+					queueMicrotask(() => {
+						if (!settled && !controller.submitting) onEnter();
+					});
+					return;
+				}
 				if ((key.name && ownedInputKeys.has(key.name)) || ch === "\t") return;
 				if (isTextInsertion(ch)) {
 					insertText(input, ch);
@@ -965,13 +1001,23 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 				listener(ch, key);
 			};
 		};
-		ownInputKeys(titleInput as ComposerInput);
-		ownInputKeys(descriptionInput as ComposerInput);
-		ownInputKeys(dueDateInput as ComposerInput);
+		ownInputKeys(titleInput as ComposerInput, () => focusField("description"));
+		ownInputKeys(descriptionInput as ComposerInput, () => focusField("dueDate"));
+		ownInputKeys(dueDateInput as ComposerInput, () => focusField("status"));
 
 		let cursorBeforeKey: { y: number; lines: number } | null = null;
 		for (const input of [titleInput, descriptionInput, dueDateInput] as ComposerInput[]) {
-			input.on("keypress", () => {
+			input.on("keypress", (ch: string) => {
+				if (isTextInsertion(ch)) {
+					const field = fieldForInput(input);
+					const value = input.getValue();
+					typedInputValues[field] =
+						field === "description"
+							? typedInputValues[field] + ch
+							: value !== typedInputValues[field]
+								? value
+								: value + ch;
+				}
 				cursorBeforeKey = {
 					y: input.getCursor?.().y ?? 0,
 					lines: Math.max(1, input._clines?.length ?? input.getValue().split("\n").length),
@@ -996,7 +1042,6 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			focusField("description");
 			return false;
 		});
-		titleInput.on("submit", () => focusField("description"));
 		descriptionInput.key(keymapKeys("shared", "up"), () => {
 			const cursor = cursorBeforeKey;
 			if (cursor && cursor.y <= -(cursor.lines - 1)) focusField("title");
@@ -1014,7 +1059,6 @@ export async function openTaskComposer(options: TaskComposerOptions): Promise<Ta
 			focusField("status");
 			return false;
 		});
-		dueDateInput.on("submit", () => focusField("status"));
 
 		for (const field of selectorFields) {
 			const widget = widgets[field];

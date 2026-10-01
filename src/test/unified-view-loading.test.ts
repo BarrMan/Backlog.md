@@ -3,14 +3,14 @@ import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
-import { UnifiedViewSession } from "../ui/unified/session.ts";
 import {
 	createTaskFromBoard,
 	createUnifiedTaskUpdateCallbacks,
 	getDuplicateTaskStartupWarning,
 	getEmptyUnifiedViewMessage,
 	loadTasksForUnifiedView,
-} from "../ui/unified-view.ts";
+} from "../ui/unified/controller.ts";
+import { UnifiedViewSession } from "../ui/unified/session.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
 describe("loadTasksForUnifiedView", () => {

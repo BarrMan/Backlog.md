@@ -3,10 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { Task } from "../types";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 let core: Core;
@@ -37,7 +37,7 @@ describe("CLI auto-plain behavior in non-TTY runs", () => {
 	});
 
 	test("task list falls back to plain output without --plain", async () => {
-		const result = await $`bun ${CLI_PATH} task list`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task list`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const out = result.stdout.toString();
@@ -47,7 +47,7 @@ describe("CLI auto-plain behavior in non-TTY runs", () => {
 	});
 
 	test("task view falls back to plain output without --plain", async () => {
-		const result = await $`bun ${CLI_PATH} task view 1`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task view 1`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const out = result.stdout.toString();
@@ -58,7 +58,7 @@ describe("CLI auto-plain behavior in non-TTY runs", () => {
 	});
 
 	test("task create preserves legacy concise output without --plain", async () => {
-		const result = await $`bun ${CLI_PATH} task create "Second Task"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "Second Task"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const out = result.stdout.toString();
@@ -68,7 +68,7 @@ describe("CLI auto-plain behavior in non-TTY runs", () => {
 	});
 
 	test("task edit preserves legacy concise output without --plain", async () => {
-		const result = await $`bun ${CLI_PATH} task edit 1 -s "In Progress"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task edit 1 -s "In Progress"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.toString()).toContain("Updated task TASK-1");
 	});

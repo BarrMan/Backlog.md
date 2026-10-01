@@ -7,7 +7,7 @@ import { loadTaskDetail } from "../core/task-detail.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
 import { taskIdsEqual } from "../utils/task-id.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 /**
@@ -17,7 +17,7 @@ import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } fro
  * dependency is exactly what readiness reads.
  */
 describe("references to a vacated task ID", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 	let testDir: string;
 	let core: Core;
 
@@ -467,28 +467,28 @@ describe("references to a vacated task ID", () => {
 	});
 
 	it("reports the cleaned tasks from the archive and demote commands", async () => {
-		await $`bun ${cliPath} task create "Dependent one"`.cwd(testDir).quiet();
-		await $`bun ${cliPath} task create "Dependent two"`.cwd(testDir).quiet();
-		await $`bun ${cliPath} task create "Shared target"`.cwd(testDir).quiet();
-		await $`bun ${cliPath} task edit TASK-1 --dep TASK-3`.cwd(testDir).quiet();
-		await $`bun ${cliPath} task edit TASK-2 --dep TASK-3`.cwd(testDir).quiet();
+		await $`${cliCommand} task create "Dependent one"`.cwd(testDir).quiet();
+		await $`${cliCommand} task create "Dependent two"`.cwd(testDir).quiet();
+		await $`${cliCommand} task create "Shared target"`.cwd(testDir).quiet();
+		await $`${cliCommand} task edit TASK-1 --dep TASK-3`.cwd(testDir).quiet();
+		await $`${cliCommand} task edit TASK-2 --dep TASK-3`.cwd(testDir).quiet();
 
-		const archived = await $`bun ${cliPath} task archive TASK-3`.cwd(testDir).quiet();
+		const archived = await $`${cliCommand} task archive TASK-3`.cwd(testDir).quiet();
 		expect(archived.exitCode).toBe(0);
 		expect(archived.stdout.toString()).toContain("Archived task TASK-3");
 		expect(archived.stdout.toString()).toContain("Removed references to TASK-3 from TASK-1, TASK-2");
 
-		await $`bun ${cliPath} task edit TASK-2 --dep TASK-1`.cwd(testDir).quiet();
-		const demoted = await $`bun ${cliPath} task demote TASK-1`.cwd(testDir).quiet();
+		await $`${cliCommand} task edit TASK-2 --dep TASK-1`.cwd(testDir).quiet();
+		const demoted = await $`${cliCommand} task demote TASK-1`.cwd(testDir).quiet();
 		expect(demoted.exitCode).toBe(0);
 		expect(demoted.stdout.toString()).toContain("Demoted task TASK-1");
 		expect(demoted.stdout.toString()).toContain("Removed references to TASK-1 from TASK-2");
 	});
 
 	it("says nothing about cleanup when no other record referenced the task", async () => {
-		await $`bun ${cliPath} task create "Lonely target"`.cwd(testDir).quiet();
+		await $`${cliCommand} task create "Lonely target"`.cwd(testDir).quiet();
 
-		const archived = await $`bun ${cliPath} task archive TASK-1`.cwd(testDir).quiet();
+		const archived = await $`${cliCommand} task archive TASK-1`.cwd(testDir).quiet();
 		expect(archived.exitCode).toBe(0);
 		expect(archived.stdout.toString()).toContain("Archived task TASK-1");
 		expect(archived.stdout.toString()).not.toContain("Removed references");

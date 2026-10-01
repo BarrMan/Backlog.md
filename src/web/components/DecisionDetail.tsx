@@ -1,5 +1,6 @@
 import type { Decision } from "../../types";
 import { useDecisionDetail } from "../hooks/use-decision-detail";
+import DecisionStructuredContent from "./DecisionStructuredContent";
 import DocumentDetailActions from "./DocumentDetailActions";
 import {
 	DocumentDetailHeader,
@@ -8,7 +9,6 @@ import {
 	DocumentDetailSuccessToast,
 } from "./DocumentDetailChrome";
 import { DocumentDetailGate, EmptyDocumentDetail } from "./DocumentDetailStates";
-import EditableDocumentContent from "./EditableDocumentContent";
 import ErrorBoundary from "./ErrorBoundary";
 import StoredDate from "./StoredDate";
 
@@ -83,11 +83,16 @@ export default function DecisionDetail({ decisions, onRefreshData, dateFormat }:
 							/>
 						}
 					/>
-					<EditableDocumentContent
-						value={detail.content}
-						onChange={detail.setContent}
+					<DecisionStructuredContent
+						context={detail.context}
+						decision={detail.decisionContent}
+						consequences={detail.consequences}
+						alternatives={detail.alternatives}
+						onContextChange={detail.setContext}
+						onDecisionChange={detail.setDecisionContent}
+						onConsequencesChange={detail.setConsequences}
+						onAlternativesChange={detail.setAlternatives}
 						isEditing={detail.isEditing}
-						placeholder="Write your decision documentation here..."
 					/>
 				</div>
 				{detail.showSaveSuccess && (

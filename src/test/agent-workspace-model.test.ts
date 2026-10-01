@@ -7,7 +7,7 @@ import {
 	parseAcceptanceCriteria,
 	taskWithWorkspaceDraft,
 	terminalInput,
-} from "../ui/agent-workspace-model.ts";
+} from "../ui/workspace/model.ts";
 
 const task = (id: string, status: string): Task => ({
 	id,

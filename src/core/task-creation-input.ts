@@ -2,7 +2,6 @@ import { FALLBACK_STATUS } from "../constants/index.ts";
 import { type BacklogConfig, EntityType, type Task, type TaskCreateInput } from "../types/index.ts";
 import { normalizeDueDate } from "../utils/due-date.ts";
 import { buildDefinitionOfDoneItems, normalizeStringList, parseDelimitedStringList } from "../utils/task-builders.ts";
-import { assertSectionInputsSafe } from "./task-update/index.ts";
 
 export type PreparedTaskCreationInput = {
 	title: string;
@@ -19,9 +18,13 @@ export type PreparedTaskCreationInput = {
 	acceptanceCriteriaItems: Array<{ index: number; text: string; checked: boolean }>;
 };
 
+export function generatedTaskTitle(id: string): string {
+	const numericBody = id.match(/-(\d+(?:\.\d+)*)$/)?.[1];
+	if (!numericBody) throw new Error(`Cannot generate a title for non-numeric task ID ${id}.`);
+	return `untitled-${numericBody}`;
+}
+
 export function prepareTaskCreationInput(input: TaskCreateInput): PreparedTaskCreationInput {
-	if (!input.title || input.title.trim().length === 0) throw new Error("Title is required to create a task.");
-	assertSectionInputsSafe(input);
 	if (
 		input.ordinal !== undefined &&
 		(typeof input.ordinal !== "number" || !Number.isFinite(input.ordinal) || input.ordinal < 0)

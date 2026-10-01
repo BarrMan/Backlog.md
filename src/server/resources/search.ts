@@ -1,4 +1,5 @@
 import { t } from "elysia";
+import { API_ROUTES } from "../api-routes.ts";
 import { parseSearchRequest } from "../search.ts";
 import { type ResourceDependencies, scopedResource } from "./api.ts";
 import { decisionSchema, documentSchema, errorSchema, taskSchema } from "./schemas.ts";
@@ -32,7 +33,7 @@ const searchResultSchema = t.Union([
 export function searchResource({ services }: ResourceDependencies) {
 	const app = scopedResource(services, "search");
 	return app.get(
-		"/api/search",
+		API_ROUTES.SEARCH,
 		async ({ request, core, set }) => {
 			try {
 				const parsed = await parseSearchRequest(new URL(request.url), core);

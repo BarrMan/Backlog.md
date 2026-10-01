@@ -3,8 +3,18 @@ import { join, normalize } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES } from "../constants/index.ts";
 import { parseColonConfigLine } from "./config-line.ts";
 
-export type BacklogDirectorySource = "backlog" | ".backlog" | "custom";
-export type BacklogConfigSource = "folder" | "root";
+export const BACKLOG_DIRECTORY_SOURCE = {
+	DEFAULT: "backlog",
+	HIDDEN: ".backlog",
+	CUSTOM: "custom",
+} as const;
+export type BacklogDirectorySource = (typeof BACKLOG_DIRECTORY_SOURCE)[keyof typeof BACKLOG_DIRECTORY_SOURCE];
+
+export const BACKLOG_CONFIG_SOURCE = {
+	FOLDER: "folder",
+	ROOT: "root",
+} as const;
+export type BacklogConfigSource = (typeof BACKLOG_CONFIG_SOURCE)[keyof typeof BACKLOG_CONFIG_SOURCE];
 
 export interface BacklogDirectoryResolution {
 	projectRoot: string;
@@ -82,7 +92,7 @@ function resolveFolderConfigPath(backlogPath: string): string | null {
 function resolveBuiltInBacklogDirectory(projectRoot: string): {
 	backlogDir: string;
 	backlogPath: string;
-	source: "backlog" | ".backlog";
+	source: Extract<BacklogDirectorySource, "backlog" | ".backlog">;
 } | null {
 	const defaultBacklogPath = join(projectRoot, DEFAULT_DIRECTORIES.BACKLOG);
 	const hiddenBacklogPath = join(projectRoot, DEFAULT_DIRECTORIES.HIDDEN_BACKLOG);
@@ -95,7 +105,7 @@ function resolveBuiltInBacklogDirectory(projectRoot: string): {
 		return {
 			backlogDir: DEFAULT_DIRECTORIES.BACKLOG,
 			backlogPath: defaultBacklogPath,
-			source: "backlog",
+			source: BACKLOG_DIRECTORY_SOURCE.DEFAULT,
 		};
 	}
 
@@ -103,7 +113,7 @@ function resolveBuiltInBacklogDirectory(projectRoot: string): {
 		return {
 			backlogDir: DEFAULT_DIRECTORIES.HIDDEN_BACKLOG,
 			backlogPath: hiddenBacklogPath,
-			source: ".backlog",
+			source: BACKLOG_DIRECTORY_SOURCE.HIDDEN,
 		};
 	}
 
@@ -111,7 +121,7 @@ function resolveBuiltInBacklogDirectory(projectRoot: string): {
 		return {
 			backlogDir: DEFAULT_DIRECTORIES.BACKLOG,
 			backlogPath: defaultBacklogPath,
-			source: "backlog",
+			source: BACKLOG_DIRECTORY_SOURCE.DEFAULT,
 		};
 	}
 
@@ -119,7 +129,7 @@ function resolveBuiltInBacklogDirectory(projectRoot: string): {
 		return {
 			backlogDir: DEFAULT_DIRECTORIES.HIDDEN_BACKLOG,
 			backlogPath: hiddenBacklogPath,
-			source: ".backlog",
+			source: BACKLOG_DIRECTORY_SOURCE.HIDDEN,
 		};
 	}
 
@@ -136,17 +146,17 @@ export function resolveBacklogDirectoryFromRootConfig(
 		const configuredBacklogPath = join(projectRoot, configuredBacklogDir);
 		const configuredSource: BacklogDirectorySource =
 			configuredBacklogDir === DEFAULT_DIRECTORIES.BACKLOG
-				? "backlog"
+				? BACKLOG_DIRECTORY_SOURCE.DEFAULT
 				: configuredBacklogDir === DEFAULT_DIRECTORIES.HIDDEN_BACKLOG
-					? ".backlog"
-					: "custom";
+					? BACKLOG_DIRECTORY_SOURCE.HIDDEN
+					: BACKLOG_DIRECTORY_SOURCE.CUSTOM;
 		return {
 			projectRoot,
 			backlogDir: configuredBacklogDir,
 			backlogPath: configuredBacklogPath,
 			source: configuredSource,
 			configPath: rootConfigPath,
-			configSource: "root",
+			configSource: BACKLOG_CONFIG_SOURCE.ROOT,
 			rootConfigPath,
 			rootConfigExists: true,
 		};
@@ -160,7 +170,7 @@ export function resolveBacklogDirectoryFromRootConfig(
 			backlogPath: builtIn.backlogPath,
 			source: builtIn.source,
 			configPath: rootConfigPath,
-			configSource: "root",
+			configSource: BACKLOG_CONFIG_SOURCE.ROOT,
 			rootConfigPath,
 			rootConfigExists: true,
 		};
@@ -229,7 +239,7 @@ export function resolveBacklogDirectory(projectRoot: string): BacklogDirectoryRe
 		backlogPath: builtIn.backlogPath,
 		source: builtIn.source,
 		configPath: folderConfigPath,
-		configSource: folderConfigPath ? "folder" : null,
+		configSource: folderConfigPath ? BACKLOG_CONFIG_SOURCE.FOLDER : null,
 		rootConfigPath,
 		rootConfigExists,
 	};

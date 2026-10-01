@@ -3,13 +3,13 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let REMOTE_DIR: string;
 let LOCAL_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 async function initRepo(dir: string) {
 	await $`git init -b main`.cwd(dir).quiet();
@@ -55,7 +55,7 @@ describe("next id across remote branches", () => {
 	});
 
 	it("uses id after highest remote task", async () => {
-		const result = await $`bun run ${CLI_PATH} task create "Local Task"`.cwd(LOCAL_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "Local Task"`.cwd(LOCAL_DIR).quiet();
 		expect(result.stdout.toString()).toContain("Created task TASK-2");
 		const core = new Core(LOCAL_DIR);
 		const task = await core.filesystem.loadTask("task-2");

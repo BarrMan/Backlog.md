@@ -7,10 +7,10 @@ import { McpServer } from "../mcp/server.ts";
 import { TaskHandlers } from "../mcp/tools/tasks/handlers.ts";
 import { BacklogServer } from "../server/index.ts";
 import type { Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, retry, safeCleanup, withTimeout } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 const CONTENDED_ID = "TASK-1";
 const CONTENTION_MESSAGE = taskLockErrorMessage(CONTENDED_ID);
 
@@ -223,7 +223,7 @@ describe("atomic task editing", () => {
 		});
 		await withTimeout(lockEntered.promise, "the lock to be held", 5_000);
 
-		const blocked = await $`bun ${CLI_PATH} task edit ${CONTENDED_ID} --add-label blocked`
+		const blocked = await $`${CLI_COMMAND} task edit ${CONTENDED_ID} --add-label blocked`
 			.cwd(testDir)
 			.quiet()
 			.nothrow();
@@ -235,7 +235,7 @@ describe("atomic task editing", () => {
 		expect(await finalLabels()).toEqual([]);
 
 		// Once the holder is done the same command succeeds, so nothing is left wedged.
-		const retried = await $`bun ${CLI_PATH} task edit ${CONTENDED_ID} --add-label retried`
+		const retried = await $`${CLI_COMMAND} task edit ${CONTENDED_ID} --add-label retried`
 			.cwd(testDir)
 			.quiet()
 			.nothrow();
@@ -256,7 +256,7 @@ describe("atomic task editing", () => {
 		const labels = Array.from({ length: jobCount }, (_, index) => `cli-${index + 1}`);
 		const results = await Promise.all(
 			labels.map((label) =>
-				$`bun ${CLI_PATH} task edit ${sharedId} --add-label ${label}`.cwd(testDir).quiet().nothrow(),
+				$`${CLI_COMMAND} task edit ${sharedId} --add-label ${label}`.cwd(testDir).quiet().nothrow(),
 			),
 		);
 

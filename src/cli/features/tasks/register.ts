@@ -9,20 +9,6 @@ import {
 	statusType,
 	taskType,
 } from "../../../commands/help-schema.ts";
-import {
-	normalizeCliPriority,
-	normalizeCliProjects,
-	normalizeCliStatusList,
-	normalizeCliTaskTypes,
-} from "../../../commands/task-filter-normalizers.ts";
-import { parseTaskListRequest } from "../../../commands/task-list-parse.ts";
-import { runTaskListProjectView } from "../../../commands/task-list-project.ts";
-import { queryTaskList } from "../../../commands/task-list-query.ts";
-import {
-	formatTaskListRow,
-	groupTaskListByStatus,
-	printTaskListGroupedByStatus,
-} from "../../../commands/task-list-render.ts";
 import { watchJson } from "../../../commands/watch-json.ts";
 import { DEFAULT_DONE_STATUS, DEFAULT_STATUSES } from "../../../constants/index.ts";
 import { findLocalDuplicateTaskIds } from "../../../core/duplicate-task-repair.ts";
@@ -31,7 +17,8 @@ import { formatJson, printJson, taskListJson, taskViewJson } from "../../../form
 import { formatTaskPlainText } from "../../../formatters/task-plain-text.ts";
 import { Core } from "../../../index.ts";
 import { isLocalEditableTask, type Task } from "../../../types/index.ts";
-import { TaskViewerController } from "../../../ui/task-viewer-with-search.ts";
+import { TASK_FIELD_LABELS } from "../../../ui/task-labels.ts";
+import { TaskViewerController } from "../../../ui/task-viewer/controller.ts";
 import { formatDependencyCleanupMessage } from "../../../utils/dependency-graph.ts";
 import { formatDuplicateTaskIdWarning } from "../../../utils/duplicate-detection.ts";
 import {
@@ -49,6 +36,16 @@ import { type CliReadOutput, getReadOutputMode, isPlainRequested, resolveListOut
 import { createMultiValueAccumulator } from "../task/edit-fields.ts";
 import { registerTaskCreate } from "./create.ts";
 import { addTaskEditOptions, runTaskEdit } from "./edit.ts";
+import {
+	normalizeCliPriority,
+	normalizeCliProjects,
+	normalizeCliStatusList,
+	normalizeCliTaskTypes,
+} from "./filter-normalizers.ts";
+import { parseTaskListRequest } from "./list-parse.ts";
+import { runTaskListProjectView } from "./list-project.ts";
+import { queryTaskList } from "./list-query.ts";
+import { formatTaskListRow, groupTaskListByStatus, printTaskListGroupedByStatus } from "./list-render.ts";
 import {
 	formatTaskEditError,
 	printMissingRequiredArgument,
@@ -189,7 +186,7 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 		optional: [
 			{ name: "status", type: () => statusType({ multiple: true }), description: "Filter by one or more statuses" },
 			{ name: "exclude-status", type: statusType, description: "Exclude statuses" },
-			{ name: "assignee", type: "Assignee", description: "Filter by @name" },
+			{ name: "assignee", type: TASK_FIELD_LABELS.ASSIGNEE, description: "Filter by @name" },
 			{ name: "unassigned", type: "Boolean", description: "Only tasks without an assignee" },
 			{ name: "milestone", type: "Milestone ID or title", description: "Filter by milestone" },
 			{ name: "parent", type: "Task ID", description: "Show subtasks of a parent task" },
@@ -340,7 +337,7 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 			{ name: "append-final-summary", type: "Markdown", description: "Append to final summary; repeatable" },
 			{ name: "check-ac", type: "Integer", description: "1-based acceptance criterion index" },
 		],
-		writes: "Updates task metadata and structured task sections through Backlog.md",
+		writes: "Updates task metadata and structured frontmatter fields through Backlog.md",
 		output: "Updated task details; use --plain for text output",
 		examples: [
 			'backlog task edit {{TASK_ID:1}} --status "<active status>" -a @sara',
@@ -479,7 +476,7 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 			const core = new Core(cwd);
 			const taskView = await loadLocalTaskView(core, taskId);
 			if (!taskView || printTaskViewOutput(taskView.detail, cwd, outputMode)) return;
-			const { UnifiedViewController } = await import("../../../ui/unified-view.ts");
+			const { UnifiedViewController } = await import("../../../ui/unified/controller.ts");
 			await new UnifiedViewController({
 				core,
 				initialView: "task-detail",

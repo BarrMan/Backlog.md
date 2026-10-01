@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("CLI doc view command", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-cli-doc-view");
@@ -31,7 +31,7 @@ describe("CLI doc view command", () => {
 	});
 
 	it("prints document content with --plain", async () => {
-		const result = await $`bun ${cliPath} doc view doc-1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} doc view doc-1 --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -40,7 +40,7 @@ describe("CLI doc view command", () => {
 	});
 
 	it("falls back to plain output without --plain when not attached to a TTY", async () => {
-		const result = await $`bun ${cliPath} doc view doc-1`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} doc view doc-1`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();

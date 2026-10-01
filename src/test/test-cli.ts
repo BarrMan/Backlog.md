@@ -1,13 +1,9 @@
 import { join } from "node:path";
 import { captureProcessOutput } from "../process/capture.ts";
 
-export function getTestCliPath(): string {
-	return process.env.BACKLOG_TEST_CLI_BUNDLE?.trim() || join(process.cwd(), "src", "cli", "index.ts");
-}
-
 export function getTestCliCommand(): string[] {
 	const binary = process.env.BACKLOG_TEST_CLI_BINARY?.trim();
-	return binary ? [binary] : ["bun", getTestCliPath()];
+	return binary ? [binary] : [process.execPath, join(process.cwd(), "src", "cli", "index.ts")];
 }
 
 export async function runTestCli(

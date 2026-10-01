@@ -4,8 +4,15 @@ import { Core } from "../../core/backlog.ts";
 import { initializeProject } from "../../core/init.ts";
 import { getTaskStatistics } from "../../core/statistics.ts";
 import type { BacklogConfig } from "../../types/index.ts";
+import {
+	BACKLOG_CONFIG_SOURCE,
+	BACKLOG_DIRECTORY_SOURCE,
+	type BacklogConfigSource,
+	type BacklogDirectorySource,
+} from "../../utils/backlog-directory.ts";
 import { getTaskPrefixError } from "../../utils/prefix-config.ts";
 import { getVersion } from "../../utils/version.ts";
+import { API_ROUTES, PROJECT_SCOPE_HEADER } from "../api-routes.ts";
 import { type ResourceDependencies, scopedResource } from "./api.ts";
 import { errorSchema, taskSchema } from "./schemas.ts";
 
@@ -48,8 +55,16 @@ const initBody = t.Object(
 	{
 		projectName: t.String(),
 		backlogDirectory: t.Optional(t.String()),
-		backlogDirectorySource: t.Optional(t.Union([t.Literal("backlog"), t.Literal(".backlog"), t.Literal("custom")])),
-		configLocation: t.Optional(t.Union([t.Literal("folder"), t.Literal("root")])),
+		backlogDirectorySource: t.Optional(
+			t.Union([
+				t.Literal(BACKLOG_DIRECTORY_SOURCE.DEFAULT),
+				t.Literal(BACKLOG_DIRECTORY_SOURCE.HIDDEN),
+				t.Literal(BACKLOG_DIRECTORY_SOURCE.CUSTOM),
+			]),
+		),
+		configLocation: t.Optional(
+			t.Union([t.Literal(BACKLOG_CONFIG_SOURCE.FOLDER), t.Literal(BACKLOG_CONFIG_SOURCE.ROOT)]),
+		),
 		integrationMode: t.Optional(t.Union([t.Literal("mcp"), t.Literal("cli"), t.Literal("none")])),
 		mcpClients: t.Optional(
 			t.Array(
@@ -105,10 +120,14 @@ const bool = (value: unknown) =>
 			: typeof value === "string" && value.trim().toLowerCase() === "false"
 				? false
 				: undefined;
+const isBacklogDirectorySource = (value: unknown): value is BacklogDirectorySource =>
+	Object.values(BACKLOG_DIRECTORY_SOURCE).includes(value as BacklogDirectorySource);
+const isBacklogConfigSource = (value: unknown): value is BacklogConfigSource =>
+	Object.values(BACKLOG_CONFIG_SOURCE).includes(value as BacklogConfigSource);
 export function projectResource({ services }: ResourceDependencies) {
 	const app = scopedResource(services, "project");
 	app.get(
-		"/api/config",
+		API_ROUTES.CONFIG,
 		async ({ core, set }) => {
 			try {
 				const value = await core.filesystem.loadConfig();
@@ -124,7 +143,7 @@ export function projectResource({ services }: ResourceDependencies) {
 		{ response: { 200: configSchema, 404: errorSchema, 500: errorSchema } },
 	);
 	app.put(
-		"/api/config",
+		API_ROUTES.CONFIG,
 		async ({ body, core, set }) => {
 			try {
 				if (!body.projectName.trim()) {
@@ -133,7 +152,7 @@ export function projectResource({ services }: ResourceDependencies) {
 				}
 				await core.filesystem.saveConfig(body as BacklogConfig);
 				await services.configChanged();
-				set.headers["X-Backlog-Project-Scope"] = services.createRequestScope().scope.token;
+				set.headers[PROJECT_SCOPE_HEADER] = services.createRequestScope().scope.token;
 				return body;
 			} catch (error) {
 				console.error("Error updating config:", error);
@@ -144,7 +163,7 @@ export function projectResource({ services }: ResourceDependencies) {
 		{ body: configSchema, response: { 200: configSchema, 400: errorSchema, 500: errorSchema } },
 	);
 	app.get(
-		"/api/statistics",
+		API_ROUTES.STATISTICS,
 		async ({ core, set }) => {
 			try {
 				const [corpus, drafts] = await Promise.all([core.loadTaskSnapshot(), core.filesystem.listDrafts()]);
@@ -168,7 +187,7 @@ export function projectResource({ services }: ResourceDependencies) {
 		{ response: { 200: statisticsSchema, 500: errorSchema } },
 	);
 	app.get(
-		"/api/status",
+		API_ROUTES.STATUS,
 		async ({ core, scope }) => {
 			try {
 				const config = await core.filesystem.loadConfig();
@@ -197,7 +216,7 @@ export function projectResource({ services }: ResourceDependencies) {
 		{ response: statusSchema },
 	);
 	app.get(
-		"/api/version",
+		API_ROUTES.VERSION,
 		async ({ set }) => {
 			try {
 				return { version: await getVersion() };
@@ -209,7 +228,7 @@ export function projectResource({ services }: ResourceDependencies) {
 		{ response: { 200: t.Object({ version: t.String() }), 500: errorSchema } },
 	);
 	app.post(
-		"/api/init",
+		API_ROUTES.INIT,
 		async ({ body, core, set }) => {
 			try {
 				const projectName = body.projectName.trim();
@@ -233,12 +252,10 @@ export function projectResource({ services }: ResourceDependencies) {
 				const result = await initializeProject(initializationCore, {
 					projectName,
 					backlogDirectory: typeof body.backlogDirectory === "string" ? body.backlogDirectory.trim() : undefined,
-					backlogDirectorySource: ["backlog", ".backlog", "custom"].includes(String(body.backlogDirectorySource))
-						? (body.backlogDirectorySource as "backlog" | ".backlog" | "custom")
+					backlogDirectorySource: isBacklogDirectorySource(body.backlogDirectorySource)
+						? body.backlogDirectorySource
 						: undefined,
-					configLocation: ["folder", "root"].includes(String(body.configLocation))
-						? (body.configLocation as "folder" | "root")
-						: undefined,
+					configLocation: isBacklogConfigSource(body.configLocation) ? body.configLocation : undefined,
 					integrationMode: (body.integrationMode as "mcp" | "cli" | "none") || "none",
 					mcpClients: Array.isArray(body.mcpClients) ? body.mcpClients : [],
 					agentInstructions: Array.isArray(body.agentInstructions) ? body.agentInstructions : [],

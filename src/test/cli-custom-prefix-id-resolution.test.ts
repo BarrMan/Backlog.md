@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import { LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import {
 	commitSamePathBranchTaskVariant,
 	createUniqueTestDir,
@@ -13,7 +13,7 @@ import {
 	safeCleanup,
 } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 let TEST_DIR: string;
 
 /**
@@ -187,7 +187,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 				const core = await initCustomPrefixProject();
 				await testCase.setup(core);
 
-				const result = await $`bun ${CLI_PATH} ${testCase.args(id)}`.cwd(TEST_DIR).nothrow().quiet();
+				const result = await $`${CLI_COMMAND} ${testCase.args(id)}`.cwd(TEST_DIR).nothrow().quiet();
 
 				expect(result.stderr.toString()).not.toContain("not found");
 				expect(result.exitCode).toBe(0);
@@ -205,7 +205,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 				const core = await initCustomPrefixProject();
 				await testCase.setup(core);
 
-				const result = await $`bun ${CLI_PATH} ${testCase.args(id)}`.cwd(TEST_DIR).nothrow().quiet();
+				const result = await $`${CLI_COMMAND} ${testCase.args(id)}`.cwd(TEST_DIR).nothrow().quiet();
 
 				expect(result.stderr.toString()).not.toContain("not found");
 				expect(result.exitCode).toBe(0);
@@ -219,7 +219,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		await createTask(core, "BACK-1", "Target task");
 		await createTask(core, "BACK-2", "Dependent task");
 
-		const result = await $`bun ${CLI_PATH} task edit 2 --dep 1`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} task edit 2 --dep 1`.cwd(TEST_DIR).nothrow().quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("BACK-2"))?.dependencies).toEqual(["BACK-1"]);
@@ -230,11 +230,11 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		await createTask(core, "BACK-1", "Target task");
 		await createTask(core, "BACK-2", "Dependent task");
 
-		const edited = await $`bun ${CLI_PATH} task edit 2 --dep 1,BACK-1`.cwd(TEST_DIR).nothrow().quiet();
+		const edited = await $`${CLI_COMMAND} task edit 2 --dep 1,BACK-1`.cwd(TEST_DIR).nothrow().quiet();
 		expect(edited.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("BACK-2"))?.dependencies).toEqual(["BACK-1"]);
 
-		const created = await $`bun ${CLI_PATH} task create Dependent --dep BACK-1,1,back-001`
+		const created = await $`${CLI_COMMAND} task create Dependent --dep BACK-1,1,back-001`
 			.cwd(TEST_DIR)
 			.nothrow()
 			.quiet();
@@ -248,7 +248,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 
 		// "1" only becomes BACK-1 at resolution time, so the batch must collapse on the resolved
 		// identity instead of saving the same task twice.
-		const result = await $`bun ${CLI_PATH} task edit 1 BACK-1 -s Done`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} task edit 1 BACK-1 -s Done`.cwd(TEST_DIR).nothrow().quiet();
 
 		expect(result.exitCode).toBe(0);
 		const updates = result.stdout
@@ -276,7 +276,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 			["task", "edit", "2", "--dep", "BACK-1"],
 			["task", "create", "Dependent", "--dep", "1"],
 		]) {
-			const result = await $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} ${args}`.cwd(TEST_DIR).nothrow().quiet();
 
 			expect(result.exitCode).not.toBe(0);
 			const output = `${result.stdout.toString()}${result.stderr.toString()}`;
@@ -306,7 +306,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 			["task", "edit", "2", "--dep", "BACK-1"],
 			["task", "create", "Dependent", "--dep", "1"],
 		]) {
-			const result = await $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} ${args}`.cwd(TEST_DIR).nothrow().quiet();
 
 			expect(result.exitCode).not.toBe(0);
 			const output = `${result.stdout.toString()}${result.stderr.toString()}`;
@@ -337,7 +337,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 			);
 
 			for (const parent of ["1", "BACK-1"]) {
-				const result = await $`bun ${CLI_PATH} task list --parent ${parent} --plain`.cwd(TEST_DIR).nothrow().quiet();
+				const result = await $`${CLI_COMMAND} task list --parent ${parent} --plain`.cwd(TEST_DIR).nothrow().quiet();
 
 				expect(result.exitCode).not.toBe(0);
 				const output = `${result.stdout.toString()}${result.stderr.toString()}`;
@@ -402,7 +402,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 
 		// Parent filtering is a local task-list operation, so the branch variant must neither block
 		// the command nor change which local children are displayed.
-		const result = await $`bun ${CLI_PATH} task list --parent 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} task list --parent 1 --plain`.cwd(TEST_DIR).nothrow().quiet();
 		const output = `${result.stdout.toString()}${result.stderr.toString()}`;
 		expect(result.exitCode).toBe(0);
 		expect(output).not.toContain("Task ID BACK-1 is ambiguous");
@@ -421,14 +421,14 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 			(await Bun.file(join(draftsDir, "draft-2 - Two.md")).text()).replace("title: Two", "title: One"),
 		);
 
-		const archived = await $`bun ${CLI_PATH} draft archive 1`.cwd(TEST_DIR).nothrow().quiet();
+		const archived = await $`${CLI_COMMAND} draft archive 1`.cwd(TEST_DIR).nothrow().quiet();
 		expect(archived.exitCode).toBe(0);
 		expect(archived.stdout.toString()).toContain("Archived draft DRAFT-1");
 		expect(await Bun.file(join(draftsDir, "draft-1 - One.md")).exists()).toBe(false);
 		expect(await Bun.file(join(draftsDir, "draft-2 - Two.md")).exists()).toBe(true);
 
 		// Same for promote: the remaining draft-2 file must be the one promoted when asked for 2.
-		const promoted = await $`bun ${CLI_PATH} draft promote 2`.cwd(TEST_DIR).nothrow().quiet();
+		const promoted = await $`${CLI_COMMAND} draft promote 2`.cwd(TEST_DIR).nothrow().quiet();
 		expect(promoted.exitCode).toBe(0);
 		expect(promoted.stdout.toString()).toContain("Promoted draft DRAFT-2");
 		expect(await Bun.file(join(draftsDir, "draft-2 - Two.md")).exists()).toBe(false);
@@ -441,7 +441,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		// Task and draft IDs come from separate counters, so a bare 1 names two different tasks.
 		await createDraft(core, "DRAFT-1", "Target draft");
 
-		const ambiguous = await $`bun ${CLI_PATH} task edit 2 --dep 1`.cwd(TEST_DIR).nothrow().quiet();
+		const ambiguous = await $`${CLI_COMMAND} task edit 2 --dep 1`.cwd(TEST_DIR).nothrow().quiet();
 		expect(ambiguous.exitCode).not.toBe(0);
 		const output = `${ambiguous.stdout.toString()}${ambiguous.stderr.toString()}`;
 		expect(output).toContain("Dependency ID 1 is ambiguous");
@@ -450,11 +450,11 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		expect((await core.filesystem.loadTask("BACK-2"))?.dependencies ?? []).toEqual([]);
 
 		// A fully qualified ID still names exactly one of them, in either namespace.
-		const onTask = await $`bun ${CLI_PATH} task edit 2 --dep BACK-1`.cwd(TEST_DIR).nothrow().quiet();
+		const onTask = await $`${CLI_COMMAND} task edit 2 --dep BACK-1`.cwd(TEST_DIR).nothrow().quiet();
 		expect(onTask.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("BACK-2"))?.dependencies).toEqual(["BACK-1"]);
 
-		const onDraft = await $`bun ${CLI_PATH} task edit 2 --dep DRAFT-1`.cwd(TEST_DIR).nothrow().quiet();
+		const onDraft = await $`${CLI_COMMAND} task edit 2 --dep DRAFT-1`.cwd(TEST_DIR).nothrow().quiet();
 		expect(onDraft.exitCode).toBe(0);
 		expect((await core.filesystem.loadTask("BACK-2"))?.dependencies).toEqual(["DRAFT-1"]);
 	});
@@ -475,7 +475,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		}
 
 		// Omitting the flag still lists everything.
-		const unfiltered = await $`bun ${CLI_PATH} task list --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const unfiltered = await $`${CLI_COMMAND} task list --plain`.cwd(TEST_DIR).nothrow().quiet();
 		expect(unfiltered.exitCode).toBe(0);
 		expect(unfiltered.stdout.toString()).toContain("BACK-2 - Other task");
 	});
@@ -484,12 +484,12 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 		const core = await initCustomPrefixProject();
 		await createTask(core, "BACK-1", "Target task");
 
-		const parentFilter = await $`bun ${CLI_PATH} task list --parent 999 --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const parentFilter = await $`${CLI_COMMAND} task list --parent 999 --plain`.cwd(TEST_DIR).nothrow().quiet();
 		expect(parentFilter.exitCode).toBe(1);
 		expect(parentFilter.stderr.toString()).toContain("Parent task BACK-999 not found.");
 		expect(parentFilter.stderr.toString()).toContain(LOCAL_TASK_LOOKUP_HINT);
 
-		const parentCreate = await $`bun ${CLI_PATH} task create Child --parent 999`.cwd(TEST_DIR).nothrow().quiet();
+		const parentCreate = await $`${CLI_COMMAND} task create Child --parent 999`.cwd(TEST_DIR).nothrow().quiet();
 		expect(parentCreate.exitCode).toBe(1);
 		expect(parentCreate.stderr.toString()).toContain("Parent task BACK-999 not found.");
 		expect(parentCreate.stderr.toString()).toContain(LOCAL_TASK_LOOKUP_HINT);
@@ -513,7 +513,7 @@ describe("CLI task ID resolution with a custom ID prefix", () => {
 			["task", "complete", "1"],
 			["task", "demote", "1"],
 		]) {
-			const result = await $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} ${args}`.cwd(TEST_DIR).nothrow().quiet();
 
 			expect(result.exitCode).not.toBe(0);
 			const output = `${result.stdout.toString()}${result.stderr.toString()}`;

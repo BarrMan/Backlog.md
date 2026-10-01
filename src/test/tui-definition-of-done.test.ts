@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Task } from "../types/index.ts";
-import { createTaskPopup } from "../ui/task-viewer-with-search.ts";
+import { createTaskPopup } from "../ui/shared/task-popup.ts";
 import { createScreen } from "../ui/tui.ts";
 
 describe("TUI Definition of Done display", () => {

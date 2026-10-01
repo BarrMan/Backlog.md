@@ -1,7 +1,27 @@
 import type { AgentConfiguration } from "../agent-workspace/types.ts";
 
 export type TaskStatus = string;
-export type TaskDirectoryType = "task" | "draft" | "archived" | "completed";
+export const TASK_DIRECTORY = {
+	TASK: "task",
+	DRAFT: "draft",
+	ARCHIVED: "archived",
+	COMPLETED: "completed",
+} as const;
+export const TASK_DIRECTORY_TYPES = [
+	TASK_DIRECTORY.TASK,
+	TASK_DIRECTORY.DRAFT,
+	TASK_DIRECTORY.ARCHIVED,
+	TASK_DIRECTORY.COMPLETED,
+] as const;
+export type TaskDirectoryType = (typeof TASK_DIRECTORY_TYPES)[number];
+
+export const TASK_SOURCE = {
+	LOCAL: "local",
+	REMOTE: "remote",
+	COMPLETED: "completed",
+	LOCAL_BRANCH: "local-branch",
+} as const;
+export type TaskSource = (typeof TASK_SOURCE)[keyof typeof TASK_SOURCE];
 
 /**
  * How a multi-label filter is combined. Interactive multi-select pickers use "any" so adding a
@@ -67,9 +87,9 @@ export interface Task {
 	implementationNotes?: string;
 	comments?: TaskComment[];
 	finalSummary?: string;
-	/** Structured acceptance criteria parsed from body (checked state + text + index) */
+	/** Acceptance criteria stored in frontmatter (checked state + text + index). */
 	acceptanceCriteriaItems?: AcceptanceCriterion[];
-	/** Structured Definition of Done checklist parsed from body (checked state + text + index) */
+	/** Definition of Done checklist stored in frontmatter (checked state + text + index). */
 	definitionOfDoneItems?: AcceptanceCriterion[];
 	parentTaskId?: string;
 	parentTaskTitle?: string;
@@ -88,7 +108,7 @@ export interface Task {
 	contentRevision?: string;
 	// Metadata fields
 	lastModified?: Date;
-	source?: "local" | "remote" | "completed" | "local-branch";
+	source?: TaskSource;
 	/** Optional per-task callback command to run on status change (overrides global config) */
 	onStatusChange?: string;
 	agentConfiguration?: AgentConfiguration;
@@ -144,7 +164,7 @@ export interface MilestoneBucket {
  * Check if a task is locally editable (not from a remote or other local branch)
  */
 export function isLocalEditableTask(task: Task): boolean {
-	return task.source === undefined || task.source === "local" || task.source === "completed";
+	return task.source === undefined || task.source === TASK_SOURCE.LOCAL || task.source === TASK_SOURCE.COMPLETED;
 }
 
 export interface TaskCreateInput {

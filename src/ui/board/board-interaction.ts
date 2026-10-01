@@ -2,14 +2,14 @@ import type { ScreenInterface } from "neo-neo-bblessed";
 import type { Task } from "../../types/index.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { keymapKeys } from "../keymap.ts";
-import { resolveListBoundaryNavigation, resolveSearchExitTargetIndex } from "../task-viewer-with-search.ts";
-import type { Board } from "./board.ts";
+import { resolveListBoundaryNavigation, resolveSearchExitTargetIndex } from "../task-viewer/controller.ts";
 import type { BoardActions } from "./board-actions.ts";
-import type { BoardDialogs } from "./board-dialogs.ts";
-import type { BoardView } from "./board-view.ts";
-import type { FilterBar } from "./filter-bar.ts";
-import type { Footer } from "./footer.ts";
-import type { BoardTaskPopup } from "./task-popup.ts";
+import type { BoardDialogs } from "./components/board-dialogs.ts";
+import type { BoardView } from "./components/board-view.ts";
+import type { FilterBar } from "./components/filter-bar.ts";
+import type { Footer } from "./components/footer.ts";
+import type { BoardTaskPopup } from "./components/task-popup.ts";
+import type { Board } from "./models/board.ts";
 
 type BoardInteractionOptions = {
 	screen: ScreenInterface;

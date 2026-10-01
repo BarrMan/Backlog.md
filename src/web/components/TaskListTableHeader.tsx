@@ -1,3 +1,4 @@
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 import type { SortDirection, TaskSortColumn } from "./task-list-sorting";
 
 interface TaskListTableHeaderProps {
@@ -8,9 +9,9 @@ interface TaskListTableHeaderProps {
 
 const SORTABLE_COLUMNS: readonly [string, TaskSortColumn][] = [
 	["ID", "id"],
-	["Title", "title"],
-	["Status", "status"],
-	["Priority", "priority"],
+	[TASK_FIELD_LABELS.TITLE, "title"],
+	[TASK_FIELD_LABELS.STATUS, "status"],
+	[TASK_FIELD_LABELS.PRIORITY, "priority"],
 	["Ordinal", "ordinal"],
 ];
 
@@ -50,9 +51,9 @@ export function TaskListTableHeader(props: TaskListTableHeaderProps) {
 				{SORTABLE_COLUMNS.map(([label, column]) => (
 					<SortableHeader key={column} label={label} column={column} {...props} />
 				))}
-				<th className="px-3 py-2">Labels</th>
-				<th className="px-3 py-2">Assignee</th>
-				<SortableHeader label="Milestone" column="milestone" {...props} />
+				<th className="px-3 py-2">{TASK_FIELD_LABELS.LABELS}</th>
+				<th className="px-3 py-2">{TASK_FIELD_LABELS.ASSIGNEE}</th>
+				<SortableHeader label={TASK_FIELD_LABELS.MILESTONE} column="milestone" {...props} />
 				<SortableHeader label="Created" column="created" {...props} />
 			</tr>
 		</thead>

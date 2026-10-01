@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("CLI search command", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-cli-search");
@@ -75,7 +75,7 @@ describe("CLI search command", () => {
 	});
 
 	it("returns matching tasks, documents, and decisions in plain output", async () => {
-		const result = await $`bun ${cliPath} search central --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} search central --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -88,7 +88,7 @@ describe("CLI search command", () => {
 	});
 
 	it("honors status and priority filters for task results", async () => {
-		const statusResult = await $`bun ${cliPath} search follow-up --type task --status "In Progress" --plain`
+		const statusResult = await $`${cliCommand} search follow-up --type task --status "In Progress" --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 		expect(statusResult.exitCode).toBe(0);
@@ -96,7 +96,7 @@ describe("CLI search command", () => {
 		expect(statusStdout).toContain("TASK-2 - High priority follow-up");
 		expect(statusStdout).not.toContain("TASK-1 - Central search integration");
 
-		const priorityResult = await $`bun ${cliPath} search follow-up --type task --priority high --plain`
+		const priorityResult = await $`${cliCommand} search follow-up --type task --priority high --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 		expect(priorityResult.exitCode).toBe(0);
@@ -105,7 +105,7 @@ describe("CLI search command", () => {
 	});
 
 	it("applies result limit", async () => {
-		const result = await $`bun ${cliPath} search search --plain --limit 1`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} search search --plain --limit 1`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
 		const taskMatches = stdout.match(/TASK-\d+ -/g) || [];
@@ -113,7 +113,7 @@ describe("CLI search command", () => {
 	});
 
 	it("rejects invalid result limits with a help hint", async () => {
-		const result = await $`bun ${cliPath} search search --plain --limit 0`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${cliCommand} search search --plain --limit 0`.cwd(TEST_DIR).nothrow().quiet();
 		const output = result.stdout.toString() + result.stderr.toString();
 
 		expect(result.exitCode).toBe(1);
@@ -122,12 +122,12 @@ describe("CLI search command", () => {
 	});
 
 	it("finds tasks by modified file path", async () => {
-		const queryResult = await $`bun ${cliPath} search "src/web/App.tsx" --type task --plain`.cwd(TEST_DIR).quiet();
+		const queryResult = await $`${cliCommand} search "src/web/App.tsx" --type task --plain`.cwd(TEST_DIR).quiet();
 		expect(queryResult.exitCode).toBe(0);
 		const queryStdout = queryResult.stdout.toString();
 		expect(queryStdout).toContain("TASK-1 - Central search integration");
 
-		const filterResult = await $`bun ${cliPath} search --modified-file core/search-service --plain`
+		const filterResult = await $`${cliCommand} search --modified-file core/search-service --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 		expect(filterResult.exitCode).toBe(0);

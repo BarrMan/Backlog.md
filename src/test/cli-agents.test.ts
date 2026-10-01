@@ -3,14 +3,14 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let NON_BACKLOG_DIR: string | undefined;
 
 describe("CLI agents command", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-agents-cli");
@@ -33,13 +33,13 @@ describe("CLI agents command", () => {
 	});
 
 	it("should show help when no options are provided", async () => {
-		const result = await $`bun ${cliPath} agents`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} agents`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 	});
 
 	it("should show help text with agents --help", async () => {
-		const result = await $`bun ${cliPath} agents --help`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} agents --help`.cwd(TEST_DIR).quiet();
 		const output = result.stdout.toString();
 
 		expect(result.exitCode).toBe(0);
@@ -68,7 +68,7 @@ describe("CLI agents command", () => {
 		// Initialize git repo
 		await $`git init`.cwd(NON_BACKLOG_DIR).quiet();
 
-		const result = await $`bun ${cliPath} agents --update-instructions`.cwd(NON_BACKLOG_DIR).nothrow().quiet();
+		const result = await $`${cliCommand} agents --update-instructions`.cwd(NON_BACKLOG_DIR).nothrow().quiet();
 
 		expect(result.exitCode).toBe(1);
 	});

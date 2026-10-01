@@ -1,13 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliCommand, getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
 const CLI_COMMAND = getTestCliCommand();
 
 // Runs the CLI with stdio reported as a TTY so interactive-only behavior (the edit wizard) applies.
@@ -15,9 +13,9 @@ async function runCliWithInteractiveTty(cwd: string, args: string[]) {
 	const entryPath = join(cwd, "interactive-cli-entry.ts");
 	await writeFile(
 		entryPath,
-		`Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
-Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-await import(${JSON.stringify(pathToFileURL(CLI_PATH).href)});
+		`const command = ${JSON.stringify(CLI_COMMAND)};
+const child = Bun.spawn([...command, ...Bun.argv.slice(2)], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+process.exit(await child.exited);
 `,
 	);
 	return await $`bun ${entryPath} ${args}`.cwd(cwd).quiet().nothrow();

@@ -3,7 +3,7 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promis
 import { join } from "node:path";
 import { Core } from "../index.ts";
 import type { Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import {
 	createLauncherInstall,
 	createUniqueTestDir,
@@ -15,7 +15,7 @@ import {
 	withTimeout,
 } from "./test-utils.ts";
 
-const CLI = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 const WATCH = ["task", "list", "--json", "--watch"];
 let directory: string;
 let core: Core;
@@ -23,7 +23,7 @@ const processes: ReturnType<typeof startWatch>[] = [];
 
 function startWatch(args: string[] = []) {
 	return follow(
-		Bun.spawn(["bun", CLI, ...WATCH, ...args], {
+		Bun.spawn([...CLI_COMMAND, ...WATCH, ...args], {
 			cwd: directory,
 			stdin: "ignore",
 			stdout: "pipe",
@@ -75,7 +75,7 @@ function follow(child: Bun.Subprocess<"ignore", "pipe", "pipe">): {
 }
 
 async function once(args: string[] = []) {
-	const child = Bun.spawn(["bun", CLI, "task", "list", "--json", ...args], {
+	const child = Bun.spawn([...CLI_COMMAND, "task", "list", "--json", ...args], {
 		cwd: directory,
 		stdin: "ignore",
 		stdout: "pipe",
@@ -219,7 +219,7 @@ describe("CLI JSON watch", () => {
 
 	it("terminates even when a subscriber stops reading a large response", async () => {
 		await create("TASK-1", { references: [`https://example.com/${"x".repeat(2_000_000)}`] });
-		const child = Bun.spawn(["bun", CLI, "task", "list", "--json", "--watch"], {
+		const child = Bun.spawn([...CLI_COMMAND, "task", "list", "--json", "--watch"], {
 			cwd: directory,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -271,19 +271,19 @@ describe("CLI JSON watch", () => {
 	}
 
 	it("ends when the process that started it is killed", async () => {
-		await expectWatchToEndWithItsStarter(["bun", CLI, ...WATCH]);
+		await expectWatchToEndWithItsStarter([...CLI_COMMAND, ...WATCH]);
 	});
 
 	it("ends with the launcher when the process that started the npm launcher is killed", async () => {
-		// The platform binary is this Bun, so the launched binary runs the CLI path it is given.
+		const binary = process.env.BACKLOG_TEST_CLI_BINARY?.trim();
 		const launcher = await createLauncherInstall(join(directory, "launcher"), (path) =>
-			copyFile(process.execPath, path),
+			copyFile(binary || process.execPath, path),
 		);
-		await expectWatchToEndWithItsStarter(["node", launcher, CLI, ...WATCH]);
+		await expectWatchToEndWithItsStarter(["node", launcher, ...(binary ? WATCH : [...CLI_COMMAND.slice(1), ...WATCH])]);
 	});
 
 	it("requires JSON and rejects invalid options without writing a snapshot", async () => {
-		const child = Bun.spawn(["bun", CLI, "task", "list", "--watch"], {
+		const child = Bun.spawn([...CLI_COMMAND, "task", "list", "--watch"], {
 			cwd: directory,
 			stdout: "pipe",
 			stderr: "pipe",

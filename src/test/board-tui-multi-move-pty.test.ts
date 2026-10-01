@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { BacklogConfig } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = process.env.TUI_TEST_CLI_PATH?.trim() || getTestCliPath();
+const CLI_COMMAND = process.env.TUI_TEST_CLI_PATH?.trim() || getTestCliCommand();
 const CLI_RUNTIME = process.env.TUI_TEST_CLI_RUNTIME?.trim() ?? "bun";
 const TRANSCRIPT_DIR = join(process.cwd(), "tmp", "tui-interactive-transcripts");
 const EXPECT_PATH = Bun.which("expect");
@@ -35,9 +35,9 @@ const itInteractive = skipReason ? it.skip : it;
 function buildSpawnCommand(cliArgs: string[]): string {
 	const argsSegment = cliArgs.map((arg) => `"${arg}"`).join(" ");
 	if (CLI_RUNTIME.length === 0) {
-		return `spawn {${CLI_PATH}} ${argsSegment}`;
+		return `spawn {${CLI_COMMAND}} ${argsSegment}`;
 	}
-	return `spawn {${CLI_RUNTIME}} {${CLI_PATH}} ${argsSegment}`;
+	return `spawn {${CLI_RUNTIME}} {${CLI_COMMAND}} ${argsSegment}`;
 }
 
 describe("interactive board multi-select move", () => {

@@ -2,153 +2,56 @@ import type { Decision, Document, Milestone, ParsedMarkdown, Task } from "../typ
 import { normalizeDueDate } from "../utils/due-date.ts";
 import { normalizePriorityValue } from "../utils/priority-config.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
-import { extractTopLevelSection } from "./ranges.ts";
 import {
-	AcceptanceCriteriaManager,
-	CommentsManager,
-	DefinitionOfDoneManager,
-	getStructuredSections,
-} from "./structured-sections.ts";
+	CHECKLIST_FRONTMATTER_FIELDS,
+	COMMENT_FRONTMATTER_FIELDS,
+	DECISION_FRONTMATTER_FIELDS,
+	DECISION_FRONTMATTER_SCHEMA_VERSION,
+	DOCUMENT_FRONTMATTER_FIELDS,
+	MILESTONE_FRONTMATTER_FIELDS,
+	MILESTONE_FRONTMATTER_SCHEMA_VERSION,
+	TASK_FRONTMATTER_FIELDS,
+	TASK_FRONTMATTER_SCHEMA_VERSION,
+} from "./schema.ts";
 
-function normalizeFlowList(prefix: string, rawValue: string): string | null {
-	// Handle inline lists like assignee: [@user, "someone"]
-	const match = rawValue.match(/^\[(.*)\]\s*(#.*)?$/);
-	if (!match) return null;
+export {
+	DECISION_FRONTMATTER_SCHEMA_VERSION,
+	MILESTONE_FRONTMATTER_SCHEMA_VERSION,
+	TASK_FRONTMATTER_SCHEMA_VERSION,
+} from "./schema.ts";
 
-	const listBody = match[1] ?? "";
-	const comment = match[2];
-	const items = listBody
-		.split(",")
-		.map((entry) => entry.trim())
-		.filter((entry) => entry.length > 0);
+export class FrontmatterSchemaError extends Error {}
 
-	const normalizedItems = items.map((entry) => {
-		if (entry.startsWith("'") || entry.startsWith('"')) {
-			return entry;
-		}
-		if (entry.startsWith("@")) {
-			const escaped = entry.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-			return `"${escaped}"`;
-		}
-		return entry;
-	});
-
-	const trailingComment = comment ? ` ${comment}` : "";
-	return `${prefix}[${normalizedItems.join(", ")}]${trailingComment}`;
+export class TaskFrontmatterSchemaError extends FrontmatterSchemaError {
+	constructor(taskId: string, detail: string) {
+		super(`Invalid task frontmatter for ${taskId || "(missing id)"}: ${detail}.`);
+		this.name = "TaskFrontmatterSchemaError";
+	}
 }
 
-function preprocessDueDateLine(line: string): string | undefined {
-	const dueDateMatch = line.match(/^(\s*(?:due_date|"due_date"|'due_date')\s*:\s*)(.*)$/);
-	if (!dueDateMatch) return undefined;
-	const prefix = dueDateMatch[1] ?? "";
-	const raw = dueDateMatch[2] ?? "";
-	const scalarMatch = raw.match(/^(.*?)(\s+#.*)?$/);
-	const value = (scalarMatch?.[1] ?? raw).trim();
-	const comment = scalarMatch?.[2] ?? "";
-	return value && !/^(?:null|~)$/i.test(value) && !value.startsWith("'") && !value.startsWith('"')
-		? `${prefix}"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"${comment}`
-		: line;
+export class UnsupportedTaskFrontmatterSchemaError extends FrontmatterSchemaError {
+	constructor(taskId: string, version: unknown) {
+		super(
+			`Task ${taskId || "(missing id)"} uses unsupported task frontmatter schema version ${JSON.stringify(version)}.`,
+		);
+		this.name = "UnsupportedTaskFrontmatterSchemaError";
+	}
 }
 
-function preprocessIdentityLine(line: string): string {
-	const match = line.match(/^(\s*(?:assignee|reporter):\s*)(.*)$/);
-	if (!match) return line;
-	const prefix = match[1] ?? "";
-	const value = (match[2] ?? "").trim();
-	const normalizedFlowList = normalizeFlowList(prefix, value);
-	if (normalizedFlowList !== null) return normalizedFlowList;
-	return value && !value.startsWith("[") && !value.startsWith("'") && !value.startsWith('"') && !value.startsWith("-")
-		? `${prefix}"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
-		: line;
-}
-
-function preprocessFrontmatter(frontmatter: string): string {
-	return frontmatter
-		.split(/\r?\n/) // Handle both Windows (\r\n) and Unix (\n) line endings
-		.map((line) => {
-			// The key spelling matters: an unquoted timestamp left for YAML to resolve comes back as a
-			// Date with its written offset already discarded, so a due date read under a quoted key
-			// would land on a different day than the same value read under a bare one.
-			return preprocessDueDateLine(line) ?? preprocessIdentityLine(line);
-		})
-		.join("\n"); // Always join with \n for consistent YAML parsing
-}
-
-function normalizeDate(value: unknown): string {
-	if (!value) return "";
-	if (value instanceof Date) {
-		// Check if this Date object came from a date-only string (time is midnight UTC)
-		const hours = value.getUTCHours();
-		const minutes = value.getUTCMinutes();
-		const seconds = value.getUTCSeconds();
-
-		if (hours === 0 && minutes === 0 && seconds === 0) {
-			// This was likely a date-only value, preserve it as date-only
-			return value.toISOString().slice(0, 10);
-		}
-		// This has actual time information, preserve it
-		return value.toISOString().slice(0, 16).replace("T", " ");
+export class UnsupportedRecordFrontmatterSchemaError extends FrontmatterSchemaError {
+	constructor(kind: "decision" | "milestone", id: string, version: unknown) {
+		super(
+			`${kind[0]?.toUpperCase()}${kind.slice(1)} ${id || "(missing id)"} uses unsupported ${kind} frontmatter schema version ${JSON.stringify(version)}.`,
+		);
+		this.name = "UnsupportedRecordFrontmatterSchemaError";
 	}
-	const str = String(value)
-		.trim()
-		.replace(/^['"]|['"]$/g, "");
-	if (!str) return "";
-
-	// Check for datetime format first (YYYY-MM-DD HH:mm)
-	let match: RegExpMatchArray | null = str.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/);
-	if (match) {
-		// Already in correct format, return as-is
-		return str;
-	}
-
-	// Check for ISO datetime format (YYYY-MM-DDTHH:mm)
-	match = str.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-	if (match) {
-		// Convert T separator to space
-		return str.replace("T", " ");
-	}
-
-	// Check for date-only format (YYYY-MM-DD) - backward compatibility
-	match = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-	if (match) {
-		return `${match[1]}-${match[2]}-${match[3]}`;
-	}
-
-	// Legacy date formats (date-only for backward compatibility)
-	match = str.match(/^(\d{2})-(\d{2})-(\d{2})$/);
-	if (match) {
-		const [day, month, year] = match.slice(1);
-		return `20${year}-${month}-${day}`;
-	}
-	match = str.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
-	if (match) {
-		const [day, month, year] = match.slice(1);
-		return `20${year}-${month}-${day}`;
-	}
-	match = str.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
-	if (match) {
-		const [day, month, year] = match.slice(1);
-		return `20${year}-${month}-${day}`;
-	}
-	return str;
 }
 
 export function parseMarkdown(content: string): ParsedMarkdown {
-	// Updated regex to handle both Windows (\r\n) and Unix (\n) line endings
-	const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---/;
-	const match = content.match(fmRegex);
-	let toParse = content;
-
-	if (match) {
-		const processed = preprocessFrontmatter(match[1] || "");
-		// Replace with consistent line endings
-		toParse = content.replace(fmRegex, () => `---\n${processed}\n---`);
-	}
-
-	const parsed = parseFrontmatter(toParse);
+	const parsed = parseFrontmatter(content);
 	return {
 		frontmatter: parsed.data,
-		content: parsed.content.trim(),
+		content: parsed.content,
 	};
 }
 
@@ -176,19 +79,6 @@ function parseDependencies(value: unknown, taskId: string): string[] {
 	return [];
 }
 
-function parseTaskSections(rawContent: string) {
-	const sections = getStructuredSections(rawContent);
-	return {
-		acceptanceCriteriaItems: AcceptanceCriteriaManager.parseAllCriteria(rawContent),
-		definitionOfDoneItems: DefinitionOfDoneManager.parseAllCriteria(rawContent),
-		comments: CommentsManager.parseAllComments(rawContent),
-		description: sections.description || "",
-		implementationPlan: sections.implementationPlan,
-		implementationNotes: sections.implementationNotes,
-		finalSummary: sections.finalSummary,
-	};
-}
-
 function taskList(value: unknown): string[] {
 	return Array.isArray(value) ? value.map(String) : [];
 }
@@ -197,87 +87,236 @@ function optionalTaskValue(value: unknown): string | undefined {
 	return value ? String(value) : undefined;
 }
 
-function taskAssignees(value: unknown): string[] {
-	return Array.isArray(value) ? value.map(String) : value ? [String(value)] : [];
+function taskAssignees(value: unknown, taskId: string): string[] {
+	if (value === undefined || value === null) return [];
+	if (!Array.isArray(value)) throw new TaskFrontmatterSchemaError(taskId, "assignee must be a list");
+	return value.map(String);
+}
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?$/;
+
+function dateString(value: unknown, field: string, taskId?: string): string | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	if (typeof value !== "string" || !DATE_PATTERN.test(value)) {
+		const detail = `${field} must be a date string in YYYY-MM-DD or YYYY-MM-DD HH:mm format`;
+		if (taskId !== undefined) throw new TaskFrontmatterSchemaError(taskId, detail);
+		throw new FrontmatterSchemaError(`Invalid frontmatter: ${detail}.`);
+	}
+	return value;
 }
 
 function taskFrontmatterFields(frontmatter: Record<string, unknown>) {
+	const id = String(frontmatter[TASK_FRONTMATTER_FIELDS.ID] || "");
+	const subtasks = frontmatter[TASK_FRONTMATTER_FIELDS.SUBTASKS];
 	return {
-		id: String(frontmatter.id || ""),
-		title: String(frontmatter.title || ""),
-		status: String(frontmatter.status || ""),
-		assignee: taskAssignees(frontmatter.assignee),
-		reporter: optionalTaskValue(frontmatter.reporter),
-		createdDate: normalizeDate(frontmatter.created_date),
-		updatedDate: frontmatter.updated_date ? normalizeDate(frontmatter.updated_date) : undefined,
-		dueDate: normalizeDueDate(frontmatter.due_date, "due_date"),
-		labels: taskList(frontmatter.labels),
-		milestone: optionalTaskValue(frontmatter.milestone),
-		references: taskList(frontmatter.references),
-		documentation: taskList(frontmatter.documentation),
-		modifiedFiles: taskList(frontmatter.modified_files),
-		parentTaskId: optionalTaskValue(frontmatter.parent_task_id),
-		subtasks: Array.isArray(frontmatter.subtasks) ? frontmatter.subtasks.map(String) : undefined,
-		priority: normalizePriorityValue(frontmatter.priority ? String(frontmatter.priority) : undefined),
-		type: optionalTaskValue(frontmatter.type),
-		project: optionalTaskValue(frontmatter.project),
-		ordinal: frontmatter.ordinal !== undefined ? Number(frontmatter.ordinal) : undefined,
-		onStatusChange: optionalTaskValue(frontmatter.onStatusChange),
-		agentConfiguration: frontmatter.agentConfiguration as Task["agentConfiguration"],
+		id,
+		title: String(frontmatter[TASK_FRONTMATTER_FIELDS.TITLE] || ""),
+		status: String(frontmatter[TASK_FRONTMATTER_FIELDS.STATUS] || ""),
+		assignee: taskAssignees(frontmatter[TASK_FRONTMATTER_FIELDS.ASSIGNEE], id),
+		reporter: optionalTaskValue(frontmatter[TASK_FRONTMATTER_FIELDS.REPORTER]),
+		createdDate:
+			dateString(frontmatter[TASK_FRONTMATTER_FIELDS.CREATED_DATE], TASK_FRONTMATTER_FIELDS.CREATED_DATE, id) ?? "",
+		updatedDate: dateString(
+			frontmatter[TASK_FRONTMATTER_FIELDS.UPDATED_DATE],
+			TASK_FRONTMATTER_FIELDS.UPDATED_DATE,
+			id,
+		),
+		dueDate: normalizeDueDate(frontmatter[TASK_FRONTMATTER_FIELDS.DUE_DATE], TASK_FRONTMATTER_FIELDS.DUE_DATE),
+		labels: taskList(frontmatter[TASK_FRONTMATTER_FIELDS.LABELS]),
+		milestone: optionalTaskValue(frontmatter[TASK_FRONTMATTER_FIELDS.MILESTONE]),
+		references: taskList(frontmatter[TASK_FRONTMATTER_FIELDS.REFERENCES]),
+		documentation: taskList(frontmatter[TASK_FRONTMATTER_FIELDS.DOCUMENTATION]),
+		modifiedFiles: taskList(frontmatter[TASK_FRONTMATTER_FIELDS.MODIFIED_FILES]),
+		parentTaskId: optionalTaskValue(frontmatter[TASK_FRONTMATTER_FIELDS.PARENT_TASK_ID]),
+		subtasks: Array.isArray(subtasks) ? subtasks.map(String) : undefined,
+		priority: normalizePriorityValue(
+			frontmatter[TASK_FRONTMATTER_FIELDS.PRIORITY] ? String(frontmatter[TASK_FRONTMATTER_FIELDS.PRIORITY]) : undefined,
+		),
+		type: optionalTaskValue(frontmatter[TASK_FRONTMATTER_FIELDS.TYPE]),
+		project: optionalTaskValue(frontmatter[TASK_FRONTMATTER_FIELDS.PROJECT]),
+		ordinal:
+			frontmatter[TASK_FRONTMATTER_FIELDS.ORDINAL] !== undefined
+				? Number(frontmatter[TASK_FRONTMATTER_FIELDS.ORDINAL])
+				: undefined,
+		onStatusChange: optionalTaskValue(frontmatter[TASK_FRONTMATTER_FIELDS.ON_STATUS_CHANGE]),
+		agentConfiguration: frontmatter[TASK_FRONTMATTER_FIELDS.AGENT_CONFIGURATION] as Task["agentConfiguration"],
+	};
+}
+
+function taskText(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function recordText(frontmatter: Record<string, unknown>, key: string): string | undefined {
+	const value = frontmatter[key];
+	if (value !== undefined && typeof value !== "string") {
+		throw new FrontmatterSchemaError(
+			`Invalid record frontmatter for ${String(frontmatter.id || "(missing id)")}: ${key} must be a string.`,
+		);
+	}
+	return value;
+}
+
+function taskChecklist(value: unknown, field: string, taskId: string): Task["acceptanceCriteriaItems"] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) throw new TaskFrontmatterSchemaError(taskId, `${field} must be a list`);
+	const indices = new Set<number>();
+	return value.map((item, position) => {
+		if (!item || typeof item !== "object" || Array.isArray(item))
+			throw new TaskFrontmatterSchemaError(taskId, `${field} entry ${position + 1} must be a mapping`);
+		const entry = item as Record<string, unknown>;
+		const text = entry[CHECKLIST_FRONTMATTER_FIELDS.TEXT];
+		const checked = entry[CHECKLIST_FRONTMATTER_FIELDS.CHECKED];
+		const index = entry[CHECKLIST_FRONTMATTER_FIELDS.INDEX];
+		if (typeof text !== "string")
+			throw new TaskFrontmatterSchemaError(taskId, `${field} entry ${position + 1} text must be a string`);
+		if (typeof checked !== "boolean")
+			throw new TaskFrontmatterSchemaError(taskId, `${field} entry ${position + 1} checked must be a boolean`);
+		const itemIndex = index === undefined ? position + 1 : index;
+		if (typeof itemIndex !== "number" || !Number.isInteger(itemIndex) || itemIndex < 1 || indices.has(itemIndex))
+			throw new TaskFrontmatterSchemaError(
+				taskId,
+				`${field} entry ${position + 1} index must be a unique positive integer`,
+			);
+		indices.add(itemIndex);
+		return { index: itemIndex, text, checked };
+	});
+}
+
+function taskComments(value: unknown, taskId: string): Task["comments"] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) throw new TaskFrontmatterSchemaError(taskId, "comments must be a list");
+	const indices = new Set<number>();
+	return value.map((item, position) => {
+		if (!item || typeof item !== "object" || Array.isArray(item))
+			throw new TaskFrontmatterSchemaError(taskId, `comments entry ${position + 1} must be a mapping`);
+		const entry = item as Record<string, unknown>;
+		const body = entry[COMMENT_FRONTMATTER_FIELDS.BODY];
+		const createdDate = entry[COMMENT_FRONTMATTER_FIELDS.CREATED_DATE];
+		const author = entry[COMMENT_FRONTMATTER_FIELDS.AUTHOR];
+		const index = entry[COMMENT_FRONTMATTER_FIELDS.INDEX];
+		if (typeof body !== "string" || typeof createdDate !== "string")
+			throw new TaskFrontmatterSchemaError(
+				taskId,
+				`comments entry ${position + 1} body and created_date must be strings`,
+			);
+		if (author !== undefined && typeof author !== "string")
+			throw new TaskFrontmatterSchemaError(taskId, `comments entry ${position + 1} author must be a string`);
+		const itemIndex = index === undefined ? position + 1 : index;
+		if (typeof itemIndex !== "number" || !Number.isInteger(itemIndex) || itemIndex < 1 || indices.has(itemIndex))
+			throw new TaskFrontmatterSchemaError(
+				taskId,
+				`comments entry ${position + 1} index must be a unique positive integer`,
+			);
+		indices.add(itemIndex);
+		return { index: itemIndex, body, createdDate, ...(author ? { author } : {}) };
+	});
+}
+
+function taskStructuredFrontmatter(frontmatter: Record<string, unknown>, taskId: string) {
+	const textFields: readonly string[] = [
+		TASK_FRONTMATTER_FIELDS.DESCRIPTION,
+		TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_PLAN,
+		TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_NOTES,
+		TASK_FRONTMATTER_FIELDS.FINAL_SUMMARY,
+	];
+	for (const [key, value] of Object.entries(frontmatter)) {
+		if (textFields.includes(key) && value !== undefined && typeof value !== "string")
+			throw new TaskFrontmatterSchemaError(taskId, `${key} must be a string`);
+	}
+	return {
+		description: taskText(frontmatter[TASK_FRONTMATTER_FIELDS.DESCRIPTION]),
+		implementationPlan: taskText(frontmatter[TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_PLAN]),
+		implementationNotes: taskText(frontmatter[TASK_FRONTMATTER_FIELDS.IMPLEMENTATION_NOTES]),
+		comments: taskComments(frontmatter[TASK_FRONTMATTER_FIELDS.COMMENTS], taskId),
+		finalSummary: taskText(frontmatter[TASK_FRONTMATTER_FIELDS.FINAL_SUMMARY]),
+		acceptanceCriteriaItems: taskChecklist(
+			frontmatter[TASK_FRONTMATTER_FIELDS.ACCEPTANCE_CRITERIA],
+			TASK_FRONTMATTER_FIELDS.ACCEPTANCE_CRITERIA,
+			taskId,
+		),
+		definitionOfDoneItems: taskChecklist(
+			frontmatter[TASK_FRONTMATTER_FIELDS.DEFINITION_OF_DONE],
+			TASK_FRONTMATTER_FIELDS.DEFINITION_OF_DONE,
+			taskId,
+		),
 	};
 }
 
 export function parseTask(content: string): Task {
 	const { frontmatter, content: rawContent } = parseMarkdown(content);
 	const fields = taskFrontmatterFields(frontmatter);
-	const sections = parseTaskSections(rawContent);
+	if (frontmatter[TASK_FRONTMATTER_FIELDS.SCHEMA_VERSION] !== TASK_FRONTMATTER_SCHEMA_VERSION)
+		throw new UnsupportedTaskFrontmatterSchemaError(fields.id, frontmatter[TASK_FRONTMATTER_FIELDS.SCHEMA_VERSION]);
 
 	return {
 		...fields,
-		dependencies: parseDependencies(frontmatter.dependencies, fields.id),
+		dependencies: parseDependencies(frontmatter[TASK_FRONTMATTER_FIELDS.DEPENDENCIES], fields.id),
 		rawContent,
-		...sections,
+		...taskStructuredFrontmatter(frontmatter, fields.id),
 	};
 }
 
 export function parseDecision(content: string): Decision {
 	const { frontmatter, content: rawContent } = parseMarkdown(content);
+	const id = String(frontmatter[DECISION_FRONTMATTER_FIELDS.ID] || "");
+	if (frontmatter[DECISION_FRONTMATTER_FIELDS.SCHEMA_VERSION] !== DECISION_FRONTMATTER_SCHEMA_VERSION)
+		throw new UnsupportedRecordFrontmatterSchemaError(
+			"decision",
+			id,
+			frontmatter[DECISION_FRONTMATTER_FIELDS.SCHEMA_VERSION],
+		);
 
 	return {
-		id: String(frontmatter.id || ""),
-		title: String(frontmatter.title || ""),
-		date: normalizeDate(frontmatter.date),
-		status: String(frontmatter.status || "proposed") as Decision["status"],
-		context: extractTopLevelSection(rawContent, "Context") || "",
-		decision: extractTopLevelSection(rawContent, "Decision") || "",
-		consequences: extractTopLevelSection(rawContent, "Consequences") || "",
-		alternatives: extractTopLevelSection(rawContent, "Alternatives"),
+		id,
+		title: String(frontmatter[DECISION_FRONTMATTER_FIELDS.TITLE] || ""),
+		date: dateString(frontmatter[DECISION_FRONTMATTER_FIELDS.DATE], DECISION_FRONTMATTER_FIELDS.DATE) ?? "",
+		status: String(frontmatter[DECISION_FRONTMATTER_FIELDS.STATUS] || "proposed") as Decision["status"],
+		context: recordText(frontmatter, DECISION_FRONTMATTER_FIELDS.CONTEXT) || "",
+		decision: recordText(frontmatter, DECISION_FRONTMATTER_FIELDS.DECISION) || "",
+		consequences: recordText(frontmatter, DECISION_FRONTMATTER_FIELDS.CONSEQUENCES) || "",
+		alternatives: recordText(frontmatter, DECISION_FRONTMATTER_FIELDS.ALTERNATIVES),
 		rawContent, // Raw markdown content without frontmatter
 	};
 }
 
 export function parseDocument(content: string): Document {
 	const { frontmatter, content: rawContent } = parseMarkdown(content);
+	const tags = frontmatter[DOCUMENT_FRONTMATTER_FIELDS.TAGS];
 
 	return {
-		id: String(frontmatter.id || ""),
-		title: String(frontmatter.title || ""),
-		type: String(frontmatter.type || "other") as Document["type"],
-		createdDate: normalizeDate(frontmatter.created_date),
-		updatedDate: frontmatter.updated_date ? normalizeDate(frontmatter.updated_date) : undefined,
-		rawContent,
-		tags: Array.isArray(frontmatter.tags) ? frontmatter.tags.map(String) : undefined,
+		id: String(frontmatter[DOCUMENT_FRONTMATTER_FIELDS.ID] || ""),
+		title: String(frontmatter[DOCUMENT_FRONTMATTER_FIELDS.TITLE] || ""),
+		type: String(frontmatter[DOCUMENT_FRONTMATTER_FIELDS.TYPE] || "other") as Document["type"],
+		createdDate:
+			dateString(frontmatter[DOCUMENT_FRONTMATTER_FIELDS.CREATED_DATE], DOCUMENT_FRONTMATTER_FIELDS.CREATED_DATE) ?? "",
+		updatedDate: dateString(
+			frontmatter[DOCUMENT_FRONTMATTER_FIELDS.UPDATED_DATE],
+			DOCUMENT_FRONTMATTER_FIELDS.UPDATED_DATE,
+		),
+		rawContent: rawContent.trim(),
+		tags: Array.isArray(tags) ? tags.map(String) : undefined,
 	};
 }
 
 export function parseMilestone(content: string): Milestone {
 	const { frontmatter, content: rawContent } = parseMarkdown(content);
+	const id = String(frontmatter[MILESTONE_FRONTMATTER_FIELDS.ID] || "");
+	if (frontmatter[MILESTONE_FRONTMATTER_FIELDS.SCHEMA_VERSION] !== MILESTONE_FRONTMATTER_SCHEMA_VERSION)
+		throw new UnsupportedRecordFrontmatterSchemaError(
+			"milestone",
+			id,
+			frontmatter[MILESTONE_FRONTMATTER_FIELDS.SCHEMA_VERSION],
+		);
 
 	return {
-		id: String(frontmatter.id || ""),
-		title: String(frontmatter.title || ""),
-		dueDate: normalizeDueDate(frontmatter.due_date, "due_date"),
-		description: extractTopLevelSection(rawContent, "Description") || "",
+		id,
+		title: String(frontmatter[MILESTONE_FRONTMATTER_FIELDS.TITLE] || ""),
+		dueDate: normalizeDueDate(
+			frontmatter[MILESTONE_FRONTMATTER_FIELDS.DUE_DATE],
+			MILESTONE_FRONTMATTER_FIELDS.DUE_DATE,
+		),
+		description: recordText(frontmatter, MILESTONE_FRONTMATTER_FIELDS.DESCRIPTION) || "",
 		rawContent,
 	};
 }

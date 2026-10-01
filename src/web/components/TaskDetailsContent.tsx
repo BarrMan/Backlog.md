@@ -2,6 +2,7 @@ import MDEditor from "@uiw/react-md-editor";
 import type React from "react";
 import type { TaskDetail } from "../../core/task-detail";
 import type { AcceptanceCriterion, Task, TaskComment } from "../../types";
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 import { summarizeSubtaskProgress } from "../../utils/task-subtasks";
 import { isTerminalStatus } from "../../utils/terminal-status";
 import type { TaskDetailFormState } from "../hooks/use-task-detail-form-state";
@@ -128,7 +129,7 @@ function TaskDetailsDescription({
 		);
 	return (
 		<TaskDetailsCard>
-			<TaskDetailsSectionHeader title="Description" />
+			<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.DESCRIPTION} />
 			{content}
 		</TaskDetailsCard>
 	);
@@ -227,7 +228,7 @@ function TaskDetailsOverview(props: OverviewProps) {
 		<>
 			{isCreateMode ? (
 				<TaskDetailsCard>
-					<TaskDetailsSectionHeader title="Title" />
+					<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.TITLE} />
 					<input
 						type="text"
 						value={title}
@@ -246,7 +247,7 @@ function TaskDetailsOverview(props: OverviewProps) {
 				onNavigateToTask={onNavigateToTask}
 			/>
 			<TaskDetailsCard>
-				<TaskDetailsSectionHeader title="References" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.REFERENCES} />
 				<TaskDetailStringList
 					values={references}
 					emptyMessage="No references"
@@ -275,7 +276,9 @@ function TaskDetailsOverview(props: OverviewProps) {
 				/>
 			</TaskDetailsCard>
 			<TaskDetailsCard>
-				<TaskDetailsSectionHeader title={`Modified files${modifiedFiles.length ? ` (${modifiedFiles.length})` : ""}`} />
+				<TaskDetailsSectionHeader
+					title={`${TASK_FIELD_LABELS.MODIFIED_FILES}${modifiedFiles.length ? ` (${modifiedFiles.length})` : ""}`}
+				/>
 				<TaskDetailStringList
 					values={modifiedFiles}
 					emptyMessage="No modified files"
@@ -323,7 +326,7 @@ function TaskDetailsOverview(props: OverviewProps) {
 				</TaskDetailsCard>
 			) : null}
 			<TaskChecklistSection
-				title="Acceptance Criteria"
+				title={TASK_FIELD_LABELS.ACCEPTANCE_CRITERIA}
 				criteria={criteria}
 				mode={mode}
 				onChange={onChange.criteria}
@@ -332,7 +335,7 @@ function TaskDetailsOverview(props: OverviewProps) {
 				emptyMessage="No acceptance criteria"
 			/>
 			<TaskChecklistSection
-				title="Definition of Done"
+				title={TASK_FIELD_LABELS.DEFINITION_OF_DONE}
 				criteria={definitionOfDone}
 				mode={mode}
 				onChange={onChange.definitionOfDone}
@@ -377,7 +380,7 @@ function TaskDetailsRecord({
 	return (
 		<>
 			<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-				<TaskDetailsSectionHeader title="Implementation Plan" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.IMPLEMENTATION_PLAN} />
 				{mode === "preview" ? (
 					plan ? (
 						<div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
@@ -399,7 +402,7 @@ function TaskDetailsRecord({
 				)}
 			</div>
 			<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-				<TaskDetailsSectionHeader title="Implementation Notes" />
+				<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.IMPLEMENTATION_NOTES} />
 				{mode === "preview" ? (
 					notes ? (
 						<div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
@@ -437,7 +440,7 @@ function TaskDetailsRecord({
 			)}
 			{(mode !== "preview" || finalSummary.trim().length > 0) && (
 				<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-					<TaskDetailsSectionHeader title="Final Summary" right="Completion summary" />
+					<TaskDetailsSectionHeader title={TASK_FIELD_LABELS.FINAL_SUMMARY} right="Completion summary" />
 					{mode === "preview" ? (
 						<div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
 							<MermaidMarkdown source={finalSummary} />

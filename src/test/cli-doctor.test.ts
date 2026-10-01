@@ -5,10 +5,10 @@ import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import { serializeDecision, serializeDocument, serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, safeCleanup } from "./test-utils.ts";
 
-const cliPath = getTestCliPath();
+const cliCommand = getTestCliCommand();
 let testDir: string;
 let core: Core;
 
@@ -89,7 +89,7 @@ afterEach(async () => {
 
 describe("backlog doctor", () => {
 	it("prints a path-qualified human repair preview without agent instructions", async () => {
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Repair preview (no files changed)");
@@ -101,7 +101,7 @@ describe("backlog doctor", () => {
 	});
 
 	it("repairs all duplicates noninteractively only with explicit --fix --yes", async () => {
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("Repaired 2 duplicate task files");
@@ -120,7 +120,7 @@ describe("backlog doctor", () => {
 			serializeTask({ ...makeTask("DRAFT-01", "Beta"), status: "Draft" }),
 		);
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Repaired 2 duplicate task files");
@@ -146,7 +146,7 @@ describe("backlog doctor", () => {
 
 			if (!reallyLocked) {
 				// Permissions could not block the scan here; assert doctor stays healthy either way.
-				const healthy = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+				const healthy = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 				await chmod(draftsDir, 0o755);
 				expect(healthy.exitCode).toBe(0);
 				return;
@@ -154,7 +154,7 @@ describe("backlog doctor", () => {
 
 			let result: { exitCode: number; stdout: Uint8Array; stderr: Uint8Array };
 			try {
-				result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+				result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 			} finally {
 				await chmod(draftsDir, 0o755);
 			}
@@ -167,13 +167,13 @@ describe("backlog doctor", () => {
 	);
 
 	it("requires --fix when --yes is supplied", async () => {
-		const result = await $`bun ${cliPath} doctor --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --yes`.cwd(testDir).quiet().nothrow();
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr.toString()).toContain("--yes can only be used together with --fix");
 	});
 
 	it("reports cross-branch collisions as diagnostic-only", async () => {
-		await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet();
+		await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet();
 		const config = await core.filesystem.loadConfig();
 		if (!config) throw new Error("Missing test config");
 		config.checkActiveBranches = true;
@@ -195,7 +195,7 @@ describe("backlog doctor", () => {
 		await $`git commit -m "feature task"`.cwd(testDir).quiet();
 		await $`git switch main`.cwd(testDir).quiet();
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Possible cross-branch ID collisions (diagnostic only)");
@@ -214,7 +214,7 @@ describe("backlog doctor", () => {
 
 			const result = await (async () => {
 				try {
-					return await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+					return await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 				} finally {
 					await chmod(unreadablePath, 0o600);
 				}
@@ -237,7 +237,7 @@ describe("backlog doctor", () => {
 		config.prefixes = { task: "draft" };
 		await core.filesystem.saveConfig(config);
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain('Task prefix "draft" collides with a reserved prefix');
@@ -265,7 +265,7 @@ describe("backlog doctor", () => {
 		const betaBefore = await Bun.file(draftTaskBeta).text();
 		const draftBefore = await Bun.file(realDraft).text();
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain('Task prefix "draft" collides with a reserved prefix');
@@ -286,7 +286,7 @@ describe("backlog doctor", () => {
 		await core.filesystem.saveConfig(config);
 		await Bun.write(join(core.filesystem.tasksDir, "draft-1 - Hello.md"), serializeTask(makeTask("DRAFT-1", "Hello")));
 
-		const result = await $`bun ${cliPath} task list --plain`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} task list --plain`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("Hello");
@@ -295,8 +295,8 @@ describe("backlog doctor", () => {
 
 describe("CLI collision safety", () => {
 	it("diagnoses collisions in plain list and search output", async () => {
-		const list = await $`bun ${cliPath} task list --plain`.cwd(testDir).quiet().nothrow();
-		const search = await $`bun ${cliPath} search Alpha --plain`.cwd(testDir).quiet().nothrow();
+		const list = await $`${cliCommand} task list --plain`.cwd(testDir).quiet().nothrow();
+		const search = await $`${cliCommand} search Alpha --plain`.cwd(testDir).quiet().nothrow();
 		for (const result of [list, search]) {
 			const output = `${result.stdout}${result.stderr}`;
 			expect(result.exitCode).toBe(1);
@@ -311,8 +311,8 @@ describe("CLI collision safety", () => {
 		const betaPath = join(core.filesystem.tasksDir, "task-01 - Beta.md");
 		const alphaBefore = await Bun.file(alphaPath).text();
 		const betaBefore = await Bun.file(betaPath).text();
-		const view = await $`bun ${cliPath} task view TASK-1 --plain`.cwd(testDir).quiet().nothrow();
-		const edit = await $`bun ${cliPath} task edit TASK-1 --title Changed`.cwd(testDir).quiet().nothrow();
+		const view = await $`${cliCommand} task view TASK-1 --plain`.cwd(testDir).quiet().nothrow();
+		const edit = await $`${cliCommand} task edit TASK-1 --title Changed`.cwd(testDir).quiet().nothrow();
 
 		for (const result of [view, edit]) {
 			const output = `${result.stdout}${result.stderr}`;
@@ -329,7 +329,7 @@ describe("CLI collision safety", () => {
 		const outputPath = join(testDir, "Collision-board.md");
 		await Bun.write(outputPath, "sentinel board content");
 
-		const result = await $`bun ${cliPath} board export Collision-board.md --force`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} board export Collision-board.md --force`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("duplicate task ID");
@@ -362,7 +362,7 @@ describe("dependency defects", () => {
 			serializeTask({ ...makeTask("TASK-5", "CycleC"), dependencies: ["TASK-3"] }),
 		);
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Self-referential dependencies (diagnostic only):");
@@ -387,7 +387,7 @@ describe("dependency defects", () => {
 			serializeTask({ ...makeTask("TASK-7", "Selfy"), dependencies: ["TASK-7"] }),
 		);
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Repaired 2 duplicate task files");
@@ -403,7 +403,7 @@ describe("dependency defects", () => {
 			serializeTask({ ...makeTask("TASK-01", "Beta"), dependencies: ["TASK-01"] }),
 		);
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("Repaired 2 duplicate task files");
@@ -420,7 +420,7 @@ describe("dependency defects", () => {
 			serializeTask({ ...makeTask("TASK-01", "Beta"), dependencies: ["TASK-2"] }),
 		);
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Repaired 2 duplicate task files");
@@ -434,7 +434,7 @@ describe("dependency defects", () => {
 			serializeTask({ ...makeTask("TASK-2", "Selfy"), dependencies: ["TASK-2"] }),
 		);
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("The reported findings cannot be repaired automatically; resolve them by hand.");
@@ -451,7 +451,7 @@ describe("document and decision identity", () => {
 		await writeDocument("doc-1 - Alpha.md", "doc-1", "Alpha");
 		await writeDecision("decision-1 - Alpha.md", "decision-1", "Alpha");
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("No duplicate IDs, self-referential dependencies, or dependency cycles found.");
@@ -470,9 +470,12 @@ describe("document and decision identity", () => {
 			join(draftsDir, "draft-01 - Beta.md"),
 			serializeTask({ ...makeTask("DRAFT-01", "Beta"), status: "Draft" }),
 		);
-		await Bun.write(join(draftsDir, "draft-2 - Drifted.md"), "---\nid: DRAFT-9\ntitle: Drifted\n---\ndrifted body");
+		await Bun.write(
+			join(draftsDir, "draft-2 - Drifted.md"),
+			"---\ntask_schema_version: 2\nid: DRAFT-9\ntitle: Drifted\nstatus: Draft\nassignee: []\ncreated_date: 2026-01-01\nlabels: []\ndependencies: []\n---\ndrifted body",
+		);
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Duplicate draft IDs (diagnostic only):");
@@ -489,7 +492,7 @@ describe("document and decision identity", () => {
 		await writeDecision("decision-2 - Gamma.md", "decision-2", "Gamma");
 		await writeDecision("decision-002 - Delta.md", "decision-002", "Delta");
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Duplicate document IDs (diagnostic only)");
@@ -504,7 +507,7 @@ describe("document and decision identity", () => {
 		await writeDocument("orphan.md", "", "Orphan doc");
 		await writeDecision("decision-orphan.md", "", "Orphan decision");
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Malformed document files without an id in frontmatter");
@@ -525,7 +528,7 @@ describe("document and decision identity", () => {
 			"---\nid: decision-2\ntitle: [unterminated\n---\n\ndecision body\n",
 		);
 
-		const result = await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).not.toContain("No duplicate IDs, self-referential dependencies, or dependency cycles found.");
@@ -549,7 +552,7 @@ describe("document and decision identity", () => {
 
 		const result = await (async () => {
 			try {
-				return await $`bun ${cliPath} doctor`.cwd(testDir).quiet().nothrow();
+				return await $`${cliCommand} doctor`.cwd(testDir).quiet().nothrow();
 			} finally {
 				await chmod(core.filesystem.docsDir, 0o755);
 			}
@@ -569,7 +572,7 @@ describe("document and decision identity", () => {
 			"---\nid: doc-2\ntitle: [unterminated\n---\n\ndoc body\n",
 		);
 
-		const result = await $`bun ${cliPath} doc view doc-1 --plain`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doc view doc-1 --plain`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("Alpha");
@@ -580,7 +583,7 @@ describe("document and decision identity", () => {
 		await writeDocument("doc-1 - Alpha.md", "doc-1", "Alpha");
 		await writeDocument("nested/doc-01 - Beta.md", "doc-01", "Beta");
 
-		const result = await $`bun ${cliPath} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
+		const result = await $`${cliCommand} doctor --fix --yes`.cwd(testDir).quiet().nothrow();
 		const output = `${result.stdout}${result.stderr}`;
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("cannot be repaired automatically");
@@ -594,8 +597,8 @@ describe("document and decision identity", () => {
 		const alphaPath = join(core.filesystem.docsDir, "doc-1 - Alpha.md");
 		const alphaBefore = await Bun.file(alphaPath).text();
 
-		const view = await $`bun ${cliPath} doc view doc-1 --plain`.cwd(testDir).quiet().nothrow();
-		const update = await $`bun ${cliPath} doc update doc-1 --title Changed`.cwd(testDir).quiet().nothrow();
+		const view = await $`${cliCommand} doc view doc-1 --plain`.cwd(testDir).quiet().nothrow();
+		const update = await $`${cliCommand} doc update doc-1 --title Changed`.cwd(testDir).quiet().nothrow();
 
 		for (const result of [view, update]) {
 			const output = `${result.stdout}${result.stderr}`;

@@ -3,11 +3,11 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI Integration", () => {
 	beforeEach(async () => {
@@ -83,7 +83,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task archive task-5`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} task archive task-5`.cwd(TEST_DIR).nothrow().quiet();
 			const output = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).not.toBe(0);
@@ -112,7 +112,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task complete task-3`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} task complete task-3`.cwd(TEST_DIR).nothrow().quiet();
 			const output = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).toBe(0);
@@ -141,7 +141,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task complete task-4`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} task complete task-4`.cwd(TEST_DIR).nothrow().quiet();
 			const output = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).not.toBe(0);

@@ -1,16 +1,17 @@
 import type { Command } from "commander";
 import { runDraftTransition } from "../../../commands/draft-actions.ts";
 import { addHelpSchema, projectType, taskType } from "../../../commands/help-schema.ts";
-import { createAndReportTask } from "../../../commands/task-create.ts";
+import { DRAFT_STATUS } from "../../../constants/index.ts";
 import { loadTaskDetail } from "../../../core/task-detail.ts";
 import { formatTaskPlainText } from "../../../formatters/task-plain-text.ts";
 import { Core } from "../../../index.ts";
-import { TaskViewerController } from "../../../ui/task-viewer-with-search.ts";
+import { TaskViewerController } from "../../../ui/task-viewer/controller.ts";
 import { isAmbiguousIdError } from "../../../utils/entity-id.ts";
 import { addListWindowOptions, type ListWindowOptions } from "../../../utils/list-window.ts";
 import { parseClearableStringList, parseDelimitedStringList } from "../../../utils/task-builders.ts";
 import { sortTasks } from "../../../utils/task-sorting.ts";
 import { addTaskEditOptions, type EditRuntime, runDraftEdit } from "../tasks/edit.ts";
+import { createAndReportTask } from "../tasks/input.ts";
 
 type DraftRuntime = {
 	requireProjectRoot: () => Promise<string>;
@@ -90,7 +91,7 @@ export function registerDraftCommands(program: Command, runtime: DraftRuntime): 
 				});
 				return;
 			}
-			const { UnifiedViewController } = await import("../../../ui/unified-view.ts");
+			const { UnifiedViewController } = await import("../../../ui/unified/controller.ts");
 			await new UnifiedViewController({
 				core,
 				initialView: "task-list",
@@ -123,7 +124,7 @@ export function registerDraftCommands(program: Command, runtime: DraftRuntime): 
 				{
 					title,
 					description: options.description || options.desc ? String(options.description || options.desc) : undefined,
-					status: "Draft",
+					status: DRAFT_STATUS,
 					assignee: parseClearableStringList(options.assignee),
 					labels: parseDelimitedStringList(options.labels),
 				},
@@ -138,7 +139,11 @@ export function registerDraftCommands(program: Command, runtime: DraftRuntime): 
 		optional: [
 			{ name: "title", type: "String", description: "Replacement draft title" },
 			{ name: "description", type: "Markdown", description: "Replacement description" },
-			{ name: "status", type: "String", description: 'Only "Draft" is valid; drafts cannot change status' },
+			{
+				name: "status",
+				type: "String",
+				description: `Only "${DRAFT_STATUS}" is valid; drafts cannot change status`,
+			},
 			{ name: "type", type: taskType, description: "Replacement task type; case-insensitive" },
 			{
 				name: "project",
@@ -191,7 +196,7 @@ export function registerDraftCommands(program: Command, runtime: DraftRuntime): 
 			{ name: "clear-docs", type: "Boolean", description: "Remove all documentation" },
 			{ name: "plain", type: "Boolean", description: "Use plain text output after editing" },
 		],
-		writes: "Updates draft metadata and structured sections through Backlog.md",
+		writes: "Updates draft metadata and structured frontmatter fields through Backlog.md",
 		output: "Updated draft details; use --plain for text output",
 		examples: ['backlog draft edit DRAFT-1 -t "Renamed draft"', "backlog draft edit DRAFT-1 --check-ac 1"],
 	}).description("edit an existing draft");

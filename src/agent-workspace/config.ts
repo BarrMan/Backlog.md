@@ -3,16 +3,15 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import type { Core } from "../core/backlog.ts";
-import type { AgentConfigScope, AgentConfiguration, AgentPreset, ResolvedAgentConfiguration } from "./types.ts";
+import {
+	AGENT_BOOTSTRAP_TYPES,
+	type AgentConfigScope,
+	type AgentConfiguration,
+	type AgentPreset,
+	type ResolvedAgentConfiguration,
+} from "./types.ts";
 
-const BOOTSTRAP_TYPES = new Set<AgentPreset["bootstrap"]>([
-	"opencode",
-	"claude",
-	"codex",
-	"gemini",
-	"antigravity",
-	"prompt",
-]);
+const BOOTSTRAP_TYPES = new Set<AgentPreset["bootstrap"]>(AGENT_BOOTSTRAP_TYPES);
 const SAFE_PRESET_NAME = /^(?!__proto__$|prototype$|constructor$)[A-Za-z_][A-Za-z0-9_-]*$/;
 const POSIX_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const AGENT_CONFIGURATION_FILE_NAME = "agents.json";

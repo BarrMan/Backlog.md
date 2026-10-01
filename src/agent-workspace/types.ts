@@ -1,3 +1,27 @@
+export const AGENT_BOOTSTRAP_TYPES = ["opencode", "claude", "codex", "gemini", "antigravity", "prompt"] as const;
+export type AgentBootstrap = (typeof AGENT_BOOTSTRAP_TYPES)[number];
+
+export const AGENT_CONFIG_SCOPES = ["root", "project", "card"] as const;
+export type AgentConfigScope = (typeof AGENT_CONFIG_SCOPES)[number];
+
+export const AGENT_SESSION_STATUS = {
+	STARTING: "starting",
+	RUNNING: "running",
+	STOPPED: "stopped",
+	HANDED_OFF: "handed-off",
+	FAILED: "failed",
+} as const;
+export type AgentSessionStatus = (typeof AGENT_SESSION_STATUS)[keyof typeof AGENT_SESSION_STATUS];
+
+export const HANDOFF_STATUS = {
+	REQUESTED: "requested",
+	READY: "ready",
+	REPLACING: "replacing",
+	FAILED: "failed",
+	COMPLETED: "completed",
+} as const;
+export type HandoffStatus = (typeof HANDOFF_STATUS)[keyof typeof HANDOFF_STATUS];
+
 /** Complete configurations replace their parent; fields are never inherited. */
 export interface AgentPreset {
 	command: string;
@@ -5,15 +29,13 @@ export interface AgentPreset {
 	prepare: string;
 	worktree: boolean;
 	/** How startup instructions are delivered to the agent. */
-	bootstrap: "opencode" | "claude" | "codex" | "gemini" | "antigravity" | "prompt";
+	bootstrap: AgentBootstrap;
 }
 
 export interface AgentConfiguration {
 	selectedPreset: string;
 	presets: Record<string, AgentPreset>;
 }
-
-export type AgentConfigScope = "root" | "project" | "card";
 
 export interface ResolvedAgentConfiguration {
 	scope: AgentConfigScope;
@@ -31,7 +53,7 @@ export interface AgentSession {
 	cwd: string;
 	createdAt: string;
 	endedAt?: string;
-	status: "starting" | "running" | "stopped" | "handed-off" | "failed";
+	status: AgentSessionStatus;
 	ownerPid?: number;
 	predecessorId?: string;
 	outputPath: string;
@@ -55,7 +77,7 @@ export interface HandoffRequest {
 	dispatchedAt?: string;
 	dispatchOwnerPid?: number;
 	replacementOwnerPid?: number;
-	status: "requested" | "ready" | "replacing" | "failed" | "completed";
+	status: HandoffStatus;
 	createdAt: string;
 	error?: string;
 }

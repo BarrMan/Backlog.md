@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("CLI --plain for task create/edit", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-plain-create-edit");
@@ -26,7 +26,7 @@ describe("CLI --plain for task create/edit", () => {
 	});
 
 	it("prints plain details after task create --plain", async () => {
-		const result = await $`bun ${cliPath} task create "Example" --desc "Hello" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task create "Example" --desc "Hello" --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());
@@ -50,15 +50,15 @@ describe("CLI --plain for task create/edit", () => {
 	});
 
 	it("assigns default tail ordinals and preserves explicit ordinals on CLI create", async () => {
-		const first = await $`bun ${cliPath} task create "First ordinal CLI task" --plain`.cwd(TEST_DIR).quiet();
+		const first = await $`${cliCommand} task create "First ordinal CLI task" --plain`.cwd(TEST_DIR).quiet();
 		expect(first.exitCode).toBe(0);
 		expect(first.stdout.toString()).toContain("Ordinal: 1000");
 
-		const second = await $`bun ${cliPath} task create "Second ordinal CLI task" --plain`.cwd(TEST_DIR).quiet();
+		const second = await $`${cliCommand} task create "Second ordinal CLI task" --plain`.cwd(TEST_DIR).quiet();
 		expect(second.exitCode).toBe(0);
 		expect(second.stdout.toString()).toContain("Ordinal: 2000");
 
-		const explicit = await $`bun ${cliPath} task create "Explicit ordinal CLI task" --ordinal 7500 --plain`
+		const explicit = await $`${cliCommand} task create "Explicit ordinal CLI task" --ordinal 7500 --plain`
 			.cwd(TEST_DIR)
 			.quiet();
 		expect(explicit.exitCode).toBe(0);
@@ -66,7 +66,7 @@ describe("CLI --plain for task create/edit", () => {
 	});
 
 	it("rejects non-finite ordinals on CLI create", async () => {
-		const result = await $`bun ${cliPath} task create "Invalid ordinal CLI task" --ordinal Infinity`
+		const result = await $`${cliCommand} task create "Invalid ordinal CLI task" --ordinal Infinity`
 			.cwd(TEST_DIR)
 			.quiet()
 			.nothrow();
@@ -77,9 +77,9 @@ describe("CLI --plain for task create/edit", () => {
 
 	it("prints plain details after task edit --plain", async () => {
 		// Create base task first (without plain)
-		await $`bun ${cliPath} task create "Edit Me" --desc "First"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Edit Me" --desc "First"`.cwd(TEST_DIR).quiet();
 
-		const result = await $`bun ${cliPath} task edit 1 -s "In Progress" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task edit 1 -s "In Progress" --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());

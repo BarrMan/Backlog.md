@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
+import { serializeTask } from "../markdown/serializer.ts";
 import { executeStatusCallback } from "../utils/status-callback.ts";
 
 describe("Status Change Callbacks", () => {
@@ -156,17 +157,16 @@ onStatusChange: 'echo "global" > "${callbackOutputPath}"'
 			await writeFile(join(testDir, "backlog", "config.yml"), configContent);
 
 			// Create a task with per-task callback
-			const taskContent = `---
-id: task-1
-title: Task with custom callback
-status: To Do
-assignee: []
-created_date: 2025-01-01
-labels: []
-dependencies: []
-onStatusChange: 'echo "per-task:$NEW_STATUS" > "${callbackOutputPath}"'
----
-`;
+			const taskContent = serializeTask({
+				id: "TASK-1",
+				title: "Task with custom callback",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2025-01-01",
+				labels: [],
+				dependencies: [],
+				onStatusChange: `echo "per-task:$NEW_STATUS" > "${callbackOutputPath}"`,
+			});
 			await writeFile(join(testDir, "backlog", "tasks", "task-1 - Task with custom callback.md"), taskContent);
 
 			// Update status

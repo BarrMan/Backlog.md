@@ -2,11 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
-import { AgentWorkspaceController } from "../ui/agent-workspace.ts";
 import { TUIRenderer } from "../ui/board/tui-renderer.ts";
 import { getBoardFooterContent } from "../ui/footer-content.ts";
 import { formatKeymap, keymapKeys, matchesKey, uiKeymap } from "../ui/keymap.ts";
 import { createScreen } from "../ui/tui.ts";
+import { AgentWorkspaceController } from "../ui/workspace/controller.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 type EmittingScreen = ReturnType<typeof createScreen> & {

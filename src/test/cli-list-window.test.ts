@@ -3,10 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import type { Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 
@@ -20,7 +20,7 @@ const buildTask = (partial: Partial<Task> & Pick<Task, "id" | "title">): Task =>
 });
 
 async function runCli(args: string[], env: Record<string, string> = {}) {
-	const result = await $`bun ${[CLI_PATH, ...args]}`
+	const result = await $`${[...CLI_COMMAND, ...args]}`
 		.cwd(TEST_DIR)
 		.env({ ...process.env, ...env })
 		.nothrow()
@@ -42,7 +42,7 @@ async function followWindows(args: string[]): Promise<string[]> {
 		outputs.push(stdout);
 		const next = stdout.match(/Next: backlog (.+)$/m)?.[1];
 		if (!next) return outputs;
-		stdout = (await $`bun ${CLI_PATH} ${{ raw: next }}`.cwd(TEST_DIR).nothrow().quiet()).stdout.toString();
+		stdout = (await $`${CLI_COMMAND} ${{ raw: next }}`.cwd(TEST_DIR).nothrow().quiet()).stdout.toString();
 	}
 }
 

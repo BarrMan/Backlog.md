@@ -1,4 +1,4 @@
-import type { Task, TaskSummary } from "../types/index.ts";
+import { TASK_SOURCE, type Task, type TaskSummary } from "../types/index.ts";
 import { buildDependencyGraph, createDependencyGraphContext, type DependencyGraph } from "../utils/dependency-graph.ts";
 import { createReadinessGraph, getTaskReadiness, type TaskReadiness } from "../utils/readiness.ts";
 import { canonicalTaskId } from "../utils/task-id.ts";
@@ -41,7 +41,7 @@ export async function loadTaskCorpus(
 				(task) => !snapshot.activeTasks.some((local) => canonicalTaskId(local.id) === canonicalTaskId(task.id)),
 			),
 		),
-		completedTasks: snapshot.identityIndex.getTasks(true).filter((task) => task.source === "completed"),
+		completedTasks: snapshot.identityIndex.getTasks(true).filter((task) => task.source === TASK_SOURCE.COMPLETED),
 		statuses: snapshot.config?.statuses,
 		ambiguousIds: snapshot.identityIndex.getContestedIds(),
 	};
@@ -54,7 +54,7 @@ export async function loadTaskCorpus(
  */
 export type TaskListItem = Task & { isReady: boolean };
 
-/** Strip Markdown body fields before a task crosses the browser collection boundary. */
+/** Strip task detail fields before a task crosses the browser collection boundary. */
 export function toTaskSummary(task: TaskListItem | TaskSummary): TaskSummary {
 	const counts =
 		"acceptanceCriteriaCount" in task

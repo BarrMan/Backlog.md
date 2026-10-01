@@ -3,8 +3,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tailwind from "bun-plugin-tailwind";
 
-const DEFAULT_LANES = 6;
+const DEFAULT_LANES = 4;
 const TERMINATION_GRACE_MS = 1_000;
+// Measured from the isolated platform run. Starting these first minimizes the final
+// worker tail while preserving one-process-per-file isolation.
+const LONG_RUNNING_FILES = [
+	"src/test/core.test.ts",
+	"src/test/server-search-endpoint.test.ts",
+	"src/test/cli-init-create.test.ts",
+	"src/test/cli-draft-edit.test.ts",
+	"src/test/cli-list-window.test.ts",
+	"src/test/cli-refs-docs.test.ts",
+	"src/test/cli-guidance.test.ts",
+	"src/test/cli-custom-prefix-id-resolution.test.ts",
+	"src/test/cli-json-output.test.ts",
+	"src/test/cli-json-watch.test.ts",
+	"src/test/dependency.test.ts",
+	"src/test/core-autocommit-scope.test.ts",
+	"src/test/auto-commit.test.ts",
+	"src/test/tui-task-composer.test.ts",
+] as const;
 const PLATFORM_CONTRACT_FILES = [
 	"src/test/atomic-task-create.test.ts",
 	"src/test/auto-commit.test.ts",
@@ -93,7 +111,13 @@ for (const file of allTestFiles) {
 	if (jsdomReference.test(await Bun.file(file).text())) domTestFiles.add(file);
 }
 const profileFiles = profile === "platform" ? [...PLATFORM_CONTRACT_FILES] : allTestFiles;
-const testFiles = selectedFiles.size > 0 ? profileFiles.filter((file) => selectedFiles.has(file)) : profileFiles;
+const requestedFiles = selectedFiles.size > 0 ? profileFiles.filter((file) => selectedFiles.has(file)) : profileFiles;
+const longRunningFileOrder = new Map<string, number>(LONG_RUNNING_FILES.map((file, index) => [file, index]));
+const testFiles = requestedFiles.toSorted((left, right) => {
+	const leftOrder = longRunningFileOrder.get(left) ?? Number.POSITIVE_INFINITY;
+	const rightOrder = longRunningFileOrder.get(right) ?? Number.POSITIVE_INFINITY;
+	return leftOrder - rightOrder || left.localeCompare(right);
+});
 
 if (testFiles.length === 0) {
 	console.error("No test files discovered.");
@@ -114,12 +138,12 @@ function terminateProcessGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): void
 
 async function buildTestCliBundle(): Promise<{ path: string; buildTimeMs: number; cleanup: () => Promise<void> }> {
 	const directory = await mkdtemp(join(tmpdir(), "backlog-test-cli-"));
-	const path = join(directory, "index.js");
+	const binaryPath = join(directory, process.platform === "win32" ? "backlog.exe" : "backlog");
 	const startedAt = performance.now();
 	const result = await Bun.build({
 		entrypoints: ["src/cli/index.ts"],
 		target: "bun",
-		outdir: directory,
+		compile: { outfile: binaryPath },
 		plugins: [tailwind],
 		throw: false,
 	});
@@ -129,7 +153,7 @@ async function buildTestCliBundle(): Promise<{ path: string; buildTimeMs: number
 		throw new Error("Failed to build the test CLI bundle.");
 	}
 	return {
-		path,
+		path: binaryPath,
 		buildTimeMs: performance.now() - startedAt,
 		cleanup: () => rm(directory, { recursive: true, force: true }),
 	};
@@ -145,6 +169,7 @@ const results: FileResult[] = [];
 let timedOut = false;
 let completedTests = 0;
 let activeAtDeadline: Array<ActiveFile & { wallTimeMs: number }> = [];
+let cancellationReason: string | undefined;
 
 async function runFile(file: string, cliBundlePath: string): Promise<FileResult> {
 	const startedAt = performance.now();
@@ -158,7 +183,7 @@ async function runFile(file: string, cliBundlePath: string): Promise<FileResult>
 		detached: process.platform !== "win32",
 		env: {
 			...process.env,
-			BACKLOG_TEST_CLI_BUNDLE: cliBundlePath,
+			BACKLOG_TEST_CLI_BINARY: cliBundlePath,
 			...(skipDomPreload ? { BACKLOG_TEST_SKIP_DOM_PRELOAD: "1" } : {}),
 		},
 		stdout: "pipe",
@@ -216,17 +241,31 @@ const deadline =
 	deadlineMs === undefined
 		? undefined
 		: setTimeout(() => {
-				timedOut = true;
-				activeAtDeadline = [...activeFiles.values()].map(({ file, startedAt }) => ({
-					file,
-					startedAt,
-					wallTimeMs: performance.now() - startedAt,
-				}));
-				for (const pid of activeFiles.keys()) terminateProcessGroup(pid, "SIGTERM");
-				setTimeout(() => {
-					for (const pid of activeFiles.keys()) terminateProcessGroup(pid, "SIGKILL");
-				}, TERMINATION_GRACE_MS).unref();
+				cancel("deadline");
 			}, deadlineMs);
+
+function cancel(reason: string): void {
+	if (timedOut) return;
+	timedOut = true;
+	cancellationReason = reason;
+	activeAtDeadline = [...activeFiles.values()].map(({ file, startedAt }) => ({
+		file,
+		startedAt,
+		wallTimeMs: performance.now() - startedAt,
+	}));
+	console.error(`Test suite cancellation (${reason}); terminating ${activeFiles.size} active file(s).`);
+	for (const pid of activeFiles.keys()) terminateProcessGroup(pid, "SIGTERM");
+	setTimeout(() => {
+		for (const pid of activeFiles.keys()) terminateProcessGroup(pid, "SIGKILL");
+	}, TERMINATION_GRACE_MS).unref();
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+	process.once(signal, () => {
+		cancel(signal);
+		process.exitCode = 1;
+	});
+}
 try {
 	cliBundle = await buildTestCliBundle();
 	console.log(`Built shared Bun CLI bundle in ${(cliBundle.buildTimeMs / 1000).toFixed(2)}s.`);
@@ -244,20 +283,20 @@ try {
 					result.exitCode === 0 ? "passed" : "failed"
 				} in ${(result.wallTimeMs / 1000).toFixed(2)}s.`,
 			);
+			if (result.exitCode !== 0) {
+				console.error(`\nTest file failed after ${(result.wallTimeMs / 1000).toFixed(2)}s: ${file}`);
+				console.error(result.output);
+			}
 		}
 	});
 	await Promise.all(workers);
 	const elapsedMs = performance.now() - suiteStartedAt;
 	const failures = results.filter((result) => result.exitCode !== 0);
-	for (const result of failures) {
-		console.error(`\nTest file failed after ${(result.wallTimeMs / 1000).toFixed(2)}s: ${result.file}`);
-		console.error(result.output);
-	}
 	await writeReport(cliBundle.buildTimeMs);
 	if (timedOut) {
 		const completedFiles = results.filter((result) => !result.timedOut).length;
 		console.error(
-			`Test suite stopped after ${(elapsedMs / 1000).toFixed(2)}s: ${completedFiles}/${testFiles.length} files and ${completedTests} passed tests completed.`,
+			`Test suite stopped by ${cancellationReason ?? "cancellation"} after ${(elapsedMs / 1000).toFixed(2)}s: ${completedFiles}/${testFiles.length} files and ${completedTests} passed tests completed.`,
 		);
 		console.error(
 			`Pending files: ${testFiles.filter((file) => !results.some((result) => result.file === file)).join(", ") || "none"}`,

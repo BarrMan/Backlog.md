@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-289
 title: >-
   Implement resource templates list handler to return empty list instead of
@@ -13,28 +14,35 @@ labels:
   - enhancement
 dependencies: []
 priority: low
+description: >-
+  MCP Inspector shows a "List Templates" button which calls
+  `resources/templates/list` method. Currently this returns error -32601 (Method
+  not found) because the MCP server doesn't implement this handler.
+
+
+  Since Backlog.md doesn't use resource templates, we should implement the
+  handler to return an empty list instead of throwing an error. This will
+  improve the user experience in MCP Inspector and other MCP clients.
+
+
+  Related to GitHub issue #399 - the "List Templates" error shown in
+  screenshots.
+implementation_notes: >-
+  Implemented resources/templates/list handler returning an empty array and
+  added test coverage. Ran `bun test src/test/mcp-server.test.ts` to verify.
+acceptance_criteria:
+  - index: 1
+    text: MCP server responds to resources/templates/list request without error
+    checked: true
+  - index: 2
+    text: Handler returns empty array when no templates are available
+    checked: true
+  - index: 3
+    text: MCP Inspector 'List Templates' button works without showing error
+    checked: true
+  - index: 4
+    text: Implementation follows MCP protocol specification for resource templates
+    checked: true
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
-MCP Inspector shows a "List Templates" button which calls `resources/templates/list` method. Currently this returns error -32601 (Method not found) because the MCP server doesn't implement this handler.
-
-Since Backlog.md doesn't use resource templates, we should implement the handler to return an empty list instead of throwing an error. This will improve the user experience in MCP Inspector and other MCP clients.
-
-Related to GitHub issue #399 - the "List Templates" error shown in screenshots.
-<!-- SECTION:DESCRIPTION:END -->
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 MCP server responds to resources/templates/list request without error
-- [x] #2 Handler returns empty array when no templates are available
-- [x] #3 MCP Inspector 'List Templates' button works without showing error
-- [x] #4 Implementation follows MCP protocol specification for resource templates
-<!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Implemented resources/templates/list handler returning an empty array and added test coverage. Ran `bun test src/test/mcp-server.test.ts` to verify.
-<!-- SECTION:NOTES:END -->

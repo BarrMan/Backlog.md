@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-459
 title: Add priority sorting to Kanban columns
 status: Done
@@ -15,31 +16,40 @@ modified_files:
   - src/test/web-task-column-sort.test.tsx
   - src/web/styles/style.css
 priority: high
+description: ''
+implementation_notes: >-
+  Added a column actions menu that emits a full-column reorder payload sorted by
+  priority, reusing the existing task priority sorter. The action delegates
+  persistence to the existing reorder endpoint, which writes ordinals back to
+  the task markdown files.
+final_summary: >-
+  Implemented a new 'Sort by Priority' action in the Kanban column header menu.
+  The action reorders tasks by High > Medium > Low > None, sends the sorted task
+  IDs through the existing reorder API, and persists the new order through the
+  existing ordinal system. Added focused React/JSDOM coverage for the emitted
+  reorder payload.
+acceptance_criteria:
+  - index: 1
+    text: Column header should have a menu button
+    checked: true
+  - index: 2
+    text: Dropdown menu should have 'Sort by Priority' option
+    checked: true
+  - index: 3
+    text: Tasks in column should be reordered by High > Medium > Low > None
+    checked: true
+  - index: 4
+    text: New order should be persisted to Markdown files via ordinals
+    checked: true
+definition_of_done:
+  - index: 1
+    text: bunx tsc --noEmit passes when TypeScript touched
+    checked: true
+  - index: 2
+    text: bun run check . passes when formatting/linting touched
+    checked: true
+  - index: 3
+    text: bun test (or scoped test) passes
+    checked: true
+comments: []
 ---
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 Column header should have a menu button
-- [x] #2 Dropdown menu should have 'Sort by Priority' option
-- [x] #3 Tasks in column should be reordered by High > Medium > Low > None
-- [x] #4 New order should be persisted to Markdown files via ordinals
-<!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Added a column actions menu that emits a full-column reorder payload sorted by priority, reusing the existing task priority sorter. The action delegates persistence to the existing reorder endpoint, which writes ordinals back to the task markdown files.
-<!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented a new 'Sort by Priority' action in the Kanban column header menu. The action reorders tasks by High > Medium > Low > None, sends the sorted task IDs through the existing reorder API, and persists the new order through the existing ordinal system. Added focused React/JSDOM coverage for the emitted reorder payload.
-<!-- SECTION:FINAL_SUMMARY:END -->
-
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [x] #1 bunx tsc --noEmit passes when TypeScript touched
-- [x] #2 bun run check . passes when formatting/linting touched
-- [x] #3 bun test (or scoped test) passes
-<!-- DOD:END -->

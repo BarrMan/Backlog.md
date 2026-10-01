@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("--desc alias functionality", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-desc-alias");
@@ -27,17 +27,17 @@ describe("--desc alias functionality", () => {
 	});
 
 	it("should create task with --desc alias", async () => {
-		await $`bun ${cliPath} task create "Test --desc alias" --desc "Created with --desc"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Test --desc alias" --desc "Created with --desc"`.cwd(TEST_DIR).quiet();
 
 		// Check that command succeeded (no exception thrown)
-		const output = await $`bun ${cliPath} task 1 --plain`.cwd(TEST_DIR).text();
+		const output = await $`${cliCommand} task 1 --plain`.cwd(TEST_DIR).text();
 		expect(output).toContain("Test --desc alias");
 		expect(output).toContain("Created with --desc");
 	});
 
 	it("should verify task created with --desc has correct description", async () => {
 		// Create task with --desc
-		await $`bun ${cliPath} task create "Test task" --desc "Description via --desc"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task create "Test task" --desc "Description via --desc"`.cwd(TEST_DIR).quiet();
 
 		// Verify the task was created with correct description
 		const core = new Core(TEST_DIR);
@@ -65,7 +65,7 @@ describe("--desc alias functionality", () => {
 		);
 
 		// Edit with --desc
-		await $`bun ${cliPath} task edit 1 --desc "Updated via --desc"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} task edit 1 --desc "Updated via --desc"`.cwd(TEST_DIR).quiet();
 
 		// Command succeeded without throwing
 
@@ -75,14 +75,14 @@ describe("--desc alias functionality", () => {
 	});
 
 	it("should create draft with --desc alias", async () => {
-		await $`bun ${cliPath} draft create "Draft with --desc" --desc "Draft description"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} draft create "Draft with --desc" --desc "Draft description"`.cwd(TEST_DIR).quiet();
 
 		// Command succeeded without throwing
 	});
 
 	it("should verify draft created with --desc has correct description", async () => {
 		// Create draft with --desc
-		await $`bun ${cliPath} draft create "Test draft" --desc "Draft via --desc"`.cwd(TEST_DIR).quiet();
+		await $`${cliCommand} draft create "Test draft" --desc "Draft via --desc"`.cwd(TEST_DIR).quiet();
 
 		// Verify the draft was created with correct description
 		const core = new Core(TEST_DIR);
@@ -93,7 +93,7 @@ describe("--desc alias functionality", () => {
 	});
 
 	it("should show --desc in help text", async () => {
-		const result = await $`bun ${cliPath} task create --help`.cwd(TEST_DIR).text();
+		const result = await $`${cliCommand} task create --help`.cwd(TEST_DIR).text();
 
 		expect(result).toContain("-d, --description <text>");
 		expect(result).toContain("--desc <text>");

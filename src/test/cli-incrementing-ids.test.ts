@@ -3,10 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import type { Decision, Document, Task } from "../types";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 
@@ -39,7 +39,7 @@ describe("CLI ID Incrementing Behavior", () => {
 		};
 		await core.createTask(task1);
 
-		const result = await $`bun ${CLI_PATH} task create "Second Task"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task create "Second Task"`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.toString()).toContain("Created task TASK-2");
@@ -59,7 +59,7 @@ describe("CLI ID Incrementing Behavior", () => {
 		};
 		await core.createDocument(doc1);
 
-		const result = await $`bun ${CLI_PATH} doc create "Second Doc"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} doc create "Second Doc"`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.toString()).toContain("Created document doc-2");
@@ -83,7 +83,7 @@ describe("CLI ID Incrementing Behavior", () => {
 		};
 		await core.createDecision(decision1);
 
-		const result = await $`bun ${CLI_PATH} decision create "Second Decision"`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} decision create "Second Decision"`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.toString()).toContain("Created decision decision-2");

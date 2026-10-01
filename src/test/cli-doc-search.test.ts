@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 
 describe("CLI doc search command", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-cli-doc-search");
@@ -59,7 +59,7 @@ describe("CLI doc search command", () => {
 	});
 
 	it("searches documents with plain agent-readable identity and follow-up context", async () => {
-		const result = await $`bun ${cliPath} doc search architecture`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} doc search architecture`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -73,14 +73,14 @@ describe("CLI doc search command", () => {
 	});
 
 	it("prints a query-specific no-result message", async () => {
-		const result = await $`bun ${cliPath} doc search zzzzzzzz`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} doc search zzzzzzzz`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.toString().trim()).toBe('No documents found for "zzzzzzzz".');
 	});
 
 	it("limits document search results", async () => {
-		const result = await $`bun ${cliPath} doc search architecture --limit 1`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} doc search architecture --limit 1`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const stdout = result.stdout.toString();
@@ -90,12 +90,12 @@ describe("CLI doc search command", () => {
 	});
 
 	it("rejects missing or invalid query and limit inputs", async () => {
-		const missingQuery = await $`bun ${cliPath} doc search`.cwd(TEST_DIR).nothrow().quiet();
+		const missingQuery = await $`${cliCommand} doc search`.cwd(TEST_DIR).nothrow().quiet();
 		const emptyQuery = await runTestCli(["doc", "search", ""], { cwd: TEST_DIR });
-		const longQuery = await $`bun ${cliPath} doc search ${"a".repeat(201)}`.cwd(TEST_DIR).nothrow().quiet();
-		const zeroLimit = await $`bun ${cliPath} doc search architecture --limit 0`.cwd(TEST_DIR).nothrow().quiet();
-		const highLimit = await $`bun ${cliPath} doc search architecture --limit 101`.cwd(TEST_DIR).nothrow().quiet();
-		const textLimit = await $`bun ${cliPath} doc search architecture --limit many`.cwd(TEST_DIR).nothrow().quiet();
+		const longQuery = await $`${cliCommand} doc search ${"a".repeat(201)}`.cwd(TEST_DIR).nothrow().quiet();
+		const zeroLimit = await $`${cliCommand} doc search architecture --limit 0`.cwd(TEST_DIR).nothrow().quiet();
+		const highLimit = await $`${cliCommand} doc search architecture --limit 101`.cwd(TEST_DIR).nothrow().quiet();
+		const textLimit = await $`${cliCommand} doc search architecture --limit many`.cwd(TEST_DIR).nothrow().quiet();
 
 		const missingQueryOutput = missingQuery.stdout.toString() + missingQuery.stderr.toString();
 		const emptyQueryOutput = emptyQuery.stdout.toString() + emptyQuery.stderr.toString();
@@ -120,7 +120,7 @@ describe("CLI doc search command", () => {
 	});
 
 	it("documents the input schema and output shape in help", async () => {
-		const help = await $`bun ${cliPath} doc search --help`.cwd(TEST_DIR).text();
+		const help = await $`${cliCommand} doc search --help`.cwd(TEST_DIR).text();
 
 		expect(help).toContain("Input schema:");
 		expect(help).toContain("Required fields:");

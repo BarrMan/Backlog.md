@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-77
 title: Migrate from blessed to bblessed for better Bun and Windows support
 status: Done
@@ -11,30 +12,50 @@ labels:
   - dependencies
   - windows
 dependencies: []
+description: >-
+  Successfully migrated from the original blessed library to bbblessed
+  (github:node-opcua/bbblessed), a fork with improved bundling support that
+  eliminates the need for complex Windows patches and provides better
+  cross-platform compatibility.
+
+
+  ## Background
+
+
+  The project previously used blessed v0.1.81 with a custom patch script
+  (`scripts/patch-blessed.js`) that:
+
+  1. Replaced dynamic widget loading with static imports for Bun bundling
+
+  2. Bundled terminfo files and patched tput.js for Windows compatibility
+
+
+  This patching was fragile and a maintenance burden.
+acceptance_criteria:
+  - index: 1
+    text: Replace blessed with bblessed in package.json
+    checked: true
+  - index: 2
+    text: Remove postinstall patch script
+    checked: true
+  - index: 3
+    text: Remove patch-blessed.js and terminfo resources
+    checked: true
+  - index: 4
+    text: All tests pass with bblessed
+    checked: true
+  - index: 5
+    text: Board view and other TUI components work correctly
+    checked: true
+  - index: 6
+    text: Windows binary builds without patches
+    checked: true
+  - index: 7
+    text: No regression in functionality
+    checked: true
+definition_of_done: []
+comments: []
 ---
-
-## Description
-
-Successfully migrated from the original blessed library to bbblessed (github:node-opcua/bbblessed), a fork with improved bundling support that eliminates the need for complex Windows patches and provides better cross-platform compatibility.
-
-## Background
-
-The project previously used blessed v0.1.81 with a custom patch script (`scripts/patch-blessed.js`) that:
-1. Replaced dynamic widget loading with static imports for Bun bundling
-2. Bundled terminfo files and patched tput.js for Windows compatibility
-
-This patching was fragile and a maintenance burden.
-
-## Acceptance Criteria
-
-- [x] Replace blessed with bblessed in package.json
-- [x] Remove postinstall patch script
-- [x] Remove patch-blessed.js and terminfo resources
-- [x] All tests pass with bblessed
-- [x] Board view and other TUI components work correctly
-- [x] Windows binary builds without patches
-- [x] No regression in functionality
-
 ## Implementation Details
 
 ### Migration Steps Completed:

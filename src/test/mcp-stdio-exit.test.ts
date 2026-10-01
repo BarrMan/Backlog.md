@@ -5,10 +5,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Core } from "../core/backlog.ts";
 import { initializeProject } from "../core/init.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, getPlatformTimeout, isWindows, observeChildClose, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 const START_MESSAGE = "Backlog.md MCP server started (stdio transport)";
 
 let TEST_DIR: string;
@@ -99,7 +99,7 @@ describe("MCP stdio shutdown", () => {
 
 	itIfNotWindows("exits when stdin closes", async () => {
 		const timeout = getPlatformTimeout(4000);
-		const child = spawn("bun", [CLI_PATH, "mcp", "start", "--debug"], {
+		const child = spawn(CLI_COMMAND[0] as string, [...CLI_COMMAND.slice(1), "mcp", "start", "--debug"], {
 			cwd: TEST_DIR,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
@@ -164,8 +164,8 @@ describe("MCP stdio shutdown", () => {
 
 		let stderr = "";
 		const transport = new StdioClientTransport({
-			command: "bun",
-			args: [CLI_PATH, "mcp", "start", "--cwd", TEST_DIR, "--debug"],
+			command: CLI_COMMAND[0] as string,
+			args: [...CLI_COMMAND.slice(1), "mcp", "start", "--cwd", TEST_DIR, "--debug"],
 			cwd: process.cwd(),
 			stderr: "pipe",
 		});

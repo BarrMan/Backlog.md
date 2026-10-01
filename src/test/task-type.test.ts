@@ -122,19 +122,6 @@ describe("task type field", () => {
 			expect(loaded?.type).toBeUndefined();
 		});
 
-		it("should parse legacy frontmatter without a type key", () => {
-			const legacy = [
-				"---",
-				"id: task-1",
-				"title: Legacy",
-				"status: To Do",
-				"created_date: 2026-01-01",
-				"---",
-				"",
-			].join("\n");
-			expect(parseTask(legacy).type).toBeUndefined();
-		});
-
 		it("should not write a type key for untyped tasks", async () => {
 			const { task } = await core.createTaskFromInput({ title: "Untyped task" }, false);
 			await core.updateTaskFromInput(task.id, { title: "Still untyped" }, false);

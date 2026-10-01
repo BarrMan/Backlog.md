@@ -4,7 +4,7 @@ import { renderToString } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { type TaskCorpus, toTaskDetail, withReadiness } from "../core/task-detail.ts";
 import type { Task } from "../types/index.ts";
-import { generateDetailContent } from "../ui/task-viewer-with-search.ts";
+import { generateDetailContent } from "../ui/task-viewer/controller.ts";
 import { createReadinessGraph, formatReadinessBlockers, getTaskReadiness } from "../utils/readiness.ts";
 import { applyTaskFilters } from "../utils/task-search.ts";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal.tsx";

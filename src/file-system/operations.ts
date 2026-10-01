@@ -1,10 +1,18 @@
 import { realpathSync } from "node:fs";
 import { mkdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { DEFAULT_DIRECTORIES, DEFAULT_FILES, FALLBACK_STATUS } from "../constants/index.ts";
-import { parseTask, TaskDependenciesParseError } from "../markdown/parser.ts";
+import { DEFAULT_DIRECTORIES, DEFAULT_FILES, DRAFT_STATUS, FALLBACK_STATUS } from "../constants/index.ts";
+import { FrontmatterSchemaError, parseMarkdown, parseTask, TaskDependenciesParseError } from "../markdown/parser.ts";
 import { serializeTask } from "../markdown/serializer.ts";
-import type { BacklogConfig, Decision, Document, Milestone, Task, TaskListFilter } from "../types/index.ts";
+import {
+	type BacklogConfig,
+	type Decision,
+	type Document,
+	type Milestone,
+	TASK_DIRECTORY_TYPES,
+	type Task,
+	type TaskListFilter,
+} from "../types/index.ts";
 import type { BacklogConfigSource } from "../utils/backlog-directory.ts";
 import {
 	normalizeProjectBacklogDirectory,
@@ -15,6 +23,8 @@ import type { DraftIdentityFindings } from "../utils/duplicate-detection.ts";
 import { AmbiguousIdError, isAmbiguousIdError } from "../utils/entity-id.ts";
 import {
 	buildGlobPattern,
+	DEFAULT_TASK_PREFIX,
+	DRAFT_PREFIX,
 	extractAnyPrefix,
 	filenameMatchesId,
 	generateNextId,
@@ -72,8 +82,12 @@ interface ParsedTaskFile {
 	task: Task;
 }
 
+const TASK_DIRECTORY = TASK_DIRECTORY_TYPES[0];
+const DRAFT_DIRECTORY = TASK_DIRECTORY_TYPES[1];
+const DRAFT_STATUS_KEY = DRAFT_STATUS.toLowerCase();
+
 export type ContentMutation =
-	| { type: "task"; root: string; taskId: string; filePath: string }
+	| { type: typeof TASK_DIRECTORY; root: string; taskId: string; filePath: string }
 	| { type: "document"; root: string; documentId: string }
 	| { type: "decision"; root: string; decisionId: string };
 
@@ -199,6 +213,7 @@ export class FileSystem {
 			decisionsDirectory: async () => await this.getDecisionsDir(),
 			documentsDirectory: async () => await this.getDocsDir(),
 			ensureDirectory: async (directory) => await this.ensureDirectoryExists(directory),
+			withCreateLock: (operation) => this.withCreateLock(operation),
 		});
 		this.milestones = new MilestoneStore({
 			activeDirectory: () => this.getMilestonesDir(),
@@ -517,7 +532,7 @@ export class FileSystem {
 		if (!filePath) {
 			throw new Error(`Cannot lock task ${task.id} for editing without its file path.`);
 		}
-		return await this.withEntityFileLock("task", task.id, filePath, fn);
+		return await this.withEntityFileLock(TASK_DIRECTORY, task.id, filePath, fn);
 	}
 
 	/**
@@ -529,11 +544,11 @@ export class FileSystem {
 		if (process.env.USE_GLOBAL_TASK_ID_LOCK?.toLowerCase() === "false") {
 			return await fn();
 		}
-		return await this.withEntityFileLock("draft", reference.canonicalId, reference.filePath, fn);
+		return await this.withEntityFileLock(DRAFT_DIRECTORY, reference.canonicalId, reference.filePath, fn);
 	}
 
 	private async withEntityFileLock<T>(
-		scope: "task" | "draft",
+		scope: typeof TASK_DIRECTORY | typeof DRAFT_DIRECTORY,
 		entityId: string,
 		filePath: string,
 		fn: () => Promise<T>,
@@ -587,8 +602,8 @@ export class FileSystem {
 		task: Task,
 		isDraft = false,
 	): Promise<{ id: string; filename: string; filePath: string }> {
-		let prefix = isDraft ? "draft" : extractAnyPrefix(task.id);
-		if (!prefix) prefix = (await this.loadConfig())?.prefixes?.task ?? "task";
+		let prefix = isDraft ? DRAFT_PREFIX : extractAnyPrefix(task.id);
+		if (!prefix) prefix = (await this.loadConfig())?.prefixes?.task ?? DEFAULT_TASK_PREFIX;
 		const id = normalizeId(task.id, prefix);
 		const filename = `${idForFilename(id)} - ${this.sanitizeFilename(task.title)}.md`;
 		const directory = isDraft ? await this.getDraftsDir() : await this.getTasksDir();
@@ -605,9 +620,19 @@ export class FileSystem {
 		try {
 			return parseTask(await Bun.file(filepath).text());
 		} catch (error) {
-			if (error instanceof TaskDependenciesParseError) throw error;
+			if (error instanceof TaskDependenciesParseError || error instanceof FrontmatterSchemaError) throw error;
 			return null;
 		}
+	}
+
+	private async retainedTaskFrontmatter(...filepaths: Array<string | undefined>): Promise<Record<string, unknown>> {
+		for (const filepath of filepaths) {
+			if (!filepath) continue;
+			try {
+				return parseMarkdown(await Bun.file(filepath).text()).frontmatter;
+			} catch {}
+		}
+		return {};
 	}
 
 	private async removeReplacedTaskFile(taskId: string, filename: string, tasksDir: string): Promise<void> {
@@ -623,7 +648,7 @@ export class FileSystem {
 	async saveTask(task: Task): Promise<string> {
 		const root = resolve(this.backlogDir);
 		const { id: taskId, filename, filePath: filepath } = await this.resolveTaskWriteTarget(task);
-		const prefix = extractAnyPrefix(taskId) ?? "task";
+		const prefix = extractAnyPrefix(taskId) ?? DEFAULT_TASK_PREFIX;
 		const tasksDir = await this.getTasksDir();
 		const shouldPreservePath = typeof task.filePath === "string" && task.filePath.trim().length > 0;
 		const existingTask = await this.existingTaskAtWritePath(filepath, shouldPreservePath);
@@ -643,7 +668,10 @@ export class FileSystem {
 			id: persistedTaskId,
 			parentTaskId: persistedParentTaskId,
 		};
-		const content = serializeTask(normalizedTask);
+		const content = serializeTask(
+			normalizedTask,
+			await this.retainedTaskFrontmatter(task.filePath, shouldPreservePath ? filepath : undefined),
+		);
 
 		if (!shouldPreservePath) {
 			// Delete any existing task files with the same ID but different filenames
@@ -652,7 +680,7 @@ export class FileSystem {
 
 		await this.ensureDirectoryExists(dirname(filepath));
 		await Bun.write(filepath, content);
-		await this.publishContentMutation({ type: "task", root, taskId: task.id, filePath: filepath });
+		await this.publishContentMutation({ type: TASK_DIRECTORY, root, taskId: task.id, filePath: filepath });
 		return filepath;
 	}
 
@@ -680,7 +708,12 @@ export class FileSystem {
 			const task = normalizeTaskIdentity(parseTask(content));
 			return { ...task, filePath: filepath };
 		} catch (error) {
-			if (isAmbiguousTaskIdError(error) || error instanceof TaskDependenciesParseError) throw error;
+			if (
+				isAmbiguousTaskIdError(error) ||
+				error instanceof TaskDependenciesParseError ||
+				error instanceof FrontmatterSchemaError
+			)
+				throw error;
 			return null;
 		}
 	}
@@ -885,7 +918,7 @@ export class FileSystem {
 
 				// Get task prefix from config (default: "task")
 				const config = await this.loadConfig();
-				const taskPrefix = config?.prefixes?.task ?? "task";
+				const taskPrefix = config?.prefixes?.task ?? DEFAULT_TASK_PREFIX;
 
 				// Get existing task IDs to generate next ID
 				// Include both active and completed tasks to prevent ID collisions
@@ -897,7 +930,7 @@ export class FileSystem {
 				const newTaskId = generateNextId(existingIds, taskPrefix, config?.zeroPaddedIds);
 
 				const promotedStatus =
-					!draft.status || draft.status.trim().toLowerCase() === "draft"
+					!draft.status || draft.status.trim().toLowerCase() === DRAFT_STATUS_KEY
 						? config?.defaultStatus || FALLBACK_STATUS
 						: draft.status;
 
@@ -939,7 +972,7 @@ export class FileSystem {
 
 			// Generate new draft ID
 			const config = await this.loadConfig();
-			const newDraftId = generateNextId(existingIds, "draft", config?.zeroPaddedIds);
+			const newDraftId = generateNextId(existingIds, DRAFT_PREFIX, config?.zeroPaddedIds);
 
 			// Update task with new draft ID and save as draft. The record's own links are cleaned of
 			// the task ID it vacates here: carried into the draft, such a link would rebind to
@@ -976,7 +1009,7 @@ export class FileSystem {
 	// Draft operations
 	private async listDraftFiles(draftsDir: string): Promise<string[]> {
 		return await Array.fromAsync(
-			new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }),
+			new Bun.Glob(buildGlobPattern(DRAFT_PREFIX)).scan({ cwd: draftsDir, followSymlinks: true }),
 		);
 	}
 
@@ -989,7 +1022,7 @@ export class FileSystem {
 		const draftsDir = await this.getDraftsDir();
 		// Normalize the draft ID to uppercase before serialization
 		const normalizedTask = { ...task, id: draftId };
-		const content = serializeTask(normalizedTask);
+		const content = serializeTask(normalizedTask, await this.retainedTaskFrontmatter(task.filePath, filepath));
 		await this.ensureDirectoryExists(dirname(filepath));
 
 		// Remove every existing draft file whose numeric identity matches the saved id but
@@ -1110,12 +1143,12 @@ export class FileSystem {
 		let files: string[] = [];
 		try {
 			files = await Array.fromAsync(
-				new Bun.Glob(buildGlobPattern("draft")).scan({ cwd: draftsDir, followSymlinks: true }),
+				new Bun.Glob(buildGlobPattern(DRAFT_PREFIX)).scan({ cwd: draftsDir, followSymlinks: true }),
 			);
 		} catch {
 			return null;
 		}
-		const normalizedId = normalizeId(draftId, "draft");
+		const normalizedId = normalizeId(draftId, DRAFT_PREFIX);
 		const candidates = new Set(
 			files
 				.filter((f) => filenameMatchesId(f, idForFilename(normalizedId)))
@@ -1186,9 +1219,12 @@ export class FileSystem {
 	}
 
 	// Decision log operations
-	async saveDecision(decision: Decision): Promise<{ filepath: string; removedFilepaths: string[] }> {
+	async saveDecision(
+		decision: Decision,
+		retainedFrontmatter?: Record<string, unknown>,
+	): Promise<{ filepath: string; removedFilepaths: string[] }> {
 		const root = resolve(this.backlogDir);
-		const saved = await this.contentRepository.saveDecision(decision);
+		const saved = await this.contentRepository.saveDecision(decision, retainedFrontmatter);
 		await this.publishContentMutation({ type: "decision", root, decisionId: decision.id });
 		return saved;
 	}

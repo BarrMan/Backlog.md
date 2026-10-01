@@ -3,12 +3,12 @@ import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
 import type { Task } from "../types/index.ts";
-import { prepareBoardColumns } from "../ui/board/column-policy.ts";
+import { prepareBoardColumns } from "../ui/board/policies/column-policy.ts";
 import { compareTaskIds } from "../utils/task-sorting.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const cliPath = getTestCliPath();
+const cliCommand = getTestCliCommand();
 
 // One parent with more than nine subtasks, plus two-digit top-level ids, so any surface that
 // compares ids as plain strings puts TASK-1.10 in front of TASK-1.2 (github.com/MrLesk/Backlog.md/issues/953).
@@ -84,11 +84,11 @@ describe("subtask ordering consistency", () => {
 	});
 
 	it("agrees with the CLI plain and JSON task lists", async () => {
-		const plain = await $`bun ${cliPath} task list --plain`.cwd(TEST_DIR).quiet();
+		const plain = await $`${cliCommand} task list --plain`.cwd(TEST_DIR).quiet();
 		expect(plain.exitCode).toBe(0);
 		expect(idsFromPlainOutput(plain.stdout.toString())).toEqual(EXPECTED_ORDER);
 
-		const json = await $`bun ${cliPath} task list --json`.cwd(TEST_DIR).quiet();
+		const json = await $`${cliCommand} task list --json`.cwd(TEST_DIR).quiet();
 		expect(json.exitCode).toBe(0);
 		const payload = JSON.parse(json.stdout.toString()) as { tasks: Array<{ id: string }> };
 		expect(payload.tasks.map((task) => task.id)).toEqual(EXPECTED_ORDER);

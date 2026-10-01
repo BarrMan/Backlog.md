@@ -3,11 +3,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI Integration", () => {
 	beforeEach(async () => {
@@ -131,7 +131,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task list --plain --status Done`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --status Done`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("Done:");
 			expect(out).toContain("TASK-2 - Second Task"); // IDs normalized to uppercase
@@ -173,7 +173,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task list --plain`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("TASK-1 - Task With Criteria (ac: 1/3)");
 			expect(out).toContain("TASK-2 - Task Without Criteria");
@@ -213,7 +213,7 @@ describe("CLI Integration", () => {
 			const testCases = ["done", "DONE", "DoNe"];
 
 			for (const status of testCases) {
-				const result = await $`bun ${CLI_PATH} task list --plain --status ${status}`.cwd(TEST_DIR).quiet();
+				const result = await $`${CLI_COMMAND} task list --plain --status ${status}`.cwd(TEST_DIR).quiet();
 				const out = result.stdout.toString();
 				expect(out).toContain("Done:");
 				expect(out).toContain("TASK-2 - Second Task"); // IDs normalized to uppercase
@@ -221,7 +221,7 @@ describe("CLI Integration", () => {
 			}
 
 			// Test with -s flag
-			const resultShort = await $`bun ${CLI_PATH} task list --plain -s done`.cwd(TEST_DIR).quiet();
+			const resultShort = await $`${CLI_COMMAND} task list --plain -s done`.cwd(TEST_DIR).quiet();
 			const outShort = resultShort.stdout.toString();
 			expect(outShort).toContain("Done:");
 			expect(outShort).toContain("TASK-2 - Second Task"); // IDs normalized to uppercase
@@ -258,7 +258,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task list --plain --assignee alice`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --assignee alice`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("TASK-1 - Assigned Task"); // IDs normalized to uppercase
 			expect(out).not.toContain("TASK-2 - Unassigned Task");
@@ -294,14 +294,14 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task list --plain --unassigned`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --unassigned`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("TASK-2 - Unassigned Task");
 			expect(out).not.toContain("TASK-1 - Assigned Task");
 		});
 
 		it("should reject combining --unassigned with --assignee", async () => {
-			const result = await $`bun ${CLI_PATH} task list --plain --assignee alice --unassigned`
+			const result = await $`${CLI_COMMAND} task list --plain --assignee alice --unassigned`
 				.cwd(TEST_DIR)
 				.quiet()
 				.nothrow();
@@ -352,8 +352,8 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const commaResult = await $`bun ${CLI_PATH} task list --plain --labels ui,bug`.cwd(TEST_DIR).quiet();
-			const repeatedResult = await $`bun ${CLI_PATH} task list --plain --labels ui --labels bug`.cwd(TEST_DIR).quiet();
+			const commaResult = await $`${CLI_COMMAND} task list --plain --labels ui,bug`.cwd(TEST_DIR).quiet();
+			const repeatedResult = await $`${CLI_COMMAND} task list --plain --labels ui --labels bug`.cwd(TEST_DIR).quiet();
 
 			for (const result of [commaResult, repeatedResult]) {
 				const out = result.stdout.toString();
@@ -393,7 +393,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task list --plain --search "invoice payment"`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --search "invoice payment"`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("TASK-1 - Billing Webhook");
 			expect(out).not.toContain("TASK-2 - Profile Settings");
@@ -431,7 +431,7 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const result = await $`bun ${CLI_PATH} task list --plain --limit 1`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --limit 1`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("Done:");
 			expect(out).toContain("[HIGH] TASK-2 - High Priority Later ID");
@@ -450,26 +450,26 @@ describe("CLI Integration", () => {
 				priorities: ["Very High", "High", "Medium", "Low", "Very Low"],
 			});
 
-			await $`bun ${CLI_PATH} task create "Custom priority urgent task" --priority "Very High" --plain`
+			await $`${CLI_COMMAND} task create "Custom priority urgent task" --priority "Very High" --plain`
 				.cwd(TEST_DIR)
 				.quiet();
-			await $`bun ${CLI_PATH} task create "Custom priority later task" --priority "Very Low" --plain`
+			await $`${CLI_COMMAND} task create "Custom priority later task" --priority "Very Low" --plain`
 				.cwd(TEST_DIR)
 				.quiet();
 
-			const listResult = await $`bun ${CLI_PATH} task list --plain --priority "very high"`.cwd(TEST_DIR).quiet();
+			const listResult = await $`${CLI_COMMAND} task list --plain --priority "very high"`.cwd(TEST_DIR).quiet();
 			const listOutput = listResult.stdout.toString();
 			expect(listOutput).toContain("[VERY HIGH] TASK-1 - Custom priority urgent task");
 			expect(listOutput).not.toContain("Custom priority later task");
 
-			const searchResult = await $`bun ${CLI_PATH} search "Custom priority" --priority "VERY HIGH" --plain`
+			const searchResult = await $`${CLI_COMMAND} search "Custom priority" --priority "VERY HIGH" --plain`
 				.cwd(TEST_DIR)
 				.quiet();
 			const searchOutput = searchResult.stdout.toString();
 			expect(searchOutput).toContain("TASK-1 - Custom priority urgent task");
 			expect(searchOutput).not.toContain("TASK-2 - Custom priority later task");
 
-			const helpOutput = await $`bun ${CLI_PATH} task create --help`.cwd(TEST_DIR).text();
+			const helpOutput = await $`${CLI_COMMAND} task create --help`.cwd(TEST_DIR).text();
 			expect(helpOutput).toContain("priority: one of configured priorities: Very High, High, Medium, Low, Very Low");
 		});
 
@@ -539,7 +539,7 @@ describe("CLI Integration", () => {
 			);
 
 			const result =
-				await $`bun ${CLI_PATH} task list --plain --status ${"To Do"} --assignee alice --milestone "Release Filters" --parent TASK-1 --priority high --labels security,api --search "OAuth Callback"`
+				await $`${CLI_COMMAND} task list --plain --status ${"To Do"} --assignee alice --milestone "Release Filters" --parent TASK-1 --priority high --labels security,api --search "OAuth Callback"`
 					.cwd(TEST_DIR)
 					.quiet();
 			const out = result.stdout.toString();
@@ -604,13 +604,13 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const plainResult = await $`bun ${CLI_PATH} task list --plain --ready`.cwd(TEST_DIR).quiet();
+			const plainResult = await $`${CLI_COMMAND} task list --plain --ready`.cwd(TEST_DIR).quiet();
 			const plainOut = plainResult.stdout.toString();
 			expect(plainOut).toContain("TASK-4 - Ready Task");
 			expect(plainOut).toContain("TASK-2 - In Progress Dep");
 			expect(plainOut).not.toContain("TASK-3 - Blocked Task");
 
-			const jsonResult = await $`bun ${CLI_PATH} task list --json --ready`.cwd(TEST_DIR).quiet();
+			const jsonResult = await $`${CLI_COMMAND} task list --json --ready`.cwd(TEST_DIR).quiet();
 			const json = JSON.parse(jsonResult.stdout.toString());
 			const readyIds = json.tasks.map((t: { id: string }) => t.id);
 			expect(readyIds).toContain("TASK-4");
@@ -619,7 +619,7 @@ describe("CLI Integration", () => {
 			expect(readyIds).not.toContain("TASK-1");
 
 			// Readiness must resolve against the whole graph, not the tasks left after --status.
-			const scopedResult = await $`bun ${CLI_PATH} task list --plain --ready --status "To Do"`.cwd(TEST_DIR).quiet();
+			const scopedResult = await $`${CLI_COMMAND} task list --plain --ready --status "To Do"`.cwd(TEST_DIR).quiet();
 			const scopedOut = scopedResult.stdout.toString();
 			expect(scopedOut).toContain("TASK-4 - Ready Task");
 			expect(scopedOut).not.toContain("TASK-3 - Blocked Task");
@@ -669,7 +669,7 @@ describe("CLI Integration", () => {
 			);
 			expect(await core.completeTask("task-1", false)).toBe(true);
 
-			const result = await $`bun ${CLI_PATH} task list --plain --ready`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --ready`.cwd(TEST_DIR).quiet();
 			const out = result.stdout.toString();
 			expect(out).toContain("TASK-2 - Depends On Completed");
 			// An unresolvable dependency fails closed instead of being treated as satisfied.
@@ -700,7 +700,7 @@ describe("CLI Integration", () => {
 				"---\nid: TASK-99\ntitle: [unclosed\nstatus: Done\n---\n\nbroken\n",
 			);
 			const corpusReads = async (args: string[]) => {
-				const result = await $`bun ${[CLI_PATH, "task", "list", ...args]}`
+				const result = await $`${[...CLI_COMMAND, "task", "list", ...args]}`
 					.cwd(TEST_DIR)
 					.env({ ...process.env, DEBUG: "1" })
 					.quiet();
@@ -762,7 +762,7 @@ describe("CLI Integration", () => {
 			);
 
 			const runCounting = async (args: string[]) => {
-				const result = await $`bun ${[CLI_PATH, "task", "list", ...args]}`
+				const result = await $`${[...CLI_COMMAND, "task", "list", ...args]}`
 					.cwd(TEST_DIR)
 					.env({ ...process.env, DEBUG: "1" })
 					.quiet();
@@ -848,18 +848,18 @@ describe("CLI Integration", () => {
 
 			// Both dependencies belong to @other, so --assignee @me removes them from the listing.
 			// Readiness must still resolve them instead of calling them unknown.
-			const assigneeResult = await $`bun ${CLI_PATH} task list --plain --ready --assignee @me`.cwd(TEST_DIR).quiet();
+			const assigneeResult = await $`${CLI_COMMAND} task list --plain --ready --assignee @me`.cwd(TEST_DIR).quiet();
 			const assigneeOut = assigneeResult.stdout.toString();
 			expect(assigneeOut).toContain("TASK-4 - Mine Ready");
 			expect(assigneeOut).not.toContain("TASK-3 - Mine Blocked");
 			expect(assigneeOut).not.toContain("TASK-1 - Someone Elses Blocker");
 
-			const unassignedResult = await $`bun ${CLI_PATH} task list --plain --ready --unassigned`.cwd(TEST_DIR).quiet();
+			const unassignedResult = await $`${CLI_COMMAND} task list --plain --ready --unassigned`.cwd(TEST_DIR).quiet();
 			expect(unassignedResult.stdout.toString()).toContain("No tasks found.");
 		});
 
 		it("should reject invalid task list limit", async () => {
-			const result = await $`bun ${CLI_PATH} task list --plain --limit 0`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} task list --plain --limit 0`.cwd(TEST_DIR).nothrow().quiet();
 			const out = result.stdout.toString() + result.stderr.toString();
 
 			expect(result.exitCode).toBe(1);

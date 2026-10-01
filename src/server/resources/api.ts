@@ -1,4 +1,5 @@
 import { Elysia, ElysiaCustomStatusResponse } from "elysia";
+import { API_ROUTES, HTTP_METHOD, PROJECT_SCOPE_HEADER } from "../api-routes.ts";
 import type { ServerRequestScope } from "../project-scope.ts";
 import { decisionsResource } from "./decisions.ts";
 import { documentsResource } from "./documents.ts";
@@ -20,9 +21,9 @@ export function scopedResource(services: ServerServices, name: string) {
 		.derive(() => services.createRequestScope())
 		.onBeforeHandle(({ request, scope, set }) => {
 			const path = new URL(request.url).pathname;
-			if (path === "/api/status" || path === "/api/version") return;
+			if (path === API_ROUTES.STATUS || path === API_ROUTES.VERSION) return;
 			services.createRequestScope(true);
-			return scope.validate(request.headers.get("X-Backlog-Project-Scope"), set);
+			return scope.validate(request.headers.get(PROJECT_SCOPE_HEADER), set);
 		})
 		.onAfterHandle(async ({ request, response, scope, set }) => {
 			const responseStatus =
@@ -31,10 +32,10 @@ export function scopedResource(services: ServerServices, name: string) {
 					: response instanceof ElysiaCustomStatusResponse
 						? Number(response.code)
 						: Number(set.status ?? 200);
-			if (request.method === "GET" || request.method === "HEAD" || responseStatus >= 400) return;
+			if (request.method === HTTP_METHOD.GET || request.method === HTTP_METHOD.HEAD || responseStatus >= 400) return;
 			const path = new URL(request.url).pathname;
-			if (path === "/api/config" || path === "/api/init") return;
-			await services.reconcile(scope, path.startsWith("/api/milestones") ? "milestones" : "tasks");
+			if (path === API_ROUTES.CONFIG || path === API_ROUTES.INIT) return;
+			await services.reconcile(scope, path.startsWith(API_ROUTES.MILESTONES) ? "milestones" : "tasks");
 		});
 }
 

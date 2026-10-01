@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
-import { AgentWorkspaceController, createWorkspaceViewState } from "../ui/agent-workspace.ts";
 import { createScreen } from "../ui/tui.ts";
+import { AgentWorkspaceController, createWorkspaceViewState } from "../ui/workspace/controller.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 type Widget = {

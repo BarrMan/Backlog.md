@@ -9,8 +9,14 @@ const stripIdPrefix = (id: string): string => (id.startsWith("decision-") ? id.r
 const addDecisionPrefix = (id: string): string => (id.startsWith("decision-") ? id : `decision-${id}`);
 
 export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Promise<void>) {
-	const [content, setContent] = useState("");
-	const [originalContent, setOriginalContent] = useState("");
+	const [context, setContext] = useState("");
+	const [originalContext, setOriginalContext] = useState("");
+	const [decisionContent, setDecisionContent] = useState("");
+	const [originalDecisionContent, setOriginalDecisionContent] = useState("");
+	const [consequences, setConsequences] = useState("");
+	const [originalConsequences, setOriginalConsequences] = useState("");
+	const [alternatives, setAlternatives] = useState("");
+	const [originalAlternatives, setOriginalAlternatives] = useState("");
 	const [decisionTitle, setDecisionTitle] = useState("");
 	const [originalDecisionTitle, setOriginalDecisionTitle] = useState("");
 	const { isSaving, showSaveSuccess, save, showSuccess, dismissSuccess } = useDocumentDetailSaveFeedback((error) =>
@@ -21,8 +27,14 @@ export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Pr
 			prefix: addDecisionPrefix,
 			fetch: apiClient.fetchDecision.bind(apiClient),
 			onLoad: (next: Decision) => {
-				setContent(next.rawContent || "");
-				setOriginalContent(next.rawContent || "");
+				setContext(next.context || "");
+				setOriginalContext(next.context || "");
+				setDecisionContent(next.decision || "");
+				setOriginalDecisionContent(next.decision || "");
+				setConsequences(next.consequences || "");
+				setOriginalConsequences(next.consequences || "");
+				setAlternatives(next.alternatives || "");
+				setOriginalAlternatives(next.alternatives || "");
 				setDecisionTitle(next.title || "");
 				setOriginalDecisionTitle(next.title || "");
 			},
@@ -33,8 +45,14 @@ export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Pr
 			onNew: () => {
 				setDecisionTitle("");
 				setOriginalDecisionTitle("");
-				setContent("");
-				setOriginalContent("");
+				setContext("");
+				setOriginalContext("");
+				setDecisionContent("");
+				setOriginalDecisionContent("");
+				setConsequences("");
+				setOriginalConsequences("");
+				setAlternatives("");
+				setOriginalAlternatives("");
 			},
 			logError: (next: unknown) => console.error("Failed to load decision:", next),
 		}),
@@ -72,7 +90,13 @@ export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Pr
 				return;
 			}
 			if (!id) return;
-			await apiClient.updateDecision(addDecisionPrefix(id), content);
+			await apiClient.updateDecision(addDecisionPrefix(id), {
+				title: decisionTitle,
+				context,
+				decision: decisionContent,
+				consequences,
+				alternatives: alternatives || undefined,
+			});
 			await onRefreshData();
 			showSuccess();
 			setIsEditing(false);
@@ -83,7 +107,10 @@ export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Pr
 	const handleCancelEdit = () => {
 		if (isNewDecision) navigate("/decisions");
 		else {
-			setContent(originalContent);
+			setContext(originalContext);
+			setDecisionContent(originalDecisionContent);
+			setConsequences(originalConsequences);
+			setAlternatives(originalAlternatives);
 			setDecisionTitle(originalDecisionTitle);
 			setIsEditing(false);
 		}
@@ -96,8 +123,14 @@ export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Pr
 		isEditing,
 		setIsEditing,
 		error,
-		content,
-		setContent,
+		context,
+		setContext,
+		decisionContent,
+		setDecisionContent,
+		consequences,
+		setConsequences,
+		alternatives,
+		setAlternatives,
 		decisionTitle,
 		setDecisionTitle,
 		isSaving,
@@ -105,7 +138,12 @@ export function useDecisionDetail(decisions: Decision[], onRefreshData: () => Pr
 		dismissSuccess,
 		handleSave,
 		handleCancelEdit,
-		hasChanges: content !== originalContent || decisionTitle !== originalDecisionTitle,
+		hasChanges:
+			context !== originalContext ||
+			decisionContent !== originalDecisionContent ||
+			consequences !== originalConsequences ||
+			alternatives !== originalAlternatives ||
+			decisionTitle !== originalDecisionTitle,
 		titleFallback: decision?.title || (title ? decodeURIComponent(title) : `Decision ${id}`),
 	};
 }

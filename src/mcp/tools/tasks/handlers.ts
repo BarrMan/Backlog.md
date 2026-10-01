@@ -1,5 +1,5 @@
 import { basename, join } from "node:path";
-import { DEFAULT_STATUSES } from "../../../constants/index.ts";
+import { DEFAULT_STATUSES, DRAFT_STATUS } from "../../../constants/index.ts";
 import { type Core, TaskArchiveStatusError, type VacatedTaskResult } from "../../../core/backlog.ts";
 import { findLocalDuplicateTaskIds } from "../../../core/duplicate-task-repair.ts";
 import { loadTaskDetail, loadTaskListItems } from "../../../core/task-detail.ts";
@@ -7,6 +7,7 @@ import { isCreateLockError, isTaskLockError } from "../../../file-system/operati
 import {
 	isLocalEditableTask,
 	type SearchPriorityFilter,
+	TASK_SOURCE,
 	type Task,
 	type TaskListFilter,
 } from "../../../types/index.ts";
@@ -135,7 +136,7 @@ export class TaskHandlers {
 		const priorityIndicator = task.priority ? `[${task.priority.toUpperCase()}] ` : "";
 		const typeIndicator = task.type ? `[${task.type}] ` : "";
 		const projectIndicator = task.project ? `[${task.project}] ` : "";
-		const status = task.status || (task.source === "completed" ? "Done" : "");
+		const status = task.status || (task.source === TASK_SOURCE.COMPLETED ? "Done" : "");
 		const statusText = options.includeStatus && status ? ` (${status})` : "";
 		const acceptanceCriteria = formatAcceptanceCriteriaSummarySuffix(task);
 		const dueDate = task.dueDate ? ` (due ${formatUtcDateForDisplay(task.dueDate)})` : "";
@@ -209,7 +210,7 @@ export class TaskHandlers {
 	private async listDraftTasks(args: TaskListArgs, priorities?: string[]): Promise<CallToolResult> {
 		let drafts = applyTaskFilters(await this.core.filesystem.listDrafts(), {
 			query: args.search,
-			status: args.search || args.type?.length || args.project?.length ? "Draft" : undefined,
+			status: args.search || args.type?.length || args.project?.length ? DRAFT_STATUS : undefined,
 			type: args.type,
 			project: args.project,
 			assignee: args.assignee,
@@ -325,7 +326,7 @@ export class TaskHandlers {
 		const matches = this.applyLimit(
 			createTaskSearchIndex(tasks).search({
 				query,
-				status: this.isDraftStatus(args.status) ? "Draft" : args.status,
+				status: this.isDraftStatus(args.status) ? DRAFT_STATUS : args.status,
 				type: args.type,
 				project: args.project,
 				priority: args.priority,

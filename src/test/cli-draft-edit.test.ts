@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { $ } from "bun";
-import { pickTaskForEditWizard } from "../commands/task-wizard.ts";
+import { pickTaskForEditWizard } from "../cli/features/tasks/wizard.ts";
 import { isTaskLockError } from "../file-system/operations.ts";
 import { Core } from "../index.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
 import { findDuplicateDraftFilenameGroups } from "../utils/task-path.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import {
 	createUniqueTestDir,
 	initializeFilesystemTestProject,
@@ -19,8 +19,10 @@ import {
 const normalizeCliOutput = (output: string) => output.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
-const CLI_RUNTIME = process.env.TUI_TEST_CLI_RUNTIME?.trim() ?? "bun";
+const CLI_COMMAND = getTestCliCommand();
+const ESCAPED_CLI_COMMAND = CLI_COMMAND.map(
+	(argument) => `{${argument.replaceAll("\\", "\\\\").replaceAll("{", "\\{").replaceAll("}", "\\}")}}`,
+).join(" ");
 
 describe("CLI draft edit", () => {
 	beforeEach(async () => {
@@ -36,7 +38,7 @@ describe("CLI draft edit", () => {
 	});
 
 	const createDraft = async (title: string): Promise<Task> => {
-		const create = await $`bun ${CLI_PATH} draft create ${title}`.cwd(TEST_DIR).quiet();
+		const create = await $`${CLI_COMMAND} draft create ${title}`.cwd(TEST_DIR).quiet();
 		const match = create.stdout.toString().match(/Created draft (\S+)/);
 		const draftId = match?.[1];
 		if (!draftId) throw new Error("draft create did not report a draft id");
@@ -50,7 +52,7 @@ describe("CLI draft edit", () => {
 		const draft = await createDraft("Editable draft");
 
 		const result =
-			await $`bun ${CLI_PATH} draft edit ${draft.id} -t "Renamed draft" -d "New body" -a @alice -l ui --priority high --plain`
+			await $`${CLI_COMMAND} draft edit ${draft.id} -t "Renamed draft" -d "New body" -a @alice -l ui --priority high --plain`
 				.cwd(TEST_DIR)
 				.nothrow()
 				.quiet();
@@ -74,7 +76,7 @@ describe("CLI draft edit", () => {
 		if (!draftFilePath) throw new Error("expected draft file path");
 		const before = await Bun.file(draftFilePath).text();
 
-		const result = await $`bun ${CLI_PATH} draft edit ${draft.id}`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit ${draft.id}`.cwd(TEST_DIR).nothrow().quiet();
 		expect(result.exitCode).toBe(0);
 		expect(normalizeCliOutput(result.stdout.toString())).toContain(`Updated draft ${draft.id}`);
 
@@ -90,10 +92,10 @@ describe("CLI draft edit", () => {
 	it("keeps drafts on Draft status and rejects other statuses like task edit validates", async () => {
 		const draft = await createDraft("Status guarded");
 
-		const valid = await $`bun ${CLI_PATH} draft edit ${draft.id} -s draft`.cwd(TEST_DIR).nothrow().quiet();
+		const valid = await $`${CLI_COMMAND} draft edit ${draft.id} -s draft`.cwd(TEST_DIR).nothrow().quiet();
 		expect(valid.exitCode).toBe(0);
 
-		const invalid = await $`bun ${CLI_PATH} draft edit ${draft.id} -s "To Do"`.cwd(TEST_DIR).nothrow().quiet();
+		const invalid = await $`${CLI_COMMAND} draft edit ${draft.id} -s "To Do"`.cwd(TEST_DIR).nothrow().quiet();
 		const invalidOutput = normalizeCliOutput(invalid.stdout.toString() + invalid.stderr.toString());
 		expect(invalid.exitCode).toBe(1);
 		expect(invalidOutput).toContain("Invalid status: To Do. Valid statuses are: Draft");
@@ -104,7 +106,7 @@ describe("CLI draft edit", () => {
 	});
 
 	it("fails closed for unknown draft ids without the cross-branch hint", async () => {
-		const result = await $`bun ${CLI_PATH} draft edit DRAFT-99 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit DRAFT-99 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Draft DRAFT-99 not found.");
@@ -125,7 +127,7 @@ describe("CLI draft edit", () => {
 		await Bun.write(join(draftsDir, "draft-7 - Alpha.md"), await draft("Alpha"));
 		await Bun.write(join(draftsDir, "draft-7 - Beta.md"), await draft("Beta"));
 
-		const result = await $`bun ${CLI_PATH} draft edit 7 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit 7 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Draft ID DRAFT-7 is ambiguous; 2 files match:");
@@ -153,7 +155,7 @@ describe("CLI draft edit", () => {
 		await write("draft-1 - Alpha.md", "DRAFT-1", "Alpha");
 		await write("draft-001 - Beta.md", "DRAFT-001", "Beta");
 
-		const result = await $`bun ${CLI_PATH} draft edit 1 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit 1 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Draft ID DRAFT-1 is ambiguous; 2 files match:");
@@ -187,7 +189,7 @@ describe("CLI draft edit", () => {
 			["draft", "view", "1", "--plain"],
 			["draft", "1", "--plain"],
 		]) {
-			const result = await $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).nothrow().quiet();
+			const result = await $`${CLI_COMMAND} ${args}`.cwd(TEST_DIR).nothrow().quiet();
 			const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 			expect(result.exitCode).toBe(1);
 			expect(output).toContain("Draft ID DRAFT-1 is ambiguous; 2 files match:");
@@ -202,7 +204,7 @@ describe("CLI draft edit", () => {
 
 	it("still views a unique draft by id", async () => {
 		const draft = await createDraft("Solo view");
-		const result = await $`bun ${CLI_PATH} draft view ${draft.id} --plain`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft view ${draft.id} --plain`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString());
 		expect(result.exitCode).toBe(0);
 		expect(output).toContain("Solo view");
@@ -211,7 +213,7 @@ describe("CLI draft edit", () => {
 	it("reuses the task edit flag validation rules", async () => {
 		const draft = await createDraft("Flag guarded");
 
-		const result = await $`bun ${CLI_PATH} draft edit ${draft.id} --clear-labels --label a`
+		const result = await $`${CLI_COMMAND} draft edit ${draft.id} --clear-labels --label a`
 			.cwd(TEST_DIR)
 			.nothrow()
 			.quiet();
@@ -219,7 +221,7 @@ describe("CLI draft edit", () => {
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Cannot combine --clear-labels with --label, --add-label, or --remove-label.");
 
-		const conflict = await $`bun ${CLI_PATH} draft edit ${draft.id} --due-date 2026-01-01 --clear-due-date`
+		const conflict = await $`${CLI_COMMAND} draft edit ${draft.id} --due-date 2026-01-01 --clear-due-date`
 			.cwd(TEST_DIR)
 			.nothrow()
 			.quiet();
@@ -244,7 +246,7 @@ describe("CLI draft edit", () => {
 		await Bun.write(draftPath, drifted);
 		const before = await Bun.file(draftPath).text();
 
-		const result = await $`bun ${CLI_PATH} draft edit 1 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit 1 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain(basename(draftPath));
@@ -274,10 +276,10 @@ describe("CLI draft edit", () => {
 			}),
 		);
 
-		const shorthand = await $`bun ${CLI_PATH} draft edit 1 -t "Padded edited"`.cwd(TEST_DIR).nothrow().quiet();
+		const shorthand = await $`${CLI_COMMAND} draft edit 1 -t "Padded edited"`.cwd(TEST_DIR).nothrow().quiet();
 		expect(shorthand.exitCode).toBe(0);
 
-		const paddedInput = await $`bun ${CLI_PATH} draft edit 01 -a @alex`.cwd(TEST_DIR).nothrow().quiet();
+		const paddedInput = await $`${CLI_COMMAND} draft edit 01 -a @alex`.cwd(TEST_DIR).nothrow().quiet();
 		expect(paddedInput.exitCode).toBe(0);
 
 		const core = new Core(TEST_DIR);
@@ -295,14 +297,14 @@ describe("CLI draft edit", () => {
 		if (!damaged?.filePath) throw new Error("expected damaged draft file path");
 		await Bun.write(damaged.filePath, "---\nid: [unclosed\ntitle: Damaged sibling\n---\nbroken yaml");
 
-		const healthyEdit = await $`bun ${CLI_PATH} draft edit ${healthy.id} -t "Still editable"`
+		const healthyEdit = await $`${CLI_COMMAND} draft edit ${healthy.id} -t "Still editable"`
 			.cwd(TEST_DIR)
 			.nothrow()
 			.quiet();
 		expect(healthyEdit.exitCode).toBe(0);
 		expect((await core.filesystem.loadDraft(healthy.id))?.title).toBe("Still editable");
 
-		const damagedEdit = await $`bun ${CLI_PATH} draft edit 2 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const damagedEdit = await $`${CLI_COMMAND} draft edit 2 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const damagedOutput = normalizeCliOutput(damagedEdit.stdout.toString() + damagedEdit.stderr.toString());
 		expect(damagedEdit.exitCode).toBe(1);
 		expect(damagedOutput).toContain("could not be parsed");
@@ -332,7 +334,7 @@ describe("CLI draft edit", () => {
 	it("points recovery guidance at the draft commands", async () => {
 		const draft = await createDraft("Guidance target");
 
-		const result = await $`bun ${CLI_PATH} draft edit ${draft.id} --check-ac 7`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit ${draft.id} --check-ac 7`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain(`backlog draft view ${draft.id} --plain`);
@@ -342,7 +344,7 @@ describe("CLI draft edit", () => {
 	});
 
 	it("requires a task id outside interactive mode like task edit does", async () => {
-		const result = await $`bun ${CLI_PATH} draft edit -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("missing required argument 'taskId'");
@@ -374,7 +376,7 @@ describe("atomic draft editing", () => {
 	});
 
 	it("never silently loses concurrent draft edits: winners land, losers fail loudly", async () => {
-		const created = await $`bun ${CLI_PATH} draft create "Contended draft"`.cwd(TEST_DIR).quiet();
+		const created = await $`${CLI_COMMAND} draft create "Contended draft"`.cwd(TEST_DIR).quiet();
 		const match = created.stdout.toString().match(/Created draft (\S+)/);
 		const draftId = match?.[1];
 		if (!draftId) throw new Error("draft create did not report a draft id");
@@ -410,7 +412,7 @@ describe("atomic draft editing", () => {
 	it.skipIf(process.platform === "win32")(
 		"archive fails fast while an edit holds the draft lock, leaving the draft intact",
 		async () => {
-			const created = await $`bun ${CLI_PATH} draft create "Archive race"`.cwd(TEST_DIR).quiet();
+			const created = await $`${CLI_COMMAND} draft create "Archive race"`.cwd(TEST_DIR).quiet();
 			const match = created.stdout.toString().match(/Created draft (\S+)/);
 			const draftId = match?.[1];
 			if (!draftId) throw new Error("draft create did not report a draft id");
@@ -475,22 +477,22 @@ describe("atomic draft editing", () => {
 			);
 		await writeTwin("draft-1 - Alpha.md", "DRAFT-1", "Alpha");
 		await writeTwin("draft-01 - Alpha twin.md", "DRAFT-01", "Alpha twin");
-		await $`bun ${CLI_PATH} draft create "Unrelated gamma"`.cwd(TEST_DIR).nothrow().quiet();
+		await $`${CLI_COMMAND} draft create "Unrelated gamma"`.cwd(TEST_DIR).nothrow().quiet();
 
 		const rows = await setup.filesystem.listHealthyDrafts();
 		expect(rows.length).toBe(3);
 
-		const unrelated = await $`bun ${CLI_PATH} draft edit DRAFT-2 -t "Gamma edited"`.cwd(TEST_DIR).nothrow().quiet();
+		const unrelated = await $`${CLI_COMMAND} draft edit DRAFT-2 -t "Gamma edited"`.cwd(TEST_DIR).nothrow().quiet();
 		expect(unrelated.exitCode).toBe(0);
 
-		const colliding = await $`bun ${CLI_PATH} draft edit 01 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const colliding = await $`${CLI_COMMAND} draft edit 01 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const collidingOutput = normalizeCliOutput(colliding.stdout.toString() + colliding.stderr.toString());
 		expect(colliding.exitCode).toBe(1);
 		expect(collidingOutput).toContain("is ambiguous");
 	});
 
 	it("promotion fails fast while an edit holds the draft lock, then succeeds cleanly", async () => {
-		const created = await $`bun ${CLI_PATH} draft create "Promotion race"`.cwd(TEST_DIR).quiet();
+		const created = await $`${CLI_COMMAND} draft create "Promotion race"`.cwd(TEST_DIR).quiet();
 		const match = created.stdout.toString().match(/Created draft (\S+)/);
 		const draftId = match?.[1];
 		if (!draftId) throw new Error("draft create did not report a draft id");
@@ -534,7 +536,7 @@ describe("atomic draft editing", () => {
 	});
 
 	it("does not contend with a task that shares the draft's id, but still fails fast on real contention", async () => {
-		await $`bun ${CLI_PATH} draft create "Namespaced draft"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Namespaced draft"`.cwd(TEST_DIR).quiet();
 		const draftReference = await setup.filesystem.resolveDraftReference("DRAFT-1");
 		if (!draftReference) throw new Error("expected draft reference");
 		await setup.createTask(
@@ -650,7 +652,7 @@ describe("draft wizard selection binding", () => {
 			dependencies: [],
 		});
 		await Bun.write(join(draftsDir, "draft-1 - Alpha.md"), drifted);
-		await $`bun ${CLI_PATH} draft create "Beta"`.cwd(TEST_DIR).nothrow().quiet();
+		await $`${CLI_COMMAND} draft create "Beta"`.cwd(TEST_DIR).nothrow().quiet();
 
 		const rows = await core.filesystem.listHealthyDrafts();
 		const alphaRow = rows.find((row) => row.filePath?.includes("draft-1 - Alpha"));
@@ -694,11 +696,11 @@ describe("CLI draft edit auto-commit rename staging", () => {
 	});
 
 	it("stages the old path deletion together with the new path addition on a title rename", async () => {
-		await $`bun ${CLI_PATH} draft create "Original title"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} draft create "Original title"`.cwd(TEST_DIR).quiet();
 		await $`git add .`.cwd(TEST_DIR).quiet();
 		await $`git commit -m seed`.cwd(TEST_DIR).quiet();
 
-		await $`bun ${CLI_PATH} draft edit 1 -t "Renamed title"`.cwd(TEST_DIR).nothrow().quiet();
+		await $`${CLI_COMMAND} draft edit 1 -t "Renamed title"`.cwd(TEST_DIR).nothrow().quiet();
 
 		const status = await $`git status --porcelain`.cwd(TEST_DIR).quiet();
 		expect(status.stdout.toString().trim()).toBe("");
@@ -748,13 +750,13 @@ describe("draft identity sweep", () => {
 		await writeDraftFile("draft-001 - Padded.md", "DRAFT-1", "Padded");
 		const draftsDir = join(TEST_DIR, "backlog", "drafts");
 
-		const renamed = await $`bun ${CLI_PATH} draft edit 1 -t "Converged"`.cwd(TEST_DIR).nothrow().quiet();
+		const renamed = await $`${CLI_COMMAND} draft edit 1 -t "Converged"`.cwd(TEST_DIR).nothrow().quiet();
 		expect(renamed.exitCode).toBe(0);
 
 		const afterRename = (await readdir(draftsDir)).sort();
 		expect(afterRename).toEqual(["draft-001 - Converged.md"]);
 
-		const relabeled = await $`bun ${CLI_PATH} draft edit 1 -a @alex`.cwd(TEST_DIR).nothrow().quiet();
+		const relabeled = await $`${CLI_COMMAND} draft edit 1 -a @alex`.cwd(TEST_DIR).nothrow().quiet();
 		expect(relabeled.exitCode).toBe(0);
 		expect((await readdir(draftsDir)).sort()).toEqual(["draft-001 - Converged.md"]);
 
@@ -770,7 +772,7 @@ describe("draft identity sweep", () => {
 		const brokenYaml = "---\nid: [oops\ntitle: Notes\n---\nbroken yaml";
 		await Bun.write(notesPath, brokenYaml);
 
-		const created = await $`bun ${CLI_PATH} draft create "Fresh work"`.cwd(TEST_DIR).nothrow().quiet();
+		const created = await $`${CLI_COMMAND} draft create "Fresh work"`.cwd(TEST_DIR).nothrow().quiet();
 		expect(created.exitCode).toBe(0);
 		expect(created.stdout.toString()).toContain("Created draft DRAFT-2");
 
@@ -778,7 +780,7 @@ describe("draft identity sweep", () => {
 		expect(await Bun.file(notesPath).text()).toBe(brokenYaml);
 
 		// The unparsable file stays reported as unparsable, never silently consumed.
-		const editBroken = await $`bun ${CLI_PATH} draft edit 1 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const editBroken = await $`${CLI_COMMAND} draft edit 1 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const brokenOutput = normalizeCliOutput(editBroken.stdout.toString() + editBroken.stderr.toString());
 		expect(editBroken.exitCode).toBe(1);
 		expect(brokenOutput).toContain("could not be parsed");
@@ -826,7 +828,7 @@ describe("interactive draft picker collision guard", () => {
 				// The padded twin is unparsable: its numeric identity must still block the picker.
 				await Bun.write(join(draftsDir, "draft-01 - Alpha.md"), "---\nid: [oops\ntitle: Alpha\n---\nbroken");
 
-				const script = `log_user 1\nspawn {${CLI_RUNTIME}} {${CLI_PATH}} draft edit\nset timeout 15\nsleep 3\nsend "\\x03"\nexpect {\n\teof {}\n\ttimeout { exit 2 }\n}`;
+				const script = `log_user 1\nspawn ${ESCAPED_CLI_COMMAND} draft edit\nset timeout 15\nsleep 3\nsend "\\x03"\nexpect {\n\teof {}\n\ttimeout { exit 2 }\n}`;
 				const proc = Bun.spawnSync({
 					cmd: ["expect", "-c", script],
 					env: { ...process.env, TERM: "xterm", BACKLOG_CWD: TEST_DIR },
@@ -887,7 +889,7 @@ describe("draft identity edge cases", () => {
 
 		expect(findDuplicateDraftFilenameGroups(["draft-1.1 - Sub.md", "draft-1.01 - Twin.md"])).toHaveLength(1);
 
-		const edit = await $`bun ${CLI_PATH} draft edit 1.1 -t X`.cwd(TEST_DIR).nothrow().quiet();
+		const edit = await $`${CLI_COMMAND} draft edit 1.1 -t X`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(edit.stdout.toString() + edit.stderr.toString());
 		expect(edit.exitCode).toBe(1);
 		expect(output).toContain("is ambiguous");
@@ -904,7 +906,7 @@ describe("draft identity edge cases", () => {
 		const foreignContent = "---\nid: DRAFT-1\ntitle: Foreign\nstatus: Draft\n---\nforeign body";
 		await Bun.write(foreignPath, foreignContent);
 
-		const result = await $`bun ${CLI_PATH} draft edit ${foreignPath} --title Hijacked`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit ${foreignPath} --title Hijacked`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("Invalid draft id");
@@ -941,7 +943,7 @@ describe("draft identity edge cases", () => {
 			}),
 		);
 
-		const result = await $`bun ${CLI_PATH} draft edit ${alphaPath} --title Hijacked`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit ${alphaPath} --title Hijacked`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(result.stdout.toString() + result.stderr.toString());
 		expect(result.exitCode).toBe(1);
 		expect(output).toContain("is ambiguous");
@@ -953,7 +955,7 @@ describe("draft identity edge cases", () => {
 	});
 
 	it("still accepts an in-drafts-dir path for a unique draft", async () => {
-		await $`bun ${CLI_PATH} draft create "Solo draft"`.cwd(TEST_DIR).nothrow().quiet();
+		await $`${CLI_COMMAND} draft create "Solo draft"`.cwd(TEST_DIR).nothrow().quiet();
 		const draftsDir = join(TEST_DIR, "backlog", "drafts");
 		const soloPath = (await readdir(draftsDir))
 			.filter((file) => file.endsWith(".md"))
@@ -961,7 +963,7 @@ describe("draft identity edge cases", () => {
 			.at(0);
 		if (!soloPath) throw new Error("expected the created draft file");
 
-		const result = await $`bun ${CLI_PATH} draft edit ${soloPath} -a @alex`.cwd(TEST_DIR).nothrow().quiet();
+		const result = await $`${CLI_COMMAND} draft edit ${soloPath} -a @alex`.cwd(TEST_DIR).nothrow().quiet();
 		expect(result.exitCode).toBe(0);
 
 		const core = new Core(TEST_DIR);
@@ -969,7 +971,7 @@ describe("draft identity edge cases", () => {
 	});
 
 	it("lists the real supported fields in draft edit help", async () => {
-		const help = await $`bun ${CLI_PATH} draft edit --help`.cwd(TEST_DIR).nothrow().quiet();
+		const help = await $`${CLI_COMMAND} draft edit --help`.cwd(TEST_DIR).nothrow().quiet();
 		const output = normalizeCliOutput(help.stdout.toString());
 		for (const flag of [
 			"--title",

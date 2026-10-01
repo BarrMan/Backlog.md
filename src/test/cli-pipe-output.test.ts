@@ -2,10 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup, withTimeout } from "./test-utils.ts";
 
-const CLI = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 const directory = createUniqueTestDir("cli-pipe-output");
 const cases = [
 	{ name: "grouped plain with its window footer", args: ["--plain", "--max-count", "20"] },
@@ -41,7 +41,7 @@ describe("finite CLI output to a delayed pipe reader", () => {
 
 	it.each(cases)("preserves complete $name output", async ({ name, args }) => {
 		const outputPath = join(directory, `${name}.txt`);
-		const fileWriter = Bun.spawn(["bun", CLI, "task", "list", ...args], {
+		const fileWriter = Bun.spawn([...CLI_COMMAND, "task", "list", ...args], {
 			cwd: directory,
 			stdin: "ignore",
 			stdout: Bun.file(outputPath),
@@ -63,7 +63,7 @@ describe("finite CLI output to a delayed pipe reader", () => {
 		expect(expected.toString()).toContain("TASK-24");
 		if (args.includes("--max-count")) expect(expected.toString()).toContain("Showing 1-20 of 24 items.");
 
-		const child = Bun.spawn(["bun", CLI, "task", "list", ...args], {
+		const child = Bun.spawn([...CLI_COMMAND, "task", "list", ...args], {
 			cwd: directory,
 			stdin: "ignore",
 			stdout: "pipe",

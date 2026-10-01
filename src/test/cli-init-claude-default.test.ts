@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 let TEST_DIR: string;
 
@@ -22,7 +22,7 @@ describe("init Claude agent default", () => {
 
 	it("does not install Claude agent by default in non-interactive mode", async () => {
 		// Use defaults, do not pass --install-claude-agent
-		const result = await $`bun ${CLI_PATH} init MyProj --defaults`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} init MyProj --defaults`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		// Verify that agent file was not created
@@ -31,7 +31,7 @@ describe("init Claude agent default", () => {
 	});
 
 	it("installs Claude agent when flag is true", async () => {
-		const result = await $`bun ${CLI_PATH} init MyProj --defaults --install-claude-agent true`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} init MyProj --defaults --install-claude-agent true`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 
 		const agentExists = await Bun.file(join(TEST_DIR, ".claude", "agents", "project-manager-backlog.md")).exists();

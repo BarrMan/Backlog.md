@@ -53,6 +53,9 @@ export const DEFAULT_STATUSES = [DEFAULT_TODO_STATUS, DEFAULT_IN_PROGRESS_STATUS
  */
 export const FALLBACK_STATUS = DEFAULT_TODO_STATUS;
 
+/** Status reserved for tasks stored as drafts. */
+export const DRAFT_STATUS = "Draft";
+
 /**
  * Default task types, used when no `types` are configured
  */

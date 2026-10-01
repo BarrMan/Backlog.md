@@ -4,7 +4,15 @@ import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import type { AgentSessionRunner } from "./session-process.ts";
 import { slug } from "./session-utils.ts";
-import type { AgentSession, HandoffRequest, TaskSessions } from "./types.ts";
+import {
+	AGENT_BOOTSTRAP_TYPES,
+	AGENT_CONFIG_SCOPES,
+	AGENT_SESSION_STATUS,
+	type AgentSession,
+	HANDOFF_STATUS,
+	type HandoffRequest,
+	type TaskSessions,
+} from "./types.ts";
 
 export interface SessionState extends TaskSessions {
 	version: 1;
@@ -32,30 +40,27 @@ function isPreset(value: unknown): boolean {
 		isStringRecord(value.env) &&
 		typeof value.prepare === "string" &&
 		typeof value.worktree === "boolean" &&
-		["opencode", "claude", "codex", "gemini", "antigravity", "prompt"].includes(String(value.bootstrap))
+		AGENT_BOOTSTRAP_TYPES.includes(value.bootstrap as (typeof AGENT_BOOTSTRAP_TYPES)[number])
 	);
 }
 
 function isSession(value: unknown, taskId: string): value is AgentSession {
 	if (!isRecord(value)) return false;
-	if (
-		value.taskId !== taskId ||
-		!["starting", "running", "stopped", "handed-off", "failed"].includes(String(value.status))
-	)
+	if (value.taskId !== taskId || !Object.values(AGENT_SESSION_STATUS).includes(value.status as AgentSession["status"]))
 		return false;
 	for (const key of ["id", "preset", "configScope", "tmuxName", "cwd", "createdAt", "outputPath", "bootstrapPath"]) {
 		if (typeof value[key] !== "string") return false;
 	}
 	return (
 		(value.presetSnapshot === undefined || isPreset(value.presetSnapshot)) &&
-		["root", "project", "card"].includes(String(value.configScope)) &&
+		AGENT_CONFIG_SCOPES.includes(value.configScope as AgentSession["configScope"]) &&
 		["endedAt", "predecessorId", "error"].every((key) => value[key] === undefined || typeof value[key] === "string") &&
 		(value.ownerPid === undefined || typeof value.ownerPid === "number")
 	);
 }
 
 function isHandoff(value: unknown): value is HandoffRequest {
-	if (!isRecord(value) || !["requested", "ready", "replacing", "failed", "completed"].includes(String(value.status)))
+	if (!isRecord(value) || !Object.values(HANDOFF_STATUS).includes(value.status as HandoffRequest["status"]))
 		return false;
 	if (!["id", "sessionId", "documentPath", "createdAt"].every((key) => typeof value[key] === "string")) return false;
 	if (!["dispatchedAt", "error"].every((key) => value[key] === undefined || typeof value[key] === "string"))

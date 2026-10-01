@@ -47,7 +47,6 @@ import {
 import { TaskViewerRendering } from "./rendering.ts";
 import { TaskViewerSession } from "./session.ts";
 
-export { createTaskPopup } from "../shared/task-popup.ts";
 export { formatTaskViewerListItem, generateDetailContent } from "./detail-content.ts";
 export {
 	type PendingSearchWrap,

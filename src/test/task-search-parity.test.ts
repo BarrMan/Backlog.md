@@ -14,7 +14,7 @@ import {
 	createTaskSearchIndex,
 	type TaskFilterOptions,
 } from "../utils/task-search.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 /**
@@ -229,7 +229,7 @@ describe("labelMatch semantics", () => {
  * drive the real CLI and MCP surfaces so the wiring itself is pinned.
  */
 describe("filter wiring across surfaces", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 	let testDir: string;
 	let core: Core;
 	let mcpServer: McpServer;
@@ -288,12 +288,12 @@ describe("filter wiring across surfaces", () => {
 	});
 
 	it("requires every label through the CLI task list --labels flag", async () => {
-		const both = await $`bun ${cliPath} task list --labels backend,infrastructure --plain`.cwd(testDir).quiet();
+		const both = await $`${cliCommand} task list --labels backend,infrastructure --plain`.cwd(testDir).quiet();
 		expect(both.exitCode).toBe(0);
 		expect(both.stdout.toString()).toContain("Wiring both labels");
 		expect(both.stdout.toString()).not.toContain("Wiring one label");
 
-		const single = await $`bun ${cliPath} task list --labels backend --plain`.cwd(testDir).quiet();
+		const single = await $`${cliCommand} task list --labels backend --plain`.cwd(testDir).quiet();
 		expect(single.exitCode).toBe(0);
 		expect(single.stdout.toString()).toContain("Wiring both labels");
 		expect(single.stdout.toString()).toContain("Wiring one label");
@@ -316,12 +316,12 @@ describe("filter wiring across surfaces", () => {
 		expect(mcpOutput).not.toContain("Wiring one label");
 		expect(mcpOutput).not.toContain("Wiring no labels");
 
-		const list = await $`bun ${cliPath} task list --project web --plain`.cwd(testDir).quiet();
+		const list = await $`${cliCommand} task list --project web --plain`.cwd(testDir).quiet();
 		expect(list.exitCode).toBe(0);
 		expect(list.stdout.toString()).toContain("Wiring both labels");
 		expect(list.stdout.toString()).not.toContain("Wiring one label");
 
-		const search = await $`bun ${cliPath} search "Wiring" --project web --plain`.cwd(testDir).quiet();
+		const search = await $`${cliCommand} search "Wiring" --project web --plain`.cwd(testDir).quiet();
 		expect(search.exitCode).toBe(0);
 		expect(search.stdout.toString()).toContain("Wiring both labels");
 		expect(search.stdout.toString()).not.toContain("Wiring one label");

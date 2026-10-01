@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { FileSystem } from "../file-system/operations.ts";
 import { serializeDecision, serializeDocument } from "../markdown/serializer.ts";
 import { BacklogServer } from "../server/index.ts";
-import type { Document } from "../types/index.ts";
+import type { Decision, Document } from "../types/index.ts";
 import { createUniqueTestDir, scopedFetch as fetch, retry, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
@@ -177,6 +177,45 @@ describe("BacklogServer document endpoints", () => {
 		expect(invalidUpdateTags.status).toBe(400);
 		expect(await invalidUpdateTags.json()).toMatchObject({ code: "VALIDATION_ERROR" });
 	});
+
+	it("updates decision fields without treating the opaque body as decision content", async () => {
+		const filesystem = new FileSystem(TEST_DIR);
+		const initial: Decision = {
+			id: "decision-1",
+			title: "Choose storage",
+			date: "2026-09-30",
+			status: "accepted",
+			context: "Original context",
+			decision: "Original decision",
+			consequences: "Original consequences",
+			alternatives: "Original alternative",
+			rawContent: "## Notes\n\nOpaque body",
+		};
+		await filesystem.saveDecision(initial);
+
+		const response = await fetch(`http://127.0.0.1:${serverPort}/api/decisions/decision-1`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				title: "Choose YAML storage",
+				context: "Updated **context**",
+				decision: "Updated decision",
+				consequences: "Updated consequences",
+				alternatives: "Keep legacy bodies",
+			}),
+		});
+		expect(response.status).toBe(200);
+
+		const updated = await fetchJson<Decision>("/api/decisions/decision-1");
+		expect(updated).toMatchObject({
+			title: "Choose YAML storage",
+			context: "Updated **context**",
+			decision: "Updated decision",
+			consequences: "Updated consequences",
+			alternatives: "Keep legacy bodies",
+			rawContent: "## Notes\n\nOpaque body",
+		});
+	});
 });
 
 // The second file's raw frontmatter ID is a parameter: `doc-01` differs from `doc-1` as a raw
@@ -269,8 +308,8 @@ describe("BacklogServer ambiguous content identity", () => {
 
 		const decisionResponse = await fetch(`http://127.0.0.1:${serverPort}/api/decisions/decision-1`, {
 			method: "PUT",
-			headers: { "Content-Type": "text/plain" },
-			body: "## Context\n\nChanged\n",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ title: "Changed", context: "Changed", decision: "", consequences: "" }),
 		});
 		expect(decisionResponse.status).toBe(409);
 		expect(await decisionResponse.text()).toContain("Decision ID decision-1 is ambiguous");

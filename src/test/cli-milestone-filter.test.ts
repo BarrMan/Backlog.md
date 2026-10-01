@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let ID_MILESTONE_ID: string;
 
 describe("CLI milestone filtering", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-milestone-filter");
@@ -115,7 +115,7 @@ describe("CLI milestone filtering", () => {
 	});
 
 	it("filters by milestone with case-insensitive matching", async () => {
-		const result = await $`bun ${cliPath} task list --milestone RELEASE-1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --milestone RELEASE-1 --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const output = result.stdout.toString();
@@ -129,7 +129,7 @@ describe("CLI milestone filtering", () => {
 	});
 
 	it("supports -m shorthand and combines milestone with status filter", async () => {
-		const result = await $`bun ${cliPath} task list -m release-1 --status "To Do" --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list -m release-1 --status "To Do" --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const output = result.stdout.toString();
@@ -143,7 +143,7 @@ describe("CLI milestone filtering", () => {
 	});
 
 	it("matches closest milestone for partial and typo inputs", async () => {
-		const typoResult = await $`bun ${cliPath} task list --milestone releas-1 --plain`.cwd(TEST_DIR).quiet();
+		const typoResult = await $`${cliCommand} task list --milestone releas-1 --plain`.cwd(TEST_DIR).quiet();
 		expect(typoResult.exitCode).toBe(0);
 		const typoOutput = typoResult.stdout.toString();
 
@@ -153,7 +153,7 @@ describe("CLI milestone filtering", () => {
 		expect(typoOutput).not.toContain("TASK-4 - No milestone task");
 		expect(typoOutput).not.toContain("TASK-5 - Roadmap milestone task");
 
-		const partialResult = await $`bun ${cliPath} task list --milestone roadmp --plain`.cwd(TEST_DIR).quiet();
+		const partialResult = await $`${cliCommand} task list --milestone roadmp --plain`.cwd(TEST_DIR).quiet();
 		expect(partialResult.exitCode).toBe(0);
 		const partialOutput = partialResult.stdout.toString();
 
@@ -166,7 +166,7 @@ describe("CLI milestone filtering", () => {
 	});
 
 	it("matches milestone title when tasks store milestone IDs", async () => {
-		const result = await $`bun ${cliPath} task list -m new --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list -m new --plain`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 		const output = result.stdout.toString();
 
@@ -183,7 +183,7 @@ describe("CLI milestone filtering", () => {
 		const queries = [numericId, ID_MILESTONE_ID, ID_MILESTONE_ID.toUpperCase()];
 
 		for (const query of queries) {
-			const plainResult = await $`bun ${cliPath} task list --milestone ${query} --plain`.cwd(TEST_DIR).quiet();
+			const plainResult = await $`${cliCommand} task list --milestone ${query} --plain`.cwd(TEST_DIR).quiet();
 			expect(plainResult.exitCode).toBe(0);
 			const output = plainResult.stdout.toString();
 
@@ -194,7 +194,7 @@ describe("CLI milestone filtering", () => {
 			expect(output).not.toContain("TASK-4 - No milestone task");
 			expect(output).not.toContain("TASK-5 - Roadmap milestone task");
 
-			const jsonResult = await $`bun ${cliPath} task list --milestone ${query} --json`.cwd(TEST_DIR).quiet();
+			const jsonResult = await $`${cliCommand} task list --milestone ${query} --json`.cwd(TEST_DIR).quiet();
 			expect(jsonResult.exitCode).toBe(0);
 			const parsed = JSON.parse(jsonResult.stdout.toString()) as { tasks: Array<{ id: string }> };
 			expect(parsed.tasks.map((task) => task.id)).toEqual(["TASK-6"]);
@@ -202,7 +202,7 @@ describe("CLI milestone filtering", () => {
 	}, 10_000);
 
 	it("returns no tasks when the milestone query matches no milestone", async () => {
-		const result = await $`bun ${cliPath} task list --milestone zzz-unrelated-milestone --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --milestone zzz-unrelated-milestone --plain`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 		const output = result.stdout.toString();
 
@@ -212,7 +212,7 @@ describe("CLI milestone filtering", () => {
 	});
 
 	it("preserves existing listing behavior when milestone filter is omitted", async () => {
-		const result = await $`bun ${cliPath} task list --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${cliCommand} task list --plain`.cwd(TEST_DIR).quiet();
 
 		expect(result.exitCode).toBe(0);
 		const output = result.stdout.toString();

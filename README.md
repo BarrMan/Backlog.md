@@ -122,6 +122,28 @@ For Cursor with CLI instructions, select AGENTS.md or pass `--agent-instructions
 
 Everything is stored as human-readable Markdown in a project-local backlog folder such as `backlog/`, `.backlog/`, or a custom project-relative path configured through `backlog.config.yml` (e.g. `backlog_directory: my-backlog`). Task IDs use a configurable prefix (`backlog init --task-prefix`): the default produces `TASK-1`-style IDs, while this repository uses `back`, so examples below show `BACK-1`-style IDs. Git is optional: `backlog init --no-git` creates a filesystem-only project.
 
+### Structured record format
+
+Every application-owned structured field is stored in versioned YAML frontmatter. Tasks and drafts use `task_schema_version: 2`, decisions use `decision_schema_version: 1`, and milestones use `milestone_schema_version: 1`. The Markdown body is opaque free-form content.
+
+```yaml
+---
+task_schema_version: 2
+id: BACK-1
+title: Add project search
+status: To Do
+description: |
+  Search tasks, documents, and decisions from one command.
+acceptance_criteria:
+  - text: Search returns matching tasks
+    checked: false
+---
+
+# Working notes
+
+- This heading and checkbox are body content, not task fields.
+```
+
 ---
 
 ## Working with AI agents

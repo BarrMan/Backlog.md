@@ -1,6 +1,6 @@
 import type { Core } from "../../core/backlog.ts";
 import type { Task, TaskCreateInput } from "../../types/index.ts";
-import type { Board, BoardMoveCommit } from "./board.ts";
+import type { Board, BoardMoveCommit } from "./models/board.ts";
 
 export type BoardMoveFeedback =
 	| { status: "idle" }

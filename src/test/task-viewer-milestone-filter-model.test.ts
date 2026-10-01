@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Milestone } from "../types/index.ts";
-import { buildTaskViewerMilestoneFilterModel } from "../ui/task-viewer-with-search.ts";
+import { buildTaskViewerMilestoneFilterModel } from "../ui/task-viewer/controller.ts";
 
 describe("task viewer milestone filter model", () => {
 	it("builds filter options from active milestones", () => {

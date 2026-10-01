@@ -1,7 +1,6 @@
 import type { Task } from "../types/index.ts";
-import { escapeRegex, extractAnyPrefix, normalizeId } from "./prefix-config.ts";
+import { DEFAULT_TASK_PREFIX, escapeRegex, extractAnyPrefix, normalizeId } from "./prefix-config.ts";
 
-const DEFAULT_TASK_PREFIX = "task";
 const NUMERIC_TASK_ID_PATTERN = /^(?:[a-zA-Z]+-)?[0-9]+(?:\.[0-9]+)*$/;
 const LEGACY_TASK_ID_PATTERN = /^[a-zA-Z]+-[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*$/;
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { BranchTaskLoader } from "../core/task-loader.ts";
 import type { GitOperations } from "../git/operations.ts";
+import { serializeTask } from "../markdown/serializer.ts";
 import type { BacklogConfig } from "../types/index.ts";
 
 const config: BacklogConfig = {
@@ -36,19 +37,16 @@ describe("BranchTaskLoader resilience", () => {
 			showFile: async (commit: string, path: string) => {
 				expect(commit).toBe(goodCommit);
 				expect(path).toBe(taskPath);
-				return `---
-id: TASK-17
-title: Healthy task
-status: To Do
-assignee: []
-created_date: 2026-08-10
-labels: []
-dependencies: []
----
-
-## Description
-
-Loaded despite the neighboring branch failure.`;
+				return serializeTask({
+					id: "TASK-17",
+					title: "Healthy task",
+					status: "To Do",
+					assignee: [],
+					createdDate: "2026-08-10",
+					labels: [],
+					dependencies: [],
+					rawContent: "Loaded despite the neighboring branch failure.",
+				});
 			},
 		} as unknown as GitOperations;
 
@@ -103,19 +101,16 @@ Loaded despite the neighboring branch failure.`;
 				expect(commit).toBe(featureCommit);
 				expect(path).toBe(taskPath);
 				blobCalls += 1;
-				return `---
-id: TASK-18
-title: Retried task
-status: To Do
-assignee: []
-created_date: 2026-08-10
-labels: []
-dependencies: []
----
-
-## Description
-
-Loaded after retrying the failed history query.`;
+				return serializeTask({
+					id: "TASK-18",
+					title: "Retried task",
+					status: "To Do",
+					assignee: [],
+					createdDate: "2026-08-10",
+					labels: [],
+					dependencies: [],
+					rawContent: "Loaded after retrying the failed history query.",
+				});
 			},
 		} as unknown as GitOperations;
 		const loader = new BranchTaskLoader(git);
@@ -159,19 +154,16 @@ Loaded after retrying the failed history query.`;
 			showFile: async () => {
 				blobCalls += 1;
 				if (blobCalls === 1) throw new Error("blob temporarily unavailable");
-				return `---
-id: TASK-19
-title: Retried hydration
-status: To Do
-assignee: []
-created_date: 2026-08-10
-labels: []
-dependencies: []
----
-
-## Description
-
-Loaded after retrying the failed blob read.`;
+				return serializeTask({
+					id: "TASK-19",
+					title: "Retried hydration",
+					status: "To Do",
+					assignee: [],
+					createdDate: "2026-08-10",
+					labels: [],
+					dependencies: [],
+					rawContent: "Loaded after retrying the failed blob read.",
+				});
 			},
 		} as unknown as GitOperations;
 		const loader = new BranchTaskLoader(git);

@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import { BACKLOG_CWD_ENV } from "../utils/runtime-cwd.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { safeCleanup, withTimeout } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 let testDir: string;
 
 async function initWithClosedInput(args: string[]) {
-	const child = Bun.spawn([process.execPath, CLI_PATH, "init", ...args], {
+	const child = Bun.spawn([...CLI_COMMAND, "init", ...args], {
 		cwd: testDir,
 		env: { ...process.env, [BACKLOG_CWD_ENV]: undefined },
 		stdin: "ignore",

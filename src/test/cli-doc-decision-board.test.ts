@@ -5,11 +5,11 @@ import { $ } from "bun";
 import { Core } from "../index.ts";
 import { parseTask } from "../markdown/parser.ts";
 import type { Decision, Document, Task } from "../types/index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 
 describe("CLI Integration", () => {
 	beforeEach(async () => {
@@ -46,7 +46,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should create documents in a subpath and print the persisted path", async () => {
-			const result = await $`bun ${CLI_PATH} doc create "Setup Guide" -p guides/setup`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} doc create "Setup Guide" -p guides/setup`.cwd(TEST_DIR).quiet();
 			expect(result.exitCode).toBe(0);
 			const stdout = result.stdout.toString();
 			expect(stdout).toContain("Created document doc-1");
@@ -58,7 +58,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should accept --plain on doc create and print the plain result", async () => {
-			const result = await $`bun ${CLI_PATH} doc create "Setup Guide" --plain`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await $`${CLI_COMMAND} doc create "Setup Guide" --plain`.cwd(TEST_DIR).quiet().nothrow();
 			expect(result.exitCode).toBe(0);
 			expect(result.stderr.toString()).not.toContain("unknown option");
 			const stdout = result.stdout.toString();
@@ -67,7 +67,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should reject unsafe document paths", async () => {
-			const result = await $`bun ${CLI_PATH} doc create "Unsafe" -p ../outside`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await $`${CLI_COMMAND} doc create "Unsafe" -p ../outside`.cwd(TEST_DIR).quiet().nothrow();
 			expect(result.exitCode).not.toBe(0);
 			expect(result.stderr.toString()).toContain("Document path cannot include traversal segments.");
 		});
@@ -89,7 +89,7 @@ describe("CLI Integration", () => {
 
 			const updatedContent = "# Updated\n\nRun install steps.";
 			const result =
-				await $`bun ${CLI_PATH} doc update doc-1 --title "Install Runbook" --content ${updatedContent} -t design --tags ops,runbook -p runbooks`
+				await $`${CLI_COMMAND} doc update doc-1 --title "Install Runbook" --content ${updatedContent} -t design --tags ops,runbook -p runbooks`
 					.cwd(TEST_DIR)
 					.quiet();
 			expect(result.exitCode).toBe(0);
@@ -102,7 +102,7 @@ describe("CLI Integration", () => {
 			expect(updated?.type as string).toBe("design");
 			expect(updated?.tags).toEqual(["ops", "runbook"]);
 			expect(updated?.path).toBe("runbooks/doc-1 - Install-Runbook.md");
-			expect(updated?.rawContent).toBe(updatedContent);
+			expect(updated?.rawContent.trimEnd()).toBe(updatedContent);
 		});
 
 		it("should preserve omitted document fields when updating", async () => {
@@ -120,7 +120,7 @@ describe("CLI Integration", () => {
 				"guides",
 			);
 
-			await $`bun ${CLI_PATH} doc update doc-1 --title "Setup Handbook"`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} doc update doc-1 --title "Setup Handbook"`.cwd(TEST_DIR).quiet();
 
 			const docs = await core.filesystem.listDocuments();
 			const updated = docs.find((doc) => doc.id === "doc-1");
@@ -128,7 +128,7 @@ describe("CLI Integration", () => {
 			expect(updated?.type).toBe("guide");
 			expect(updated?.tags).toEqual(["setup", "guide"]);
 			expect(updated?.path).toBe("guides/doc-1 - Setup-Handbook.md");
-			expect(updated?.rawContent).toBe("Keep this content");
+			expect(updated?.rawContent.trimEnd()).toBe("Keep this content");
 		});
 
 		it("should reject invalid document update inputs", async () => {
@@ -144,18 +144,18 @@ describe("CLI Integration", () => {
 				false,
 			);
 
-			const missing = await $`bun ${CLI_PATH} doc update doc-404 --content "Nope"`.cwd(TEST_DIR).quiet().nothrow();
+			const missing = await $`${CLI_COMMAND} doc update doc-404 --content "Nope"`.cwd(TEST_DIR).quiet().nothrow();
 			expect(missing.exitCode).not.toBe(0);
 			expect(missing.stderr.toString()).toContain("Document not found: doc-404");
 
-			const invalidType = await $`bun ${CLI_PATH} doc update doc-1 --content "Nope" -t invalid`
+			const invalidType = await $`${CLI_COMMAND} doc update doc-1 --content "Nope" -t invalid`
 				.cwd(TEST_DIR)
 				.quiet()
 				.nothrow();
 			expect(invalidType.exitCode).not.toBe(0);
 			expect(invalidType.stderr.toString()).toContain("Document type must be one of: guide, reference, design, other.");
 
-			const unsafePath = await $`bun ${CLI_PATH} doc update doc-1 --content "Nope" -p ../outside`
+			const unsafePath = await $`${CLI_COMMAND} doc update doc-1 --content "Nope" -p ../outside`
 				.cwd(TEST_DIR)
 				.quiet()
 				.nothrow();
@@ -182,7 +182,7 @@ describe("CLI Integration", () => {
 		});
 
 		it("should accept --plain when creating a decision", async () => {
-			const result = await $`bun ${CLI_PATH} decision create "Choose Stack" --plain`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await $`${CLI_COMMAND} decision create "Choose Stack" --plain`.cwd(TEST_DIR).quiet().nothrow();
 			expect(result.exitCode).toBe(0);
 			expect(result.stderr.toString()).toBe("");
 
@@ -197,10 +197,10 @@ describe("CLI Integration", () => {
 		});
 
 		it("should list decisions with id, title, and status as plain text", async () => {
-			await $`bun ${CLI_PATH} decision create "Choose Stack" -s accepted`.cwd(TEST_DIR).quiet();
-			await $`bun ${CLI_PATH} decision create "Adopt Free Form Status" -s "Under Review"`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} decision create "Choose Stack" -s accepted`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} decision create "Adopt Free Form Status" -s "Under Review"`.cwd(TEST_DIR).quiet();
 
-			const result = await $`bun ${CLI_PATH} decision list --plain`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} decision list --plain`.cwd(TEST_DIR).quiet();
 			expect(result.exitCode).toBe(0);
 			const lines = result.stdout.toString().trim().split("\n");
 			expect(lines).toEqual([
@@ -210,19 +210,19 @@ describe("CLI Integration", () => {
 		});
 
 		it("should default to text output when stdout is not a TTY", async () => {
-			await $`bun ${CLI_PATH} decision create "Choose Stack"`.cwd(TEST_DIR).quiet();
+			await $`${CLI_COMMAND} decision create "Choose Stack"`.cwd(TEST_DIR).quiet();
 
-			const result = await $`bun ${CLI_PATH} decision list`.cwd(TEST_DIR).quiet();
+			const result = await $`${CLI_COMMAND} decision list`.cwd(TEST_DIR).quiet();
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout.toString().trim()).toBe("decision-1 - Choose Stack (proposed)");
 		});
 
 		it("should report an empty decision log in both output modes", async () => {
-			const plain = await $`bun ${CLI_PATH} decision list --plain`.cwd(TEST_DIR).quiet();
+			const plain = await $`${CLI_COMMAND} decision list --plain`.cwd(TEST_DIR).quiet();
 			expect(plain.exitCode).toBe(0);
 			expect(plain.stdout.toString().trim()).toBe("No decisions found.");
 
-			const json = await $`bun ${CLI_PATH} decision list --json`.cwd(TEST_DIR).quiet();
+			const json = await $`${CLI_COMMAND} decision list --json`.cwd(TEST_DIR).quiet();
 			expect(json.exitCode).toBe(0);
 			expect(JSON.parse(json.stdout.toString())).toEqual({
 				schemaVersion: 1,
@@ -257,7 +257,7 @@ describe("CLI Integration", () => {
 			);
 
 			// Piping makes stdout a non-TTY, which is the plain-text board fallback.
-			const result = await $`bun ${CLI_PATH} board`.cwd(TEST_DIR).quiet().nothrow();
+			const result = await $`${CLI_COMMAND} board`.cwd(TEST_DIR).quiet().nothrow();
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout.toString()).toContain("Project: Board Test Project");
 		});

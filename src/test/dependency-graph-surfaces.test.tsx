@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { toTaskDetail } from "../core/task-detail.ts";
 import type { Task } from "../types/index.ts";
-import { generateDetailContent, mergeDependencyCorpusTasks } from "../ui/task-viewer-with-search.ts";
+import { generateDetailContent, mergeDependencyCorpusTasks } from "../ui/task-viewer/controller.ts";
 
 const STATUSES = ["To Do", "In Progress", "Done"] as const;
 

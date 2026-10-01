@@ -4,13 +4,15 @@ import { type BacklogConfig, EntityType, type PrefixConfig } from "../types/inde
  * Default prefix configuration for tasks.
  */
 export const DEFAULT_PREFIX_CONFIG: PrefixConfig = {
-	task: "task",
+	task: EntityType.Task,
 };
+
+export const DEFAULT_TASK_PREFIX = DEFAULT_PREFIX_CONFIG.task;
 
 /**
  * Hardcoded draft prefix. Not configurable - always "draft".
  */
-export const DRAFT_PREFIX = "draft";
+export const DRAFT_PREFIX = EntityType.Draft;
 
 /**
  * Hardcoded document prefix. Not configurable - always "doc".

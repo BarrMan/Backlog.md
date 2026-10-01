@@ -1,4 +1,5 @@
 import type { Milestone } from "../../types";
+import { TASK_FIELD_LABELS } from "../../ui/task-labels";
 import { getMilestoneLabel } from "../utils/milestones";
 import LabelFilterDropdown from "./LabelFilterDropdown";
 
@@ -71,7 +72,7 @@ export function TaskListActionHeader(props: TaskListActionHeaderProps) {
 						selectedLabels={statusFilter}
 						onChange={onStatusChange}
 						menuId="task-list-status-menu"
-						label="Status"
+						label={TASK_FIELD_LABELS.STATUS}
 						emptyLabel="All"
 						noOptionsLabel="No statuses"
 						clearLabel="Clear status filter"

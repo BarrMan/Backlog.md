@@ -1,4 +1,5 @@
 ---
+task_schema_version: 2
 id: BACK-662
 title: Add references and modifiedFiles to task list --json
 status: Done
@@ -10,42 +11,48 @@ labels:
   - cli
 dependencies: []
 ordinal: 294000
+description: >-
+  External tools consuming `backlog task list --json` need each task's
+  references and modifiedFiles without fetching tasks one by one. Add both
+  arrays to the task summary JSON projection. Additive under schemaVersion 1;
+  task view --json already carries them.
+implementation_plan: >-
+  Add references and modifiedFiles to TaskSummaryJson (shared by list and search
+  task rows), remove the duplicate declarations from TaskDetailsJson, populate
+  in toTaskSummaryJson, update the list test and CLI-INSTRUCTIONS field
+  enumeration.
+implementation_notes: >-
+  Implemented in json-output.ts by moving the two fields into the shared summary
+  projection; view payload content unchanged. Docs updated. Empty case covered
+  by a dedicated assertion on a task without references or modified files.
+final_summary: >-
+  Added references and modifiedFiles to the shared task summary JSON projection
+  (list and search task rows), removed the duplicate declarations from the
+  details type, and updated CLI-INSTRUCTIONS.md. Verified with bunx tsc
+  --noEmit, bun run check ., and src/test/cli-json-output.test.ts (15 tests:
+  populated arrays pinned in the list envelope, empty arrays pinned for a bare
+  task, view payload unchanged).
+acceptance_criteria:
+  - index: 1
+    text: >-
+      Each task in `task list --json` includes references and modifiedFiles
+      arrays (empty arrays when unset)
+    checked: true
+  - index: 2
+    text: task view --json output is unchanged
+    checked: true
+  - index: 3
+    text: Tests cover populated and empty cases
+    checked: true
+definition_of_done:
+  - index: 1
+    text: bunx tsc --noEmit passes when TypeScript touched
+    checked: true
+  - index: 2
+    text: bun run check . passes when formatting/linting touched
+    checked: true
+  - index: 3
+    text: bun test (or scoped test) passes
+    checked: true
+comments: []
 ---
-
-## Description
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
-External tools consuming `backlog task list --json` need each task's references and modifiedFiles without fetching tasks one by one. Add both arrays to the task summary JSON projection. Additive under schemaVersion 1; task view --json already carries them.
-<!-- SECTION:DESCRIPTION:END -->
-
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 Each task in `task list --json` includes references and modifiedFiles arrays (empty arrays when unset)
-- [x] #2 task view --json output is unchanged
-- [x] #3 Tests cover populated and empty cases
-<!-- AC:END -->
-
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [x] #1 bunx tsc --noEmit passes when TypeScript touched
-- [x] #2 bun run check . passes when formatting/linting touched
-- [x] #3 bun test (or scoped test) passes
-<!-- DOD:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-Add references and modifiedFiles to TaskSummaryJson (shared by list and search task rows), remove the duplicate declarations from TaskDetailsJson, populate in toTaskSummaryJson, update the list test and CLI-INSTRUCTIONS field enumeration.
-<!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Implemented in json-output.ts by moving the two fields into the shared summary projection; view payload content unchanged. Docs updated. Empty case covered by a dedicated assertion on a task without references or modified files.
-<!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added references and modifiedFiles to the shared task summary JSON projection (list and search task rows), removed the duplicate declarations from the details type, and updated CLI-INSTRUCTIONS.md. Verified with bunx tsc --noEmit, bun run check ., and src/test/cli-json-output.test.ts (15 tests: populated arrays pinned in the list envelope, empty arrays pinned for a bare task, view payload unchanged).
-<!-- SECTION:FINAL_SUMMARY:END -->

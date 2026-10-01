@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Task } from "../types/index.ts";
-import { formatTaskListItem } from "../ui/board/column-policy.ts";
+import { formatTaskListItem } from "../ui/board/policies/column-policy.ts";
 import { formatProjectBadge } from "../ui/project.ts";
-import { createTaskPopup } from "../ui/task-viewer-with-search.ts";
+import { createTaskPopup } from "../ui/shared/task-popup.ts";
 import { createScreen } from "../ui/tui.ts";
 
 const createTask = (overrides: Partial<Task> = {}): Task => ({

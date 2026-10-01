@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from "node:path";
-import { parseTask } from "../markdown/parser.ts";
+import { FrontmatterSchemaError, parseTask } from "../markdown/parser.ts";
 import type { Task } from "../types/index.ts";
-import { buildGlobPattern } from "../utils/prefix-config.ts";
+import { buildGlobPattern, DEFAULT_TASK_PREFIX } from "../utils/prefix-config.ts";
 import { normalizeTaskIdentity } from "../utils/task-path.ts";
 
 const TASK_FILE_READ_CONCURRENCY = 32;
@@ -94,6 +94,7 @@ export class TaskRepository {
 					const task = options.normalizeIdentity ? normalizeTaskIdentity(parsed) : parsed;
 					tasks[index] = { ...task, filePath: filepath };
 				} catch (error) {
+					if (error instanceof FrontmatterSchemaError) throw error;
 					if (process.env.DEBUG) console.error(`Failed to parse ${options.debugLabel} ${filepath}`, error);
 				}
 			}
@@ -104,7 +105,7 @@ export class TaskRepository {
 
 	async listFiles(directory: string): Promise<string[]> {
 		const config = await this.context.config();
-		const prefix = (config?.prefixes?.task ?? "task").toLowerCase();
+		const prefix = (config?.prefixes?.task ?? DEFAULT_TASK_PREFIX).toLowerCase();
 		return await Array.fromAsync(new Bun.Glob(buildGlobPattern(prefix)).scan({ cwd: directory, followSymlinks: true }));
 	}
 }

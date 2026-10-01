@@ -4,11 +4,11 @@ import { mkdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 describe("CLI mutations with missing storage directories", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 	let testDir: string;
 	let core: Core;
 
@@ -31,7 +31,7 @@ describe("CLI mutations with missing storage directories", () => {
 	});
 
 	it("creates a draft when its storage directory is absent", async () => {
-		const result = await $`bun ${cliPath} draft create "First draft" -d "Keep this description"`
+		const result = await $`${cliCommand} draft create "First draft" -d "Keep this description"`
 			.cwd(testDir)
 			.nothrow()
 			.quiet();
@@ -43,7 +43,7 @@ describe("CLI mutations with missing storage directories", () => {
 	});
 
 	it("creates a decision when its storage directory is absent", async () => {
-		const result = await $`bun ${cliPath} decision create "First decision" -s accepted --plain`
+		const result = await $`${cliCommand} decision create "First decision" -s accepted --plain`
 			.cwd(testDir)
 			.nothrow()
 			.quiet();
@@ -65,7 +65,7 @@ describe("CLI mutations with missing storage directories", () => {
 		const destinationDir = join(testDir, "backlog", destination);
 		expect(existsSync(destinationDir)).toBe(false);
 
-		const result = await $`bun ${cliPath} task ${command} ${task.id}`.cwd(testDir).nothrow().quiet();
+		const result = await $`${cliCommand} task ${command} ${task.id}`.cwd(testDir).nothrow().quiet();
 		expect(result.exitCode).toBe(0);
 		expect(await Bun.file(task.filePath).exists()).toBe(false);
 		expect(await Bun.file(join(destinationDir, basename(task.filePath))).text()).toBe(content);
@@ -83,7 +83,7 @@ describe("CLI mutations with missing storage directories", () => {
 		if (!task.filePath) throw new Error("Expected the created task path");
 		expect(existsSync(join(testDir, "backlog", "drafts"))).toBe(false);
 
-		const result = await $`bun ${cliPath} task demote ${task.id}`.cwd(testDir).nothrow().quiet();
+		const result = await $`${cliCommand} task demote ${task.id}`.cwd(testDir).nothrow().quiet();
 		expect(result.exitCode).toBe(0);
 		expect(await Bun.file(task.filePath).exists()).toBe(false);
 		const draft = await core.filesystem.loadDraft("DRAFT-1");

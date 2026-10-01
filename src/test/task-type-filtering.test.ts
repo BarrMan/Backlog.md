@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let testDir: string;
 let core: Core;
 
 describe("task type filtering", () => {
-	const cliPath = getTestCliPath();
+	const cliCommand = getTestCliCommand();
 
 	beforeEach(async () => {
 		testDir = createUniqueTestDir("task-type-filtering");
@@ -104,8 +104,8 @@ describe("task type filtering", () => {
 	});
 
 	it("filters CLI task list with repeated and comma-separated canonicalized values", async () => {
-		const comma = await $`bun ${cliPath} task list --type bug,spike --plain`.cwd(testDir).quiet();
-		const repeated = await $`bun ${cliPath} task list --type BUG --type Spike --plain`.cwd(testDir).quiet();
+		const comma = await $`${cliCommand} task list --type bug,spike --plain`.cwd(testDir).quiet();
+		const repeated = await $`${cliCommand} task list --type BUG --type Spike --plain`.cwd(testDir).quiet();
 
 		for (const result of [comma, repeated]) {
 			expect(result.exitCode).toBe(0);
@@ -119,7 +119,7 @@ describe("task type filtering", () => {
 
 	it("filters CLI search by task type and composes with existing filters", async () => {
 		const search =
-			await $`bun ${cliPath} search "Shared API" --task-type bug,feature --status "To Do" --priority high --plain`
+			await $`${cliCommand} search "Shared API" --task-type bug,feature --status "To Do" --priority high --plain`
 				.cwd(testDir)
 				.quiet();
 		expect(search.exitCode).toBe(0);
@@ -128,17 +128,17 @@ describe("task type filtering", () => {
 		expect(output).not.toContain("Shared API capability");
 		expect(output).not.toContain("Shared API exploration");
 
-		const typeOnly = await $`bun ${cliPath} search --task-type Feature --plain`.cwd(testDir).quiet();
+		const typeOnly = await $`${cliCommand} search --task-type Feature --plain`.cwd(testDir).quiet();
 		expect(typeOnly.stdout.toString()).toContain("Shared API capability");
 		expect(typeOnly.stdout.toString()).not.toContain("Documents:");
 	});
 
 	it("rejects invalid configured task types clearly", async () => {
-		const list = await $`bun ${cliPath} task list --type chore --plain`.cwd(testDir).nothrow().quiet();
+		const list = await $`${cliCommand} task list --type chore --plain`.cwd(testDir).nothrow().quiet();
 		expect(list.exitCode).toBe(1);
 		expect(list.stderr.toString()).toContain("Invalid type: chore. Valid types are: Bug, Feature, Spike");
 
-		const search = await $`bun ${cliPath} search --task-type chore --plain`.cwd(testDir).nothrow().quiet();
+		const search = await $`${cliCommand} search --task-type chore --plain`.cwd(testDir).nothrow().quiet();
 		expect(search.exitCode).toBe(1);
 		expect(search.stderr.toString()).toContain("Invalid task-type: chore. Valid types are: Bug, Feature, Spike");
 	});
@@ -148,39 +148,38 @@ describe("task type filtering", () => {
 		if (!config) throw new Error("Expected test config");
 		await core.filesystem.saveConfig({ ...config, types: ["Bug", "Epic"] });
 
-		const listHelp = await $`bun ${cliPath} task list --help`.cwd(testDir).text();
-		const searchHelp = await $`bun ${cliPath} search --help`.cwd(testDir).text();
+		const listHelp = await $`${cliCommand} task list --help`.cwd(testDir).text();
+		const searchHelp = await $`${cliCommand} search --help`.cwd(testDir).text();
 		expect(listHelp).toContain("--type <type>");
 		expect(listHelp).toContain("type: one or more of configured task types: Bug, Epic");
 		expect(searchHelp).toContain("--type <type>");
 		expect(searchHelp).toContain("--task-type <type>");
 		expect(searchHelp).toContain("task-type: one or more of configured task types: Bug, Epic");
 
-		const taskCreationGuide = await $`bun ${cliPath} instructions task-creation`.cwd(testDir).text();
+		const taskCreationGuide = await $`${cliCommand} instructions task-creation`.cwd(testDir).text();
 		expect(taskCreationGuide).toContain('backlog task list --type "Bug" --plain');
 		expect(taskCreationGuide).not.toContain("--type bug,spike");
 
-		const advertisedList = await $`bun ${cliPath} task list --type Bug --plain`.cwd(testDir).quiet();
-		const advertisedSearch = await $`bun ${cliPath} search "Shared API" --task-type Bug --plain`.cwd(testDir).quiet();
+		const advertisedList = await $`${cliCommand} task list --type Bug --plain`.cwd(testDir).quiet();
+		const advertisedSearch = await $`${cliCommand} search "Shared API" --task-type Bug --plain`.cwd(testDir).quiet();
 		expect(advertisedList.exitCode).toBe(0);
 		expect(advertisedSearch.exitCode).toBe(0);
 
 		for (const completionLine of ["backlog task list --type ", "backlog search --task-type "]) {
-			const completion =
-				await $`bun ${cliPath} completion __complete ${completionLine} ${String(completionLine.length)}`
-					.cwd(testDir)
-					.quiet();
+			const completion = await $`${cliCommand} completion __complete ${completionLine} ${String(completionLine.length)}`
+				.cwd(testDir)
+				.quiet();
 			expect(completion.stdout.toString().trim().split("\n")).toEqual(["Bug", "Epic"]);
 		}
 		for (const unsupportedLine of ["backlog task create --task-type ", "backlog task list --task-type "]) {
 			const completion =
-				await $`bun ${cliPath} completion __complete ${unsupportedLine} ${String(unsupportedLine.length)}`
+				await $`${cliCommand} completion __complete ${unsupportedLine} ${String(unsupportedLine.length)}`
 					.cwd(testDir)
 					.quiet();
 			expect(completion.stdout.toString().trim()).toBe("");
 		}
 
-		const incompatible = await $`bun ${cliPath} search --type document --task-type Bug --plain`
+		const incompatible = await $`${cliCommand} search --type document --task-type Bug --plain`
 			.cwd(testDir)
 			.nothrow()
 			.quiet();

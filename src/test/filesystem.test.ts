@@ -141,6 +141,31 @@ describe("FileSystem", () => {
 			expect(loadedTask?.description).toBe(sampleTask.description);
 		});
 
+		it("preserves unknown frontmatter and opaque body when saving an existing task", async () => {
+			await filesystem.saveTask({
+				...sampleTask,
+				dueDate: "2026-10-01",
+				rawContent: "## Free-form\n\nThis body stays literal.",
+			});
+			const loaded = await filesystem.loadTask("task-1");
+			if (!loaded?.filePath) throw new Error("Saved task was not found");
+			const filepath = loaded.filePath;
+			const original = await Bun.file(filepath).text();
+			await Bun.write(
+				filepath,
+				original.replace("task_schema_version: 2", "task_schema_version: 2\ncustom_owner: platform"),
+			);
+			const updated = await filesystem.loadTask("task-1");
+			if (!updated) throw new Error("Saved task was not found");
+
+			await filesystem.saveTask({ ...updated, dueDate: undefined, status: "In Progress" });
+
+			const saved = await Bun.file(filepath).text();
+			expect(saved).toContain("custom_owner: platform");
+			expect(saved).not.toContain("due_date:");
+			expect((await filesystem.loadTask("task-1"))?.rawContent).toBe("## Free-form\n\nThis body stays literal.");
+		});
+
 		it("should return null for non-existent task", async () => {
 			const task = await filesystem.loadTask("non-existent");
 			expect(task).toBeNull();
@@ -332,6 +357,31 @@ Invalid content`,
 			const loaded = await filesystem.loadDraft("draft-1");
 			expect(loaded?.id).toBe("DRAFT-1"); // IDs are normalized to uppercase
 			expect(loaded?.title).toBe(sampleDraft.title);
+		});
+
+		it("preserves unknown frontmatter and opaque body when saving an existing draft", async () => {
+			await filesystem.saveDraft({
+				...sampleDraft,
+				dueDate: "2026-10-01",
+				rawContent: "## Free-form\n\nThis body stays literal.",
+			});
+			const loaded = await filesystem.loadDraft("draft-1");
+			if (!loaded?.filePath) throw new Error("Saved draft was not found");
+			const filepath = loaded.filePath;
+			const original = await Bun.file(filepath).text();
+			await Bun.write(
+				filepath,
+				original.replace("task_schema_version: 2", "task_schema_version: 2\ncustom_owner: platform"),
+			);
+			const updated = await filesystem.loadDraft("draft-1");
+			if (!updated) throw new Error("Saved draft was not found");
+
+			await filesystem.saveDraft({ ...updated, dueDate: undefined, title: "Renamed Draft" });
+
+			const saved = await Bun.file(join(await filesystem.getDraftsDir(), "draft-1 - Renamed-Draft.md")).text();
+			expect(saved).toContain("custom_owner: platform");
+			expect(saved).not.toContain("due_date:");
+			expect((await filesystem.loadDraft("draft-1"))?.rawContent).toBe("## Free-form\n\nThis body stays literal.");
 		});
 
 		it("fails closed when loadDraft finds padded twins of one identity", async () => {

@@ -2,6 +2,8 @@ import { type FSWatcher, watch } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { Core } from "../core/backlog.ts";
 import { ProjectTaskGraph } from "../core/project-task-graph.ts";
+import { FileSystem } from "../file-system/operations.ts";
+import { watchConfigFile } from "../utils/config-watcher.ts";
 import { ProjectScope, type ServerRequestScope } from "./project-scope.ts";
 import type { ServerServices } from "./resources/api.ts";
 import type { WebSocketHub } from "./websocket-hub.ts";
@@ -9,13 +11,19 @@ import type { WebSocketHub } from "./websocket-hub.ts";
 /** Owns the selected immutable project binding and its prepared task graph. */
 export class BrowserServices implements ServerServices {
 	readonly deploymentRoot: string;
-	private watchers: FSWatcher[] = [];
+	private watchers: Array<Pick<FSWatcher, "close">> = [];
+	private recoveryWatcher?: Pick<FSWatcher, "close">;
 	private selected: ServerRequestScope;
 	private reconciling?: Promise<void>;
 	private rebuildRequested = false;
 	private configVersion = 0;
 	private publishedConfigVersion = 0;
-	private pendingConfig?: { version: number; core: Core; scope: ProjectScope; watchers: FSWatcher[] };
+	private pendingConfig?: {
+		version: number;
+		core: Core;
+		scope: ProjectScope;
+		watchers: Array<Pick<FSWatcher, "close">>;
+	};
 	private reconciliationError?: unknown;
 	private publication: "tasks" | "milestones" = "tasks";
 	private stopped = false;
@@ -61,6 +69,7 @@ export class BrowserServices implements ServerServices {
 			})
 			.finally(() => {
 				this.reconciling = undefined;
+				if (!this.stopped && this.rebuildRequested) this.reconcileFromWatcher(false);
 			});
 		return this.reconciling;
 	}
@@ -101,6 +110,8 @@ export class BrowserServices implements ServerServices {
 			const scope = this.pendingConfig?.scope ?? this.selected.scope;
 			const recovered = this.reconciliationError !== undefined;
 			this.reconciliationError = undefined;
+			this.recoveryWatcher?.close();
+			this.recoveryWatcher = undefined;
 			// Publish one complete binding. A request that already captured the old selection keeps it.
 			this.selected = { scope, core: current, graph };
 			if (configChanged) {
@@ -129,14 +140,33 @@ export class BrowserServices implements ServerServices {
 		this.watchers = watchers;
 	}
 
-	private async createWatchers(scope: ProjectScope): Promise<FSWatcher[]> {
-		const watchers: FSWatcher[] = [];
+	private async createWatchers(scope: ProjectScope): Promise<Array<Pick<FSWatcher, "close">>> {
+		const watchers: Array<Pick<FSWatcher, "close">> = [];
 		try {
 			await mkdir(this.deploymentRoot, { recursive: true });
+			const filesystem = scope.requestCore().filesystem;
+			// Prime the baseline so the fallback only publishes post-subscription changes.
+			await filesystem.loadConfig();
+			const configWatcher = watchConfigFile(filesystem, {
+				onConfigChanged: () => this.reconcileFromWatcher(true),
+				onConfigInvalid: () => this.reconcileFromWatcher(true),
+			});
+			watchers.push({ close: () => configWatcher.stop() });
+			if (scope.configLocation !== "root") {
+				const rootFilesystem = new FileSystem(this.deploymentRoot, {
+					backlogDirectory: scope.directory,
+					configLocation: "root",
+				});
+				await rootFilesystem.loadConfig();
+				const rootConfigWatcher = watchConfigFile(rootFilesystem, {
+					onConfigChanged: () => this.reconcileFromWatcher(true),
+					onConfigInvalid: () => this.reconcileFromWatcher(true),
+				});
+				watchers.push({ close: () => rootConfigWatcher.stop() });
+			}
 			this.watchDirectory(watchers, scope.root, (path) => {
-				if (!path || path === "backlog.config.yml" || path === `${scope.directory}/config.yml`)
-					this.reconcileFromWatcher(true);
-				else if (
+				if (
+					!path ||
 					(scope.backlog === scope.root && !path.startsWith(".git/")) ||
 					path === scope.directory ||
 					path.startsWith(`${scope.directory}/`)
@@ -144,9 +174,8 @@ export class BrowserServices implements ServerServices {
 					this.reconcileFromWatcher(false);
 			});
 			if (scope.backlog !== scope.root) {
-				this.watchDirectory(watchers, scope.backlog, (path) => {
-					if (!path || path.endsWith("config.yml")) this.reconcileFromWatcher(true);
-					else this.reconcileFromWatcher(false);
+				this.watchDirectory(watchers, scope.backlog, () => {
+					this.reconcileFromWatcher(false);
 				});
 			}
 			for (const directory of await this.gitDirectories(scope.root)) {
@@ -167,34 +196,44 @@ export class BrowserServices implements ServerServices {
 	async dispose(): Promise<void> {
 		this.stopped = true;
 		this.clearWatchers();
+		this.recoveryWatcher?.close();
+		this.recoveryWatcher = undefined;
 		this.clearWatchers(this.pendingConfig?.watchers);
 		this.pendingConfig = undefined;
 		this.reconciliationError = undefined;
 	}
 
-	private replaceWatchers(watchers: FSWatcher[]): void {
+	private replaceWatchers(watchers: Array<Pick<FSWatcher, "close">>): void {
 		const previous = this.watchers;
 		this.watchers = watchers;
 		this.clearWatchers(previous);
 	}
 
-	private clearWatchers(watchers = this.watchers): void {
+	private clearWatchers(watchers: Array<Pick<FSWatcher, "close">> = this.watchers): void {
 		for (const watcher of watchers) watcher.close();
 		if (watchers === this.watchers) this.watchers = [];
-	}
-
-	private ensureRecoveryWatcher(): void {
-		if (this.stopped || this.watchers.length > 0) return;
-		this.watchDirectory(this.watchers, this.deploymentRoot, (path) => {
-			if (!path || path === "backlog.config.yml" || path.endsWith("/config.yml")) this.reconcileFromWatcher(true);
-		});
 	}
 
 	private reconcileFromWatcher(configChanged: boolean): void {
 		void this.scheduleReconcile(configChanged).catch(() => {});
 	}
 
-	private watchDirectory(watchers: FSWatcher[], directory: string, onChange: (path: string | null) => void): boolean {
+	private ensureRecoveryWatcher(): void {
+		if (this.stopped || this.recoveryWatcher) return;
+		const filesystem = new Core(this.deploymentRoot).filesystem;
+		void filesystem.loadConfig().catch(() => {});
+		const watcher = watchConfigFile(filesystem, {
+			onConfigChanged: () => this.reconcileFromWatcher(true),
+			onConfigInvalid: () => this.reconcileFromWatcher(true),
+		});
+		this.recoveryWatcher = { close: () => watcher.stop() };
+	}
+
+	private watchDirectory(
+		watchers: Array<Pick<FSWatcher, "close">>,
+		directory: string,
+		onChange: (path: string | null) => void,
+	): boolean {
 		try {
 			const watcher = watch(directory, { recursive: true }, (_event, filename) => {
 				onChange(filename?.toString().replaceAll("\\", "/") ?? null);

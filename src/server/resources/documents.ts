@@ -1,6 +1,7 @@
 import { t } from "elysia";
 import type { Core } from "../../core/backlog.ts";
 import { isAmbiguousIdError } from "../../utils/entity-id.ts";
+import { API_ROUTES } from "../api-routes.ts";
 import {
 	documentUpdateErrorResponse,
 	parseCreateDocumentPath,
@@ -55,7 +56,7 @@ export function documentsResource({ services }: ResourceDependencies) {
 		}
 	};
 	app.get(
-		"/api/docs",
+		API_ROUTES.DOCS,
 		async ({ core, set }) => {
 			try {
 				return (await core.filesystem.listDocuments()).map((doc) => ({
@@ -78,7 +79,7 @@ export function documentsResource({ services }: ResourceDependencies) {
 		{ response: t.Array(documentListItemSchema) },
 	);
 	app.post(
-		"/api/docs",
+		API_ROUTES.DOCS,
 		async ({ body, core, set }) => {
 			try {
 				const filename = typeof body.filename === "string" ? body.filename : undefined;
@@ -120,16 +121,16 @@ export function documentsResource({ services }: ResourceDependencies) {
 			},
 		},
 	);
-	app.get("/api/doc/:id", ({ params, core, set }) => get(core, params.id, set), {
+	app.get(API_ROUTES.LEGACY_DOC(":id"), ({ params, core, set }) => get(core, params.id, set), {
 		params,
 		response: { 200: documentSchema, 404: errorSchema, 409: errorSchema },
 	});
-	app.get("/api/docs/:id", ({ params, core, set }) => get(core, params.id, set), {
+	app.get(API_ROUTES.DOC(":id"), ({ params, core, set }) => get(core, params.id, set), {
 		params,
 		response: { 200: documentSchema, 404: errorSchema, 409: errorSchema },
 	});
 	app.put(
-		"/api/docs/:id",
+		API_ROUTES.DOC(":id"),
 		async ({ params, body, core, set }) => {
 			try {
 				const parsed = parseDocumentUpdate(body);

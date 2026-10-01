@@ -1,6 +1,7 @@
 import { link, lstat, mkdtemp, rename, rmdir, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { Task } from "../types/index.ts";
+import { TASK_FRONTMATTER_FIELDS } from "../markdown/schema.ts";
+import { TASK_SOURCE, type Task } from "../types/index.ts";
 import { type DuplicateGroup, detectDuplicateTaskIds } from "../utils/duplicate-detection.ts";
 import { escapeRegex, generateNextId, generateNextSubtaskId, idForFilename } from "../utils/prefix-config.ts";
 import { canonicalTaskId, isNumericTaskId } from "../utils/task-id.ts";
@@ -172,7 +173,7 @@ async function findCrossBranchDuplicateTaskIds(
 }
 
 function getTaskLocation(task: Task): DuplicateTaskLocation {
-	return task.source === "completed" ? "completed" : "active";
+	return task.source === TASK_SOURCE.COMPLETED ? "completed" : "active";
 }
 
 function matchesConfiguredPadding(taskId: string, zeroPaddedIds?: number): boolean {
@@ -268,7 +269,7 @@ function frontmatterRange(content: string): { start: number; end: number } {
 
 function frontmatterIdLine(content: string, range: { start: number; end: number }): { line: string; index: number } {
 	const frontmatter = content.slice(range.start, range.end);
-	const idLines = Array.from(frontmatter.matchAll(/^id\s*:[^\r\n]*/gm));
+	const idLines = Array.from(frontmatter.matchAll(new RegExp(`^${TASK_FRONTMATTER_FIELDS.ID}\\s*:[^\\r\\n]*`, "gm")));
 	if (idLines.length !== 1)
 		throw new Error(`Task frontmatter must contain exactly one top-level id field; found ${idLines.length}.`);
 	const idLine = idLines[0];
@@ -350,7 +351,7 @@ function collectReferenceReviews(
 			inFrontmatter = false;
 			continue;
 		}
-		if (inFrontmatter && /^id\s*:/.test(line)) continue;
+		if (inFrontmatter && new RegExp(`^${TASK_FRONTMATTER_FIELDS.ID}\\s*:`).test(line)) continue;
 		const ids = findLineReferences(line, canonicalIds, legacyPatterns);
 		if (ids.length) reviews.push({ path, line: index + 1, text: line.trim().slice(0, 240), ids });
 	}

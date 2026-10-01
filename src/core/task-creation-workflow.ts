@@ -5,7 +5,7 @@ import { formatStoredDate } from "../utils/date.ts";
 import { validateDependencies } from "../utils/task-builders.ts";
 import { getTaskPath } from "../utils/task-path.ts";
 import type { Core } from "./backlog.ts";
-import { buildCreatedTask, prepareTaskCreationInput } from "./task-creation-input.ts";
+import { buildCreatedTask, generatedTaskTitle, prepareTaskCreationInput } from "./task-creation-input.ts";
 import { readFileIfPresent } from "./task-creation-transaction.ts";
 
 /** Owns one allocation and write transaction against a Core project session. */
@@ -32,9 +32,10 @@ export class TaskCreationService {
 				? await this.core.resolveParentTaskIdForCreate(prepared.requestedParentTaskId)
 				: undefined;
 			const id = await this.core.generateNextId(prepared.isDraft ? EntityType.Draft : EntityType.Task, parentTaskId);
+			const titledInput = prepared.title ? prepared : { ...prepared, title: generatedTaskTitle(id) };
 			const { valid, invalid } = await validateDependencies(prepared.dependencies, this.core.filesystem, {
 				id,
-				title: prepared.title,
+				title: titledInput.title,
 				status: prepared.isDraft ? "Draft" : status || config?.defaultStatus || FALLBACK_STATUS,
 				assignee: [],
 				createdDate,
@@ -42,7 +43,7 @@ export class TaskCreationService {
 				dependencies: [],
 			});
 			if (invalid.length > 0) throw this.core.formatMissingDependenciesError(invalid);
-			const task = buildCreatedTask(input, prepared, config, {
+			const task = buildCreatedTask(input, titledInput, config, {
 				id,
 				parentTaskId,
 				dependencies: valid,

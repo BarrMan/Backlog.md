@@ -3,14 +3,14 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../index.ts";
-import { getTestCliPath } from "./test-cli.ts";
+import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
 let TEST_DIR: string;
 let SUBTASKS: Array<{ id: string; title: string }> = [];
 
 describe("CLI plain output for AI agents", () => {
-	const cliPath = getTestCliPath();
+	const CLI_COMMAND = getTestCliCommand();
 
 	beforeEach(async () => {
 		TEST_DIR = createUniqueTestDir("test-plain-output");
@@ -87,7 +87,7 @@ describe("CLI plain output for AI agents", () => {
 	});
 
 	it("should output plain text with task view --plain", async () => {
-		const result = await $`bun ${cliPath} task view 1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task view 1 --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());
@@ -130,7 +130,7 @@ describe("CLI plain output for AI agents", () => {
 		expect(task).not.toBeNull();
 		expect(task?.id).toBe("TASK-1");
 
-		const result = await $`bun ${cliPath} task 1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task 1 --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());
@@ -154,7 +154,7 @@ describe("CLI plain output for AI agents", () => {
 	});
 
 	it("should not include a subtask list when none exist", async () => {
-		const result = await $`bun ${cliPath} task view 2 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task view 2 --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());
@@ -168,7 +168,7 @@ describe("CLI plain output for AI agents", () => {
 	});
 
 	it("should output plain text with draft view --plain", async () => {
-		const result = await $`bun ${cliPath} draft view 1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} draft view 1 --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());
@@ -198,7 +198,7 @@ describe("CLI plain output for AI agents", () => {
 		expect(draft).not.toBeNull();
 		expect(draft?.id).toBe("DRAFT-1");
 
-		const result = await $`bun ${cliPath} draft 1 --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} draft 1 --plain`.cwd(TEST_DIR).quiet();
 
 		if (result.exitCode !== 0) {
 			console.error("STDOUT:", result.stdout.toString());

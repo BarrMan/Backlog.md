@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
-import { getTestCliPath, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
-const CLI_PATH = getTestCliPath();
+const CLI_COMMAND = getTestCliCommand();
 let TEST_DIR: string;
 let core: Core;
 
@@ -27,19 +27,19 @@ describe("CLI task types", () => {
 	});
 
 	it("creates and edits typed tasks with configured canonical casing", async () => {
-		const created = await $`bun ${CLI_PATH} task create "Typed task" --type ePiC --plain`.cwd(TEST_DIR).quiet();
+		const created = await $`${CLI_COMMAND} task create "Typed task" --type ePiC --plain`.cwd(TEST_DIR).quiet();
 		expect(created.exitCode).toBe(0);
 		expect(created.stdout.toString()).toContain("Type: Epic");
 		expect((await core.filesystem.loadTask("TASK-1"))?.type).toBe("Epic");
-		const viewed = await $`bun ${CLI_PATH} task view TASK-1 --plain`.cwd(TEST_DIR).quiet();
+		const viewed = await $`${CLI_COMMAND} task view TASK-1 --plain`.cwd(TEST_DIR).quiet();
 		expect(viewed.stdout.toString()).toContain("Type: Epic");
 
-		const edited = await $`bun ${CLI_PATH} task edit TASK-1 --type BUG --plain`.cwd(TEST_DIR).quiet();
+		const edited = await $`${CLI_COMMAND} task edit TASK-1 --type BUG --plain`.cwd(TEST_DIR).quiet();
 		expect(edited.exitCode).toBe(0);
 		expect(edited.stdout.toString()).toContain("Type: Bug");
 		expect((await core.filesystem.loadTask("TASK-1"))?.type).toBe("Bug");
 
-		await $`bun ${CLI_PATH} task edit TASK-1 --title "Still typed"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} task edit TASK-1 --title "Still typed"`.cwd(TEST_DIR).quiet();
 		expect((await core.filesystem.loadTask("TASK-1"))?.type).toBe("Bug");
 
 		const cleared = await runTestCli(["task", "edit", "TASK-1", "--type", "", "--plain"], { cwd: TEST_DIR });
@@ -48,47 +48,47 @@ describe("CLI task types", () => {
 	});
 
 	it("rejects invalid values and keeps untyped tasks untyped", async () => {
-		const invalidCreate = await $`bun ${CLI_PATH} task create "Invalid type" --type feature`
+		const invalidCreate = await $`${CLI_COMMAND} task create "Invalid type" --type feature`
 			.cwd(TEST_DIR)
 			.quiet()
 			.nothrow();
 		expect(invalidCreate.exitCode).toBe(1);
 		expect(invalidCreate.stderr.toString()).toContain("Invalid type: feature. Valid types are: Bug, Epic");
 
-		await $`bun ${CLI_PATH} task create "Untyped task"`.cwd(TEST_DIR).quiet();
-		const invalidEdit = await $`bun ${CLI_PATH} task edit TASK-1 --type feature`.cwd(TEST_DIR).quiet().nothrow();
+		await $`${CLI_COMMAND} task create "Untyped task"`.cwd(TEST_DIR).quiet();
+		const invalidEdit = await $`${CLI_COMMAND} task edit TASK-1 --type feature`.cwd(TEST_DIR).quiet().nothrow();
 		expect(invalidEdit.exitCode).toBe(1);
 		expect(invalidEdit.stderr.toString()).toContain("Invalid type: feature. Valid types are: Bug, Epic");
 
-		const edited = await $`bun ${CLI_PATH} task edit TASK-1 --title "Still untyped" --plain`.cwd(TEST_DIR).quiet();
+		const edited = await $`${CLI_COMMAND} task edit TASK-1 --title "Still untyped" --plain`.cwd(TEST_DIR).quiet();
 		expect(edited.stdout.toString()).not.toContain("Type:");
 		expect((await core.filesystem.loadTask("TASK-1"))?.type).toBeUndefined();
 	});
 
 	it("shows type badges in plain task lists and omits them for untyped tasks", async () => {
-		await $`bun ${CLI_PATH} task create "Typed list task" --type epic --priority high`.cwd(TEST_DIR).quiet();
-		await $`bun ${CLI_PATH} task create "Untyped list task"`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} task create "Typed list task" --type epic --priority high`.cwd(TEST_DIR).quiet();
+		await $`${CLI_COMMAND} task create "Untyped list task"`.cwd(TEST_DIR).quiet();
 
-		const result = await $`bun ${CLI_PATH} task list --plain`.cwd(TEST_DIR).quiet();
+		const result = await $`${CLI_COMMAND} task list --plain`.cwd(TEST_DIR).quiet();
 		const output = result.stdout.toString();
 		expect(output).toContain("[HIGH] [Epic] TASK-1 - Typed list task");
 		expect(output).toContain("  TASK-2 - Untyped list task");
 
-		const sortedResult = await $`bun ${CLI_PATH} task list --plain --sort priority`.cwd(TEST_DIR).quiet();
+		const sortedResult = await $`${CLI_COMMAND} task list --plain --sort priority`.cwd(TEST_DIR).quiet();
 		const sortedOutput = sortedResult.stdout.toString();
 		expect(sortedOutput).toContain("[HIGH] [Epic] TASK-1 - Typed list task (To Do)");
 		expect(sortedOutput).toContain("  TASK-2 - Untyped list task (To Do)");
 	});
 
 	it("documents configured values and exposes them through read-only config commands", async () => {
-		const getOutput = await $`bun ${CLI_PATH} config get types`.cwd(TEST_DIR).text();
+		const getOutput = await $`${CLI_COMMAND} config get types`.cwd(TEST_DIR).text();
 		expect(getOutput.trim()).toBe("Bug, Epic");
 
-		const listOutput = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).text();
+		const listOutput = await $`${CLI_COMMAND} config list`.cwd(TEST_DIR).text();
 		expect(listOutput).toContain("types: [Bug, Epic]");
 
-		const createHelp = await $`bun ${CLI_PATH} task create --help`.cwd(TEST_DIR).text();
-		const editHelp = await $`bun ${CLI_PATH} task edit --help`.cwd(TEST_DIR).text();
+		const createHelp = await $`${CLI_COMMAND} task create --help`.cwd(TEST_DIR).text();
+		const editHelp = await $`${CLI_COMMAND} task edit --help`.cwd(TEST_DIR).text();
 		for (const output of [createHelp, editHelp]) {
 			expect(output).toContain("--type <type>");
 			expect(output).toContain("type: one of configured task types: Bug, Epic");
@@ -101,14 +101,12 @@ describe("CLI task types", () => {
 
 	it("completes configured task types only for task type flags", async () => {
 		for (const line of ["backlog task create --type ", "backlog task edit TASK-1 --type "]) {
-			const result = await $`bun ${CLI_PATH} completion __complete ${line} ${String(line.length)}`
-				.cwd(TEST_DIR)
-				.quiet();
+			const result = await $`${CLI_COMMAND} completion __complete ${line} ${String(line.length)}`.cwd(TEST_DIR).quiet();
 			expect(result.stdout.toString().trim().split("\n")).toEqual(["Bug", "Epic"]);
 		}
 
 		const searchLine = "backlog search --type ";
-		const searchResult = await $`bun ${CLI_PATH} completion __complete ${searchLine} ${String(searchLine.length)}`
+		const searchResult = await $`${CLI_COMMAND} completion __complete ${searchLine} ${String(searchLine.length)}`
 			.cwd(TEST_DIR)
 			.quiet();
 		expect(searchResult.stdout.toString()).not.toContain("Epic");

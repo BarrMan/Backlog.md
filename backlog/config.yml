@@ -7,6 +7,7 @@ date_format: yyyy-mm-dd hh:mm
 max_column_width: 20
 default_editor: "rider"
 auto_open_browser: true
+hide_empty_columns: true
 default_port: 6420
 remote_operations: true
 auto_commit: false

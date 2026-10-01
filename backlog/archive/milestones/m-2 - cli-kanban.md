@@ -1,8 +1,8 @@
 ---
 id: m-2
-title: "Kanban Board (CLI Visualization)"
+title: Kanban Board (CLI Visualization)
+milestone_schema_version: 1
+description: >-
+  In this milestone, we will implement a text-based Kanban board view in the
+  CLI, allowing users to visualize and manage tasks more effectively.
 ---
-
-## Description
-
-In this milestone, we will implement a text-based Kanban board view in the CLI, allowing users to visualize and manage tasks more effectively.
