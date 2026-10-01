@@ -20,7 +20,9 @@ export type BoardTuiOptions = {
 	viewSwitcher?: import("../view-switcher.ts").ViewSwitcher;
 	onTaskSelect?: (task: Task) => void;
 	onTabPress?: () => Promise<void>;
-	onWorkspacePress?: () => Promise<void>;
+	onWorkspacePress?: (task: Task | undefined) => Promise<void>;
+	keepWorkspaceOpen?: boolean;
+	onDetach?: () => Promise<void>;
 	subscribeUpdates?: (update: (tasks: Task[], statuses: string[]) => void) => void;
 	filters?: BoardSessionConfigurationOptions["filters"];
 	availableLabels?: string[];
@@ -107,7 +109,14 @@ export class TUIRenderer {
 			this.options?.projectName,
 		);
 		const { screen, container, boardArea } = this.session;
-		this.footer = new Footer({ screen, onHeightChange: () => this.layout() });
+		this.footer = new Footer({
+			screen,
+			onHeightChange: () => this.layout(),
+			onSearchChange: (query) => this.filters?.setSearch(query),
+			onSearchFocusChange: (editing) => (editing ? this.interaction?.focusFilters() : undefined),
+			onSearchSubmit: () => this.interaction?.exitFilters("down"),
+			onSearchCancel: () => this.interaction?.exitFilters("escape"),
+		});
 		this.filters = new FilterBar({
 			parent: container,
 			screen,
@@ -186,6 +195,8 @@ export class TUIRenderer {
 			onTaskSelect: this.options?.onTaskSelect,
 			onTabPress: this.options?.onTabPress,
 			onWorkspacePress: this.options?.onWorkspacePress,
+			keepWorkspaceOpen: this.options?.keepWorkspaceOpen,
+			onDetach: this.options?.onDetach,
 			onSwitchView,
 		});
 		this.interaction.attach();
@@ -222,6 +233,7 @@ export class TUIRenderer {
 				isMoveActive: Boolean(this.board.move),
 				hasActiveFilters: this.board.filter.active,
 				hasProjects: this.configuration.configuredProjects.length > 0,
+				searchQuery: this.board.filter.value.searchQuery,
 			});
 			this.layout();
 		} finally {

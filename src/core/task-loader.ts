@@ -263,6 +263,8 @@ async function hydrateTasks(winners: HydrationCandidate[], options: HydrationOpt
 					if (w.stateEntry) w.stateEntry.task = task;
 				}
 			} catch (error) {
+				// Historical files still reserve their identities when their payload cannot be parsed.
+				if (w.stateEntry) continue;
 				if (error instanceof FrontmatterSchemaError) throw error;
 				complete = false;
 				console.error(`Failed to hydrate task ${w.id} from ${w.ref}:${w.path}`, error);
@@ -578,15 +580,7 @@ export class BranchTaskLoader {
 		const key = `${commit}\0${path}`;
 		let cached = this.taskCache.get(key);
 		if (!cached) {
-			const promise = this.git.showFile(commit, path).then((content) => {
-				try {
-					return normalizeTaskIdentity(parseTask(content));
-				} catch (error) {
-					if (error instanceof FrontmatterSchemaError) throw error;
-					console.error(`Failed to parse task ${commit}:${path}`, error);
-					return null;
-				}
-			});
+			const promise = this.git.showFile(commit, path).then((content) => normalizeTaskIdentity(parseTask(content)));
 			cached = { commit, promise };
 			this.taskCache.set(key, cached);
 		}

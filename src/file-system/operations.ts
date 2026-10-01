@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs";
 import { mkdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES, DRAFT_STATUS, FALLBACK_STATUS } from "../constants/index.ts";
+import { migrateLegacyTask } from "../markdown/legacy-task-migration.ts";
 import { FrontmatterSchemaError, parseMarkdown, parseTask, TaskDependenciesParseError } from "../markdown/parser.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import {
@@ -682,6 +683,38 @@ export class FileSystem {
 		await Bun.write(filepath, content);
 		await this.publishContentMutation({ type: TASK_DIRECTORY, root, taskId: task.id, filePath: filepath });
 		return filepath;
+	}
+
+	async migrateLegacyTask(taskId: string): Promise<string> {
+		return await this.withCreateLock(async () => {
+			const tasksDir = await this.getTasksDir();
+			const matches: Array<{ filePath: string; content: string }> = [];
+			for (const filename of await this.taskRepository.listFiles(tasksDir)) {
+				const filePath = join(tasksDir, filename);
+				const content = await Bun.file(filePath).text();
+				if (taskIdsEqual(String(parseMarkdown(content).frontmatter.id || ""), taskId))
+					matches.push({ filePath, content });
+			}
+			if (matches.length === 0) throw new Error(`Task ${taskId} not found.`);
+			if (matches.length > 1)
+				throw new AmbiguousTaskIdError(
+					taskId,
+					matches.map((match) => match.filePath),
+				);
+			const match = matches[0];
+			if (!match) throw new Error(`Task ${taskId} not found.`);
+			return await this.withTaskLock({ id: taskId, filePath: match.filePath }, async () => {
+				const stagedPath = join(dirname(match.filePath), `.${basename(match.filePath)}.migrate-${crypto.randomUUID()}`);
+				try {
+					await Bun.write(stagedPath, migrateLegacyTask(match.content));
+					await rename(stagedPath, match.filePath);
+				} finally {
+					await unlink(stagedPath).catch(() => undefined);
+				}
+				this.taskRepository.invalidate();
+				return match.filePath;
+			});
+		});
 	}
 
 	async loadTask(taskId: string): Promise<Task | null> {

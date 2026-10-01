@@ -15,13 +15,18 @@ function shellQuote(value: string): string {
 
 class FakeTmux implements AgentSessionRunner {
 	readonly commands: string[][] = [];
+	readonly options: ({ cwd?: string; env?: Record<string, string>; stdin?: string; inherit?: boolean } | undefined)[] =
+		[];
 	failPrepare = false;
 	failLaunch = false;
 	prepareDelay = 0;
-	captureFails = false;
 
-	async run(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	async run(
+		args: string[],
+		options?: { cwd?: string; env?: Record<string, string>; stdin?: string; inherit?: boolean },
+	): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 		this.commands.push(args);
+		this.options.push(options);
 		if (args[0] === "/bin/sh" && this.failPrepare) {
 			await Bun.sleep(this.prepareDelay);
 			return { exitCode: 1, stdout: "", stderr: "prepare failed" };
@@ -29,11 +34,10 @@ class FakeTmux implements AgentSessionRunner {
 		if (args[0] === "tmux" && args[1] === "respawn-pane" && this.failLaunch)
 			return { exitCode: 1, stdout: "", stderr: "launch failed" };
 		if (args[0] === "git" && args[1] === "rev-parse") return { exitCode: 0, stdout: ".git\n", stderr: "" };
-		if (args[0] === "tmux" && args[1] === "capture-pane")
-			return this.captureFails
-				? { exitCode: 1, stdout: "", stderr: "gone" }
-				: { exitCode: 0, stdout: ">\n", stderr: "" };
-		if (args[0] === "tmux" && args[1] === "list-panes") return { exitCode: 0, stdout: "0 0\n", stderr: "" };
+		if (args[0] === "tmux" && args[1] === "new-session") return { exitCode: 0, stdout: "%1\n", stderr: "" };
+		if (args[0] === "tmux" && args[1] === "display-message")
+			return { exitCode: 0, stdout: args.at(-1) === "#{cursor_y}" ? "0\n" : "0 0\n", stderr: "" };
+		if (args[0] === "tmux" && args[1] === "capture-pane") return { exitCode: 0, stdout: ">\n", stderr: "" };
 		return { exitCode: 0, stdout: "", stderr: "" };
 	}
 }
@@ -58,6 +62,61 @@ describe("AgentSessionService", () => {
 		runner = new FakeTmux();
 	});
 
+	it("persists the placeholder pane before launching the agent", async () => {
+		const service = new AgentSessionService(core, { runner });
+		const session = await service.start("task-1");
+		expect(session.paneId).toBe("%1");
+		expect((await service.list("task-1")).sessions[0]?.paneId).toBe("%1");
+		const created = runner.commands.find((command) => command[0] === "tmux" && command[1] === "new-session");
+		expect(created?.slice(0, 6)).toEqual(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}"]);
+		expect(runner.commands).toContainEqual([
+			"tmux",
+			"respawn-pane",
+			"-k",
+			"-t",
+			"%1",
+			"/bin/sh",
+			"-lc",
+			expect.anything(),
+		]);
+	});
+
+	it("targets relocated panes for handoff input without deleting the buffer twice", async () => {
+		const service = new AgentSessionService(core, { runner });
+		await service.start("task-1");
+		const beforePaste = runner.commands.length;
+		await service.requestHandoff("task-1");
+		expect(runner.commands.slice(beforePaste).filter(([command]) => command === "tmux")).toEqual([
+			["tmux", "capture-pane", "-p", "-e", "-t", "%1"],
+			["tmux", "capture-pane", "-p", "-e", "-t", "%1"],
+			["tmux", "display-message", "-p", "-t", "%1", "#{cursor_y}"],
+			["tmux", "load-buffer", "-b", expect.stringMatching(/^backlog-/), "-"],
+			["tmux", "paste-buffer", "-d", "-b", expect.stringMatching(/^backlog-/), "-t", "%1"],
+			["tmux", "send-keys", "-t", "%1", "Enter"],
+		]);
+		const loadBuffer = runner.commands.findIndex((command) => command[0] === "tmux" && command[1] === "load-buffer");
+		expect(runner.options[loadBuffer]?.stdin).toContain("Write the task handoff now");
+	});
+
+	it("attaches outside tmux and switches the current client inside tmux", async () => {
+		const service = new AgentSessionService(core, { runner });
+		const session = await service.start("task-1");
+		const previousTmux = process.env.TMUX;
+		try {
+			delete process.env.TMUX;
+			await service.attach("task-1", session.id);
+			expect(runner.commands.at(-1)).toEqual(["tmux", "attach-session", "-t", "%1"]);
+			expect(runner.options.at(-1)).toEqual({ inherit: true });
+			process.env.TMUX = "/tmp/tmux-1/default,1,0";
+			await service.attach("task-1", session.id);
+			expect(runner.commands.at(-1)).toEqual(["tmux", "switch-client", "-t", "%1"]);
+			expect(runner.options.at(-1)).toEqual({ inherit: true });
+		} finally {
+			if (previousTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = previousTmux;
+		}
+	});
+
 	afterEach(async () => {
 		await safeCleanup(root);
 	});
@@ -70,11 +129,15 @@ describe("AgentSessionService", () => {
 		expect((await core.loadTaskById("task-1", { includeCrossBranch: false }))?.status).toBe("In Progress");
 		await expect(service.start("task-1")).rejects.toThrow("already has an active");
 		await service.stop("task-1");
-		runner.captureFails = true;
+		expect(runner.commands.filter((command) => command[1] === "kill-pane").at(-1)).toEqual([
+			"tmux",
+			"kill-pane",
+			"-t",
+			"%1",
+		]);
 		await Bun.write(session.outputPath, "retired output\n");
-		expect(await service.preview("task-1", session.id)).toBe("retired output\n");
+		expect(await service.output("task-1", session.id)).toBe("retired output\n");
 		await expect(service.attach("task-1", session.id)).rejects.toThrow("not active");
-		runner.captureFails = false;
 		const second = await service.start("TASK-1");
 		expect(second.status).toBe("running");
 		expect((await service.list("task-1")).sessions).toHaveLength(2);
@@ -207,12 +270,8 @@ describe("AgentSessionService", () => {
 			},
 		});
 		const service = new AgentSessionService(core);
-		const session = await service.start("task-1");
+		await service.start("task-1");
 		try {
-			for (let attempt = 0; attempt < 30; attempt++) {
-				if ((await service.preview("task-1", session.id)).trimEnd().endsWith(">")) break;
-				await Bun.sleep(100);
-			}
 			await service.requestHandoff("task-1");
 			for (let attempt = 0; attempt < 100; attempt++) {
 				const state = await service.list("task-1");

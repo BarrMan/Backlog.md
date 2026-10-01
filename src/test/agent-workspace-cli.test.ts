@@ -22,18 +22,23 @@ describe("agent workspace CLI", () => {
 	});
 
 	it("registers lifecycle commands and the lazy workspace guide", async () => {
-		const [workspace, sessions, handoff, config, configSet, guide] = await Promise.all([
+		const [workspace, sessions, output, handoff, config, configSet, guide] = await Promise.all([
 			$`${cli} workspace --help`.cwd(testDir).text(),
 			$`${cli} agent-session --help`.cwd(testDir).text(),
+			$`${cli} agent-session output --help`.cwd(testDir).text(),
 			$`${cli} agent-session handoff-complete --help`.cwd(testDir).text(),
 			$`${cli} agent-config --help`.cwd(testDir).text(),
 			$`${cli} agent-config set --help`.cwd(testDir).text(),
 			$`${cli} instructions agent-workspace`.cwd(testDir).text(),
 		]);
 
-		expect(workspace).toContain("task-centered agent workspace");
+		expect(workspace).toContain("Native tmux Board and Workspace windows");
 		expect(sessions).toContain("handoff-complete");
 		expect(sessions).toContain("handoff-continue");
+		expect(sessions).toContain("output");
+		expect(sessions).not.toContain("preview");
+		expect(sessions).not.toContain("input <taskId>");
+		expect(output).toContain("persisted session output");
 		expect(handoff).toContain("--request <id>");
 		expect(handoff).toContain("--file <path>");
 		expect(config).toContain("--bootstrap");
@@ -41,6 +46,14 @@ describe("agent workspace CLI", () => {
 		expect(configSet).toContain("--worktree <true|false>");
 		expect(configSet).toContain("--prepare <command>");
 		expect(guide).toContain("backlog agent-session list TASK-123");
+		expect(guide).toContain("Interactive input belongs in the native agent pane");
+	});
+
+	it("rejects the internal UI command outside its tmux host", async () => {
+		const result = await $`${cli} workspace-ui board`.cwd(testDir).nothrow().quiet();
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr.toString()).toContain("workspace-ui can only run inside a Backlog tmux workspace.");
 	});
 
 	it("copies an effective parent once and selectively retains custom presets", async () => {

@@ -2,8 +2,8 @@
 
 Use this guide only when starting, inspecting, handing off, or configuring an agent Workspace session.
 
-- Open the task-centered TUI with `backlog workspace`.
-- Inspect current and prior sessions with `backlog agent-session list BACK-123`; use `preview`, `attach`, or `input` with `--session <id>` for a selected record.
+- Open the native tmux Workspace with `backlog workspace`. It keeps persistent Board and Workspace windows and agent panes; press `/` to live-search from the shared bottom footer, `Tab` to focus the selected agent, `Ctrl+Q` to return to Workspace navigation, and `q` to detach without stopping the workspace or agents.
+- Inspect current and prior sessions with `backlog agent-session list BACK-123`; use `output` to read persisted output or `attach` with `--session <id>` for a selected record. Interactive input belongs in the native agent pane, not an agent-session command.
 - Start a session with `backlog agent-session start BACK-123`, then use `stop` or `recover` as needed. The list reports the task worktree when configured.
 - Request a handoff before replacing work: `backlog agent-session handoff BACK-123`. Complete the exact request with `handoff-complete BACK-123 --request <id> --content <text>` or `--file <path>`; the replacement starts in a detached worker. Use `handoff-continue BACK-123` only to retry a ready handoff.
 - Inspect configuration with `backlog agent-config show`. Card takes precedence over project, then root. Initialize `root`, `project`, or `card` before setting it. A configuration is complete at its scope: settings never merge with a parent. `init` is the one explicit copy operation.

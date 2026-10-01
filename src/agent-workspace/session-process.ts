@@ -48,13 +48,16 @@ export class SessionProcess {
 		if (result.exitCode !== 0) throw fail("Agent preparation failed", result);
 	}
 
-	async launch(session: AgentSession, preset: AgentPreset, env: Record<string, string>): Promise<void> {
+	async create(session: AgentSession, env: Record<string, string>): Promise<string> {
 		const environment = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
 		const created = await this.runner.run(
 			[
 				"tmux",
 				"new-session",
 				"-d",
+				"-P",
+				"-F",
+				"#{pane_id}",
 				"-s",
 				session.tmuxName,
 				"-c",
@@ -67,19 +70,30 @@ export class SessionProcess {
 			{ env },
 		);
 		if (created.exitCode !== 0) throw fail(`Could not start tmux session ${session.id}`, created);
+		const paneId = created.stdout.trim();
+		if (!/^%\d+$/.test(paneId)) throw new Error(`Could not determine tmux pane for session ${session.id}.`);
+		return paneId;
+	}
+
+	async preparePane(session: AgentSession): Promise<void> {
+		const paneId = this.paneId(session);
 		for (const args of [
 			["tmux", "set-option", "-t", session.tmuxName, "remain-on-exit", "on"],
-			["tmux", "pipe-pane", "-o", "-t", session.tmuxName, `cat >> ${quote(session.outputPath)}`],
+			["tmux", "pipe-pane", "-o", "-t", paneId, `cat >> ${quote(session.outputPath)}`],
 		]) {
 			const result = await this.runner.run(args);
 			if (result.exitCode !== 0) throw fail(`Could not prepare tmux session ${session.id}`, result);
 		}
+	}
+
+	async launch(session: AgentSession, preset: AgentPreset): Promise<void> {
+		const paneId = this.paneId(session);
 		const launched = await this.runner.run([
 			"tmux",
 			"respawn-pane",
 			"-k",
 			"-t",
-			session.tmuxName,
+			paneId,
 			"/bin/sh",
 			"-lc",
 			`exec ${buildAgentLaunchCommand(preset, session.bootstrapPath)}`,
@@ -88,70 +102,62 @@ export class SessionProcess {
 		await Bun.sleep(LAUNCH_SETTLE_DELAY_MS);
 		const pane = await this.runner.run([
 			"tmux",
-			"list-panes",
+			"display-message",
+			"-p",
 			"-t",
-			session.tmuxName,
-			"-F",
+			paneId,
 			"#{pane_dead} #{pane_dead_status}",
 		]);
 		if (pane.exitCode !== 0 || /^1\s+127/.test(pane.stdout.trim()))
 			throw fail(`Agent command failed to launch for session ${session.id}`, pane);
 	}
 
-	async capture(tmuxName: string) {
-		return await this.runner.run(["tmux", "capture-pane", "-p", "-e", "-t", tmuxName]);
+	async capture(session: AgentSession) {
+		return await this.runner.run(["tmux", "capture-pane", "-p", "-e", "-t", this.paneId(session)]);
 	}
-	async cursorRow(tmuxName: string): Promise<number | undefined> {
-		const result = await this.runner.run(["tmux", "display-message", "-p", "-t", tmuxName, "#{cursor_y}"]);
+	async cursorRow(session: AgentSession): Promise<number | undefined> {
+		const result = await this.runner.run(["tmux", "display-message", "-p", "-t", this.paneId(session), "#{cursor_y}"]);
 		return /^\d+$/.test(result.stdout.trim()) ? Number(result.stdout.trim()) : undefined;
 	}
-	async settledCapture(tmuxName: string) {
-		const initial = await this.capture(tmuxName);
+	async settledCapture(session: AgentSession) {
+		const initial = await this.capture(session);
 		await Bun.sleep(HANDOFF_SETTLE_DELAY_MS);
-		return { initial, settled: await this.capture(tmuxName) };
+		return { initial, settled: await this.capture(session) };
 	}
-	async sendEnter(tmuxName: string, sessionId: string): Promise<void> {
-		const result = await this.runner.run(["tmux", "send-keys", "-t", tmuxName, "Enter"]);
-		if (result.exitCode !== 0) throw fail(`Could not deliver handoff request to session ${sessionId}`, result);
+	async sendEnter(session: AgentSession): Promise<void> {
+		const result = await this.runner.run(["tmux", "send-keys", "-t", this.paneId(session), "Enter"]);
+		if (result.exitCode !== 0) throw fail(`Could not deliver handoff request to session ${session.id}`, result);
 	}
-	async paste(tmuxName: string, sessionId: string, input: string): Promise<void> {
+	async paste(session: AgentSession, input: string): Promise<void> {
 		const buffer = `backlog-${randomUUID()}`;
 		const loaded = await this.runner.run(["tmux", "load-buffer", "-b", buffer, "-"], { stdin: input });
-		if (loaded.exitCode !== 0) throw fail(`Could not send input to session ${sessionId}`, loaded);
+		if (loaded.exitCode !== 0) throw fail(`Could not send input to session ${session.id}`, loaded);
+		let pasted = false;
 		try {
-			const pasted = await this.runner.run(["tmux", "paste-buffer", "-d", "-b", buffer, "-t", tmuxName]);
-			if (pasted.exitCode !== 0) throw fail(`Could not send input to session ${sessionId}`, pasted);
+			const result = await this.runner.run(["tmux", "paste-buffer", "-d", "-b", buffer, "-t", this.paneId(session)]);
+			if (result.exitCode !== 0) throw fail(`Could not send input to session ${session.id}`, result);
+			pasted = true;
 		} finally {
-			await this.runner.run(["tmux", "delete-buffer", "-b", buffer]);
+			if (!pasted) await this.runner.run(["tmux", "delete-buffer", "-b", buffer]);
 		}
 	}
-	async kill(tmuxName: string): Promise<void> {
-		const result = await this.runner.run(["tmux", "kill-session", "-t", tmuxName]);
-		if (result.exitCode !== 0 && !/no server running|can't find session/i.test(result.stderr))
-			throw fail(`Could not stop session ${tmuxName}`, result);
+	async kill(session: AgentSession): Promise<void> {
+		const result = await this.runner.run(["tmux", "kill-pane", "-t", this.paneId(session)]);
+		if (result.exitCode !== 0 && !/no server running|can't find pane/i.test(result.stderr))
+			throw fail(`Could not stop session ${session.id}`, result);
 	}
-	async resize(tmuxName: string, sessionId: string, cols: number, rows: number): Promise<void> {
-		const result = await this.runner.run([
-			"tmux",
-			"resize-window",
-			"-t",
-			tmuxName,
-			"-x",
-			String(cols),
-			"-y",
-			String(rows),
-		]);
-		if (result.exitCode !== 0) throw fail(`Could not resize session ${sessionId}`, result);
+	async attach(session: AgentSession): Promise<void> {
+		const command = process.env.TMUX ? "switch-client" : "attach-session";
+		const result = await this.runner.run(["tmux", command, "-t", this.paneId(session)], { inherit: true });
+		if (result.exitCode !== 0) throw fail(`Could not attach to session ${session.id}`, result);
 	}
-	async resetSize(tmuxName: string, sessionId: string): Promise<void> {
-		const result = await this.runner.run(["tmux", "set-option", "-w", "-t", tmuxName, "window-size", "latest"]);
-		if (result.exitCode !== 0) throw fail(`Could not restore session ${sessionId} size`, result);
+
+	async alive(session: AgentSession) {
+		return await this.runner.run(["tmux", "display-message", "-p", "-t", this.paneId(session), "#{pane_dead}"]);
 	}
-	async attach(tmuxName: string, sessionId: string): Promise<void> {
-		const result = await this.runner.run(["tmux", "attach-session", "-t", tmuxName], {
-			inherit: true,
-			env: { ...process.env, TMUX: "" } as Record<string, string>,
-		});
-		if (result.exitCode !== 0) throw fail(`Could not attach to session ${sessionId}`, result);
+
+	private paneId(session: AgentSession): string {
+		if (!session.paneId) throw new Error(`Agent session ${session.id} has no tmux pane ID.`);
+		return session.paneId;
 	}
 }

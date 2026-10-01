@@ -2,6 +2,7 @@
  * Unified view manager that handles Tab switching between task views and kanban board
  */
 
+import { isTmuxWorkspace, TmuxWorkspace } from "../../agent-workspace/tmux-workspace.ts";
 import type { Core } from "../../core/backlog.ts";
 import { findLocalDuplicateTaskIds } from "../../core/duplicate-task-repair.ts";
 import type { LabelMatchMode, Milestone, Task, TaskCreateInput } from "../../types/index.ts";
@@ -17,7 +18,6 @@ import { createLoadingScreen } from "../loading.ts";
 import { buildTaskViewerMilestoneFilterModel, TaskViewerController } from "../task-viewer/controller.ts";
 import { createScreen, formatTuiTitle, keepTuiInputAlive } from "../tui.ts";
 import type { ViewType } from "../view-switcher.ts";
-import { AgentWorkspaceController, createWorkspaceViewState } from "../workspace/controller.ts";
 import { UnifiedViewSession } from "./session.ts";
 
 export interface UnifiedViewOptions {
@@ -244,7 +244,7 @@ export async function getDuplicateTaskStartupWarning(core: Core): Promise<string
 	return groups.length > 0 ? formatDuplicateTaskIdSummary(groups) : undefined;
 }
 
-type ViewResult = "switch" | "workspace" | "exit";
+type ViewResult = "switch" | "exit";
 
 export function getEmptyUnifiedViewMessage(initialView: ViewType, parentTaskId?: string): string | null {
 	if (parentTaskId) return `No child tasks found for parent task ${parentTaskId}.`;
@@ -265,13 +265,12 @@ export async function createTaskFromBoard(
 /** Main unified view controller that handles Tab switching between views. */
 export class UnifiedViewController {
 	private readonly releaseTuiInput = keepTuiInputAlive();
-	private sharedScreen: ReturnType<typeof createScreen> | undefined;
+	private boardScreen: ReturnType<typeof createScreen> | undefined;
 	private taskWatcher: ReturnType<typeof watchTasks> | undefined;
 	private configWatcher: ReturnType<typeof watchConfig> | undefined;
 	private unsubscribeSession: (() => void) | undefined;
 	private exitHandler: (() => void) | undefined;
 	private session!: UnifiedViewSession;
-	private readonly workspaceState = createWorkspaceViewState();
 	private currentView: ViewType;
 	private isInitialLoad = true;
 	private kanbanStatuses: string[] = [];
@@ -293,6 +292,10 @@ export class UnifiedViewController {
 
 	async run(): Promise<void> {
 		try {
+			if (this.options.initialView === "workspace") {
+				await new TmuxWorkspace(this.options.core.filesystem.rootDir).enter("workspace");
+				return;
+			}
 			const loaded = await loadTasksForUnifiedView(this.options.core, this.options);
 			if (!(await this.initialize(loaded))) return;
 			this.startWatchers();
@@ -352,25 +355,17 @@ export class UnifiedViewController {
 			const result = await this.showCurrentView();
 			this.isInitialLoad = false;
 			if (result === "exit") return;
-			this.currentView =
-				result === "workspace"
-					? "workspace"
-					: this.currentView === "workspace"
-						? "kanban"
-						: this.currentView === "kanban"
-							? "task-list"
-							: "kanban";
+			this.currentView = this.currentView === "kanban" ? "task-list" : "kanban";
 		}
 	}
 
 	private showCurrentView(): Promise<ViewResult> {
 		if (this.currentView === "task-list" || this.currentView === "task-detail") return this.showTaskView();
-		if (this.currentView === "kanban") return this.showKanbanView();
-		return this.showWorkspaceView();
+		return this.showKanbanView();
 	}
 
 	private async showTaskView(): Promise<ViewResult> {
-		this.destroySharedScreen();
+		this.destroyBoardScreen();
 		const tasks = this.getRenderableTasks();
 		if (tasks.length === 0) {
 			console.log("No tasks available.");
@@ -415,15 +410,6 @@ export class UnifiedViewController {
 		}
 	}
 
-	private async showWorkspaceView(): Promise<ViewResult> {
-		const result = await new AgentWorkspaceController(this.options.core, {
-			screen: this.getSharedScreen(),
-			preserveScreen: true,
-			state: this.workspaceState,
-		}).run();
-		return result === "board" ? "switch" : "exit";
-	}
-
 	private async showKanbanView(): Promise<ViewResult> {
 		const config = await this.options.core.filesystem.loadConfig();
 		this.configuredLabels = config?.labels ?? this.configuredLabels;
@@ -441,6 +427,8 @@ export class UnifiedViewController {
 					onTaskSelect: this.selectTask.bind(this),
 					onTabPress: this.switchView.bind(this),
 					onWorkspacePress: this.showWorkspace.bind(this),
+					keepWorkspaceOpen: isTmuxWorkspace(),
+					onDetach: isTmuxWorkspace() ? this.detachWorkspace.bind(this) : undefined,
 					filters: createKanbanSharedFilters(this.session.filters),
 					availableLabels: this.getBoardAvailableLabels(),
 					availableMilestones: [...this.milestoneFilterModel.availableMilestoneTitles],
@@ -456,7 +444,7 @@ export class UnifiedViewController {
 					projects: config?.projects,
 					hideEmptyColumns: config?.hideEmptyColumns ?? false,
 					createTask: this.createBoardTask.bind(this),
-					screen: this.getSharedScreen(),
+					screen: this.getBoardScreen(),
 					preserveScreen: true,
 				},
 			).run();
@@ -466,9 +454,9 @@ export class UnifiedViewController {
 		}
 	}
 
-	private getSharedScreen(): ReturnType<typeof createScreen> | undefined {
-		if (process.stdout.isTTY) this.sharedScreen ??= createScreen({ title: formatTuiTitle("Board", this.projectName) });
-		return this.sharedScreen;
+	private getBoardScreen(): ReturnType<typeof createScreen> | undefined {
+		if (process.stdout.isTTY) this.boardScreen ??= createScreen({ title: formatTuiTitle("Board", this.projectName) });
+		return this.boardScreen;
 	}
 
 	private getRenderableTasks(): Task[] {
@@ -530,8 +518,14 @@ export class UnifiedViewController {
 		this.viewResult = "switch";
 	}
 
-	private async showWorkspace(): Promise<void> {
-		this.viewResult = "workspace";
+	private async showWorkspace(task: Task | undefined): Promise<void> {
+		const workspace = new TmuxWorkspace(this.options.core.filesystem.rootDir);
+		if (isTmuxWorkspace()) await workspace.showWorkspace(task?.id);
+		else await workspace.enter("workspace", task?.id);
+	}
+
+	private async detachWorkspace(): Promise<void> {
+		await new TmuxWorkspace(this.options.core.filesystem.rootDir).detach();
 	}
 
 	private async createBoardTask(input: TaskCreateInput): Promise<Task> {
@@ -549,15 +543,15 @@ export class UnifiedViewController {
 		this.configWatcher?.stop();
 	}
 
-	private destroySharedScreen(): void {
-		this.sharedScreen?.destroy();
-		this.sharedScreen = undefined;
+	private destroyBoardScreen(): void {
+		this.boardScreen?.destroy();
+		this.boardScreen = undefined;
 	}
 
 	private cleanup(): void {
 		this.unsubscribeSession?.();
 		if (this.exitHandler) process.removeListener("exit", this.exitHandler);
 		this.stopWatchers();
-		this.destroySharedScreen();
+		this.destroyBoardScreen();
 	}
 }

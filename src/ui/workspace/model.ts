@@ -11,7 +11,7 @@ export type DraftField =
 
 export interface WorkspaceDraft {
 	values: Record<DraftField, string>;
-	cursor: Partial<Record<DraftField, { x: number; y: number; scroll: number }>>;
+	cursor: Partial<Record<DraftField, { x: number; y: number }>>;
 	baseline: Record<DraftField, string>;
 }
 
@@ -96,22 +96,4 @@ export function changedTaskFields(draft: WorkspaceDraft, latest: Task): Partial<
 		}
 	}
 	return changed;
-}
-
-/** Return terminal bytes rather than blessed names such as "up". */
-export function terminalInput(character: string, key: { sequence?: string; name?: string; ctrl?: boolean }): string {
-	if (key.sequence) return key.sequence;
-	if (character) return character;
-	if (key.ctrl && key.name?.length === 1) return String.fromCharCode(key.name.toUpperCase().charCodeAt(0) - 64);
-	const sequences: Record<string, string> = {
-		up: "\u001b[A",
-		down: "\u001b[B",
-		right: "\u001b[C",
-		left: "\u001b[D",
-		escape: "\u001b",
-		tab: "\t",
-		enter: "\r",
-		"C-c": "\u0003",
-	};
-	return key.name ? (sequences[key.name] ?? "") : "";
 }

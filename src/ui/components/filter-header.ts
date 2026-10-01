@@ -194,6 +194,11 @@ export class FilterHeader {
 		return this.currentLayout.height;
 	}
 
+	hide(): void {
+		(this.container as unknown as { hide(): void }).hide();
+		for (const element of this.elements) (element as unknown as { hide(): void }).hide();
+	}
+
 	/**
 	 * Update filter state externally
 	 */

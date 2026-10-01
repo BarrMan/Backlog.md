@@ -9,7 +9,7 @@ import { resolveAgentConfiguration } from "./config.ts";
 import { hasEmptyHandoffInput } from "./handoff-input.ts";
 import { type AgentSessionRunner, BunRunner, SessionProcess } from "./session-process.ts";
 import { type SessionState, SessionStore } from "./session-store.ts";
-import { fail, slug } from "./session-utils.ts";
+import { slug } from "./session-utils.ts";
 import { spawnSessionWorker } from "./session-worker-client.ts";
 import { ensureSessionWorktree } from "./session-worktree.ts";
 import {
@@ -119,6 +119,11 @@ export class AgentSessionService {
 			if (preset.worktree)
 				await ensureSessionWorktree(this.runner, this.core.filesystem.rootDir, task.id, reserved.cwd);
 			const env = { ...process.env, ...preset.env, ...this.environment(reserved) } as Record<string, string>;
+			const paneId = await this.process.create(reserved, env);
+			await this.store.mutate(task.id, async (state) => {
+				this.session(state, reserved.id).paneId = paneId;
+			});
+			reserved.paneId = paneId;
 			if (preset.prepare) await this.process.prepare(preset.prepare, reserved.cwd, env);
 			await this.store.write(
 				reserved.bootstrapPath,
@@ -131,7 +136,8 @@ export class AgentSessionService {
 					worktree: preset.worktree,
 				}),
 			);
-			await this.process.launch(reserved, preset, env);
+			await this.process.preparePane(reserved);
+			await this.process.launch(reserved, preset);
 			const first = !(await this.store.read(task.id)).hasSuccessfulSession;
 			const latest = await this.requireTask(task.id);
 			if (
@@ -151,8 +157,13 @@ export class AgentSessionService {
 			reserved.status = AGENT_SESSION_STATUS.RUNNING;
 			return reserved;
 		} catch (error) {
-			await this.process.kill(reserved.tmuxName);
+			if (reserved.paneId) await this.process.kill(reserved);
 			await this.store.mutate(task.id, async (state) => {
+				if (!reserved.paneId) {
+					state.sessions = state.sessions.filter((candidate) => candidate.id !== reserved.id);
+					if (state.activeSessionId === reserved.id) delete state.activeSessionId;
+					return;
+				}
 				const current = this.session(state, reserved.id);
 				current.status = AGENT_SESSION_STATUS.FAILED;
 				current.endedAt = timestamp();
@@ -168,7 +179,7 @@ export class AgentSessionService {
 
 	async stop(taskId: string, sessionId?: string): Promise<void> {
 		const { task, session } = await this.sessionSnapshot(taskId, sessionId);
-		await this.process.kill(session.tmuxName);
+		await this.process.kill(session);
 		await this.store.mutate(task.id, async (state) => {
 			const current = this.session(state, session.id);
 			current.status = AGENT_SESSION_STATUS.STOPPED;
@@ -177,38 +188,18 @@ export class AgentSessionService {
 		});
 	}
 
-	async preview(taskId: string, sessionId?: string): Promise<string> {
+	async output(taskId: string, sessionId?: string): Promise<string> {
 		const { session } = await this.sessionSnapshot(taskId, sessionId, false);
-		const result = await this.process.capture(session.tmuxName);
-		if (result.exitCode === 0) return result.stdout;
 		try {
 			return await Bun.file(session.outputPath).text();
 		} catch {
-			throw fail(`Could not read session ${session.id}`, result);
+			throw new Error(`Could not read session ${session.id} output.`);
 		}
-	}
-
-	async sendInput(taskId: string, input: string, sessionId?: string): Promise<void> {
-		const { session } = await this.sessionSnapshot(taskId, sessionId);
-		await this.process.paste(session.tmuxName, session.id, input);
-	}
-
-	async resize(taskId: string, cols: number, rows: number, sessionId?: string): Promise<void> {
-		if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1)
-			throw new Error("Terminal dimensions must be positive integers.");
-		const { session } = await this.sessionSnapshot(taskId, sessionId);
-		await this.process.resize(session.tmuxName, session.id, cols, rows);
 	}
 
 	async attach(taskId: string, sessionId?: string): Promise<void> {
 		const { session } = await this.sessionSnapshot(taskId, sessionId);
-		await this.resetSize(taskId, session.id);
-		await this.process.attach(session.tmuxName, session.id);
-	}
-
-	async resetSize(taskId: string, sessionId?: string): Promise<void> {
-		const { session } = await this.sessionSnapshot(taskId, sessionId);
-		await this.process.resetSize(session.tmuxName, session.id);
+		await this.process.attach(session);
 	}
 
 	async requestHandoff(taskId: string): Promise<HandoffRequest> {
@@ -321,7 +312,7 @@ export class AgentSessionService {
 		if (!predecessor) return null;
 		const oldSession = predecessor;
 		try {
-			await this.process.kill(oldSession.tmuxName);
+			await this.process.kill(oldSession);
 			await this.store.mutate(task.id, async (state) => {
 				this.stopSession(state, oldSession.id);
 			});
@@ -368,16 +359,14 @@ export class AgentSessionService {
 				candidate.status === AGENT_SESSION_STATUS.STARTING || candidate.status === AGENT_SESSION_STATUS.RUNNING,
 		)) {
 			if (session.status === AGENT_SESSION_STATUS.STARTING && this.ownerIsAlive(session.ownerPid)) continue;
-			const alive = await this.runner.run(["tmux", "has-session", "-t", session.tmuxName]);
-			const dead =
-				alive.exitCode === 0
-					? await this.runner.run(["tmux", "list-panes", "-t", session.tmuxName, "-F", "#{pane_dead}"])
-					: alive;
+			const alive = session.paneId
+				? await this.process.alive(session)
+				: { exitCode: 1, stdout: "", stderr: "missing pane ID" };
+			const dead = alive;
 			if (alive.exitCode === 0 && dead.stdout.trim() !== "1" && session.status === AGENT_SESSION_STATUS.RUNNING)
 				continue;
 			// An abandoned launch must not reserve the task forever, even if its placeholder pane survived.
-			if (session.status === AGENT_SESSION_STATUS.STARTING && alive.exitCode === 0)
-				await this.process.kill(session.tmuxName);
+			if (session.status === AGENT_SESSION_STATUS.STARTING && alive.exitCode === 0) await this.process.kill(session);
 			await this.store.mutate(task.id, async (current) => {
 				const target = this.session(current, session.id);
 				target.status =
@@ -475,8 +464,8 @@ export class AgentSessionService {
 				(candidate) => candidate.id === handoff.sessionId && candidate.status === AGENT_SESSION_STATUS.RUNNING,
 			);
 			if (!session) return "skipped";
-			const { initial, settled } = await this.process.settledCapture(session.tmuxName);
-			const cursorRow = await this.process.cursorRow(session.tmuxName);
+			const { initial, settled } = await this.process.settledCapture(session);
+			const cursorRow = await this.process.cursorRow(session);
 			if (
 				initial.exitCode !== 0 ||
 				settled.exitCode !== 0 ||
@@ -495,8 +484,8 @@ export class AgentSessionService {
 				`backlog agent-session handoff-complete ${taskId} --request ${handoff.id} --file <handoff.md>.`,
 				"Include completed work, changed files, verification, open risks, and next steps.",
 			].join(" ");
-			await this.process.paste(session.tmuxName, session.id, request);
-			await this.process.sendEnter(session.tmuxName, session.id);
+			await this.process.paste(session, request);
+			await this.process.sendEnter(session);
 			await this.store.mutate(taskId, async (current) => {
 				if (current.handoff?.id === handoff.id && current.handoff.status === HANDOFF_STATUS.REQUESTED) {
 					current.handoff.error = undefined;

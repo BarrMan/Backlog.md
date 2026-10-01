@@ -66,6 +66,7 @@ Use CLI commands for Backlog changes:
 - Search: `backlog search "query" --plain`
 - List with task filters: `backlog task list --status "<active status>" --assignee @your-name --labels backend --search "auth" --limit 20 --plain`
 - Update: `backlog task edit {{TASK_ID:123}} ...`
+- Repair a task rejected for a missing schema version: `backlog task migrate-legacy {{TASK_ID:123}}` (review the task first; this only converts the retired section-backed format)
 - Create docs: `backlog doc create "Title"`
 - Update docs: `backlog doc update doc-1 --content "Markdown"`
 

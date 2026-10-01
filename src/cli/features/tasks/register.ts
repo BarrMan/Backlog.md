@@ -130,6 +130,24 @@ export function registerTaskCommands(program: Command, { runtime, readOutput }: 
 			command.error("error: unknown option '--json'", { code: "commander.unknownOption", exitCode: 1 });
 	});
 	registerTaskCreate(taskCmd, runtime, readOutput);
+	addHelpSchema(taskCmd.command("migrate-legacy <taskId>"), {
+		reads: "One local unversioned legacy task",
+		required: [{ name: "taskId", type: "Task ID", description: "Task to convert" }],
+		writes: "Rewrites the validated task into frontmatter schema version 2",
+		output: "Path of the migrated task",
+		examples: ["backlog task migrate-legacy BACK-722"],
+	})
+		.description("convert one selected legacy task to the current schema")
+		.action(async (taskId: string) => {
+			try {
+				console.log(
+					`Migrated ${taskId}: ${await new Core(await requireProjectRoot()).filesystem.migrateLegacyTask(taskId)}`,
+				);
+			} catch (error) {
+				console.error(error instanceof Error ? error.message : String(error));
+				process.exitCode = 1;
+			}
+		});
 
 	async function runTaskList(
 		options: OptionValues,

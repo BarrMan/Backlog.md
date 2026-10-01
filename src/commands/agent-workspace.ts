@@ -7,10 +7,16 @@ import {
 	updateAgentConfiguration,
 } from "../agent-workspace/config.ts";
 import { AgentSessionService } from "../agent-workspace/sessions.ts";
+import { isTmuxWorkspace, TmuxWorkspace, type TmuxWorkspaceView } from "../agent-workspace/tmux-workspace.ts";
 import type { AgentConfigScope, AgentConfiguration, AgentPreset } from "../agent-workspace/types.ts";
 import { spawnSessionWorker } from "../agent-workspace/worker.ts";
 import type { Core } from "../core/backlog.ts";
 import { UnifiedViewController } from "../ui/unified/controller.ts";
+import {
+	AgentWorkspaceController,
+	type AgentWorkspaceOptions,
+	createWorkspaceViewState,
+} from "../ui/workspace/controller.ts";
 import { addHelpSchema, choiceType } from "./help-schema.ts";
 
 const SCOPES = ["root", "project", "card"] as const;
@@ -83,20 +89,61 @@ type CoreFactory = {
 	root(): Promise<Core>;
 };
 
+function parseWorkspaceView(value: string): TmuxWorkspaceView {
+	if (
+		value === "board" ||
+		value === "workspace-nav" ||
+		value === "workspace-tasks" ||
+		value === "workspace-details" ||
+		value === "workspace-footer"
+	)
+		return value;
+	throw new Error("workspace-ui view must be a native workspace region.");
+}
+
 export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFactory): void {
 	const coreForScope = (scope: AgentConfigScope) => (scope === "root" ? getCore.root() : getCore.project());
 	addHelpSchema(program.command("workspace"), {
 		reads: "Agent session state and configuration",
-		output: "Interactive task-centered agent Workspace",
+		output: "Native tmux Board and Workspace windows",
 		examples: ["backlog workspace"],
 	})
 		.description("open the task-centered agent workspace")
-		.action(async () => new UnifiedViewController({ core: await getCore.project(), initialView: "workspace" }).run());
+		.action(async () => {
+			const core = await getCore.project();
+			await new TmuxWorkspace(core.filesystem.rootDir).enter("workspace");
+		});
+
+	program.command("workspace-ui <view>", { hidden: true }).action(async (value) => {
+		const view = parseWorkspaceView(value);
+		if (!isTmuxWorkspace()) throw new Error("workspace-ui can only run inside a Backlog tmux workspace.");
+		if (process.env.BACKLOG_TMUX_VIEW !== view) throw new Error("workspace-ui view does not match its tmux host.");
+
+		const core = await getCore.project();
+		const host = new TmuxWorkspace(core.filesystem.rootDir);
+		if (process.env.BACKLOG_TMUX_WORKSPACE !== host.sessionName)
+			throw new Error("workspace-ui belongs to a different Backlog tmux workspace.");
+		if (view === "board") {
+			await new UnifiedViewController({ core, initialView: "kanban" }).run();
+			return;
+		}
+		if (view === "workspace-nav" || view === "workspace-details" || view === "workspace-footer") {
+			await new AgentWorkspaceController(core, {
+				host,
+				state: createWorkspaceViewState(),
+				region: view as AgentWorkspaceOptions["region"],
+			}).run();
+			return;
+		}
+
+		const state = createWorkspaceViewState();
+		await new AgentWorkspaceController(core, { host, state, region: "workspace-tasks" }).run();
+	});
 
 	const sessions = addHelpSchema(program.command("agent-session"), {
 		reads: "Task session state, output, and handoff records",
 		optional: [{ name: "--help", type: "Boolean", description: "Show lifecycle command help" }],
-		output: "Session records as JSON; attach connects to the session terminal",
+		output: "Session records as JSON; output prints persisted session output; attach connects to the session terminal",
 		examples: ["backlog agent-session list BACK-123", "backlog agent-session start BACK-123 --preset opencode"],
 	})
 		.description("manage task agent sessions")
@@ -136,18 +183,11 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 			await new AgentSessionService(await getCore.project()).attach(taskId, options.session);
 		});
 	sessions
-		.command("preview <taskId>")
-		.description("preview session terminal output")
+		.command("output <taskId>")
+		.description("print persisted session output")
 		.option("--session <sessionId>", "session ID")
 		.action(async (taskId, options) => {
-			print(await new AgentSessionService(await getCore.project()).preview(taskId, options.session));
-		});
-	sessions
-		.command("input <taskId> <input>")
-		.description("send terminal input to a session")
-		.option("--session <sessionId>", "session ID")
-		.action(async (taskId, input, options) => {
-			await new AgentSessionService(await getCore.project()).sendInput(taskId, input, options.session);
+			console.log(await new AgentSessionService(await getCore.project()).output(taskId, options.session));
 		});
 	sessions
 		.command("handoff <taskId>")

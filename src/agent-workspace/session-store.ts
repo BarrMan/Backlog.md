@@ -52,6 +52,8 @@ function isSession(value: unknown, taskId: string): value is AgentSession {
 		if (typeof value[key] !== "string") return false;
 	}
 	return (
+		(value.paneId === undefined || typeof value.paneId === "string") &&
+		(value.status === AGENT_SESSION_STATUS.STARTING || typeof value.paneId === "string") &&
 		(value.presetSnapshot === undefined || isPreset(value.presetSnapshot)) &&
 		AGENT_CONFIG_SCOPES.includes(value.configScope as AgentSession["configScope"]) &&
 		["endedAt", "predecessorId", "error"].every((key) => value[key] === undefined || typeof value[key] === "string") &&

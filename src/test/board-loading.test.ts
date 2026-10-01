@@ -137,6 +137,40 @@ describe("Board Loading with checkActiveBranches", () => {
 		});
 	});
 
+	it("keeps cross-branch tasks when completed history has an unversioned legacy payload", async () => {
+		await core.createTask(createTestTask("task-1"), false);
+		await $`git add .`.cwd(TEST_DIR).quiet();
+		await $`git commit -m "Add local task"`.cwd(TEST_DIR).quiet();
+		await $`git checkout -b legacy-history`.cwd(TEST_DIR).quiet();
+		await core.createTask(createTestTask("task-3"), false);
+		await $`git add .`.cwd(TEST_DIR).quiet();
+		await $`git commit -m "Add branch task"`.cwd(TEST_DIR).quiet();
+		await Bun.write(
+			`${core.filesystem.completedDir}/task-2 - Legacy.md`,
+			"---\nid: TASK-2\ntitle: Legacy\nstatus: Done\nassignee: []\ncreated_date: '2026-10-01'\nlabels: []\ndependencies: []\n---\n",
+		);
+		await Bun.write(
+			`${core.filesystem.tasksDir}/task-4 - Legacy.md`,
+			"---\nid: TASK-4\ntitle: Legacy\nstatus: To Do\nassignee: []\ncreated_date: '2026-10-01'\nlabels: []\ndependencies: []\n---\n",
+		);
+		await $`git add .`.cwd(TEST_DIR).quiet();
+		await $`git commit -m "Add legacy completion"`.cwd(TEST_DIR).quiet();
+		await $`git checkout main`.cwd(TEST_DIR).quiet();
+
+		const tasks = await core.loadTasks();
+		expect(tasks).toMatchObject([{ id: "TASK-1" }, { id: "TASK-3" }]);
+		expect(tasks.find((task) => task.id === "TASK-4")).toBeUndefined();
+		const entries = (await core.loadTaskSnapshot()).branchStateEntries;
+		for (const [id, type] of [
+			["TASK-2", "completed"],
+			["TASK-4", "task"],
+		] as const) {
+			const legacy = entries?.find((entry) => entry.id === id);
+			expect(legacy).toMatchObject({ type });
+			expect(legacy?.task).toBeUndefined();
+		}
+	});
+
 	describe("Config integration", () => {
 		it("should use default values when config properties are undefined", async () => {
 			// Save a minimal config without the branch-related settings

@@ -48,7 +48,6 @@ export class FilterBar {
 			availableLabels: this.labels,
 			availableMilestones: this.milestones,
 			visibleFilters: [
-				"search",
 				"type",
 				...(options.projects.length > 0 ? (["project"] as const) : []),
 				"priority",
@@ -94,6 +93,10 @@ export class FilterBar {
 
 	open(filterId: Exclude<FilterControlId, "search" | "status">): void {
 		void this.openPicker(filterId);
+	}
+
+	setSearch(query: string): void {
+		this.applyFilters({ searchQuery: query });
 	}
 
 	setBorderColor(color: string): void {

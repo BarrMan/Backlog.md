@@ -6,7 +6,6 @@ import {
 	createWorkspaceDraft,
 	parseAcceptanceCriteria,
 	taskWithWorkspaceDraft,
-	terminalInput,
 } from "../ui/workspace/model.ts";
 
 const task = (id: string, status: string): Task => ({
@@ -32,7 +31,7 @@ describe("agent workspace model", () => {
 		]);
 	});
 
-	it("renders configured empty statuses, collapses groups, and routes terminal keys", () => {
+	it("renders configured empty statuses and grouped tasks", () => {
 		expect(
 			buildWorkspaceEntries([task("BACK-1", "To Do")], ["To Do", "In Progress", "Done"], "All", new Set()).map(
 				(entry) => entry.label,
@@ -43,8 +42,6 @@ describe("agent workspace model", () => {
 				(entry) => entry.label,
 			),
 		).toEqual(["+ To Do (1)"]);
-		expect(terminalInput("", { name: "up" })).toBe("\u001b[A");
-		expect(terminalInput("", { name: "escape", sequence: "\u001b" })).toBe("\u001b");
 	});
 
 	it("only saves fields changed against their original task revision", () => {

@@ -24,7 +24,9 @@ type BoardInteractionOptions = {
 	onClose: (handoff?: () => Promise<unknown>) => Promise<void>;
 	onTaskSelect?: (task: Task) => void;
 	onTabPress?: () => Promise<void>;
-	onWorkspacePress?: () => Promise<void>;
+	onWorkspacePress?: (task: Task | undefined) => Promise<void>;
+	keepWorkspaceOpen?: boolean;
+	onDetach?: () => Promise<void>;
 	onSwitchView?: () => Promise<void>;
 };
 
@@ -71,7 +73,7 @@ export class BoardInteraction {
 		this.bindKey(keymapKeys("board", "complete"), () => this.taskAction("complete"));
 		this.bindKey(keymapKeys("board", "archive"), () => this.taskAction("archive"));
 		this.bindKey(keymapKeys("board", "toggleHideEmpty"), this.toggleHideEmpty.bind(this));
-		this.bindKey(keymapKeys("shared", "quitWithoutEscape"), () => this.options.onClose());
+		this.bindKey(keymapKeys("shared", "quitWithoutEscape"), this.quit.bind(this));
 		this.bindKey(keymapKeys("shared", "escape"), this.escape.bind(this));
 	}
 
@@ -84,7 +86,12 @@ export class BoardInteraction {
 	}
 
 	isBlocked(): boolean {
-		return this.options.popup.isOpen || this.options.filters.isPickerOpen || this.options.dialogs.isOpen;
+		return (
+			this.options.footer.isSearchEditing ||
+			this.options.popup.isOpen ||
+			this.options.filters.isPickerOpen ||
+			this.options.dialogs.isOpen
+		);
 	}
 
 	focusBoard(): void {
@@ -132,7 +139,7 @@ export class BoardInteraction {
 		}
 
 		this.pendingSearchWrap = null;
-		this.options.filters.focus("search");
+		this.options.footer.focusSearch();
 	}
 
 	private openFilter(id: "priority" | "type" | "project" | "labels" | "milestone"): void {
@@ -161,7 +168,7 @@ export class BoardInteraction {
 			return;
 		}
 
-		const { board, view, filters } = this.options;
+		const { board, view } = this.options;
 		if (board.move) {
 			if (board.moveInsertion(direction)) {
 				this.options.onRender();
@@ -175,7 +182,7 @@ export class BoardInteraction {
 		const boundary = resolveListBoundaryNavigation(direction, lane.selectedIndex, lane.tasks.length, key);
 		if (boundary === "search") {
 			this.pendingSearchWrap = lane.tasks.length ? (direction === "up" ? "to-last" : "to-first") : null;
-			filters.focus("search");
+			this.options.footer.focusSearch();
 		} else if (boundary !== "stay") {
 			view.focus(view.selectedLaneIndex, lane.selectedIndex + (direction === "up" ? -1 : 1));
 		}
@@ -358,12 +365,22 @@ export class BoardInteraction {
 
 	private async workspace(): Promise<void> {
 		if (!this.isBlocked() && this.focus === "board" && !this.options.board.move && this.options.onWorkspacePress) {
-			await this.options.onClose(this.options.onWorkspacePress);
+			const handoff = async () => {
+				await this.options.onWorkspacePress?.(this.options.board.selectedTask);
+			};
+			if (this.options.keepWorkspaceOpen) await handoff();
+			else await this.options.onClose(handoff);
 		}
+	}
+
+	private async quit(): Promise<void> {
+		if (this.options.onDetach) await this.options.onDetach();
+		else await this.options.onClose();
 	}
 
 	private async escape(): Promise<void> {
 		const { board, popup, filters, view } = this.options;
+		if (this.options.footer.isSearchEditing) return;
 		if (popup.isOpen || this.options.dialogs.isOpen || filters.isPickerOpen) {
 			return;
 		}
@@ -380,7 +397,7 @@ export class BoardInteraction {
 			this.options.onRender();
 			return;
 		}
-		await this.options.onClose();
+		await this.quit();
 	}
 
 	private bindKey(keys: string[], action: () => void | Promise<void>): void {

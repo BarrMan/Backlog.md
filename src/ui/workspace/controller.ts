@@ -1,6 +1,7 @@
 import { box, list, scrollablebox, textarea } from "neo-neo-bblessed";
 import { getEditableAgentConfiguration, updateAgentConfiguration } from "../../agent-workspace/config.ts";
 import { AgentSessionService } from "../../agent-workspace/sessions.ts";
+import { TmuxWorkspace } from "../../agent-workspace/tmux-workspace.ts";
 import type {
 	AgentConfigScope,
 	AgentConfiguration,
@@ -22,15 +23,11 @@ import {
 	type FilterHeader,
 	type FilterState,
 } from "../components/filter-header.ts";
+import { FooterSearch } from "../components/footer-search.ts";
 import { openTaskComposer, type TaskComposerOptions } from "../components/task-composer.ts";
 import { formatFooterContent } from "../footer-content.ts";
 import { formatKeymap, keymapKeys, matchesKey } from "../keymap.ts";
-import {
-	focusTaskFilterControl,
-	openTaskFilterPicker,
-	taskFilterHeaderControls,
-	taskFilterOptions,
-} from "../task-filter-wiring.ts";
+import { openTaskFilterPicker, taskFilterHeaderControls, taskFilterOptions } from "../task-filter-wiring.ts";
 import { TASK_FIELD_LABELS } from "../task-labels.ts";
 import { buildTaskViewerMilestoneFilterModel } from "../task-viewer/controller.ts";
 import { generateDetailContent } from "../task-viewer/detail-content.ts";
@@ -42,43 +39,47 @@ import {
 	type DraftField,
 	parseAcceptanceCriteria,
 	taskWithWorkspaceDraft,
-	terminalInput,
 	type WorkspaceDraft,
 	type WorkspaceEntry,
 } from "./model.ts";
 import { reconciledWorkspaceSelection, workspaceRows } from "./reconciliation.ts";
 
-type Mode = "navigation" | "details" | "field" | "inline" | "history" | "config" | "composer";
+type Mode = "navigation" | "details" | "field" | "history" | "config" | "composer";
+type WorkspaceHost = Pick<TmuxWorkspace, "showBoard" | "showAgent" | "focusAgent" | "takeTaskRequest" | "detach"> &
+	Partial<
+		Pick<
+			TmuxWorkspace,
+			"focusSearch" | "focusTasks" | "resizeNavigation" | "resizeFooter" | "workspaceState" | "updateWorkspaceState"
+		>
+	>;
+type EditableWidget = ReturnType<typeof textarea> & {
+	cancel?(): void;
+	readInput?(): void;
+	cpos?: { x: number; y: number };
+	setScroll?(value: number): void;
+};
+
 export type WorkspaceViewState = {
 	drafts: Map<string, WorkspaceDraft>;
-	scrolls: Map<string, { details: number; preview: number }>;
+	scrolls: Map<string, number>;
 	filters: FilterState;
 	collapsed: Set<string>;
+	detailsVisible: boolean;
 	selectedTaskId?: string;
+};
+type SharedWorkspaceState = Pick<WorkspaceViewState, "filters" | "selectedTaskId"> & {
+	footerEditing?: boolean;
+	footerContext?: "tasks" | "details";
 };
 
 export type AgentWorkspaceOptions = {
 	screen?: ReturnType<typeof createScreen>;
 	service?: AgentSessionService;
+	host?: WorkspaceHost;
 	state?: WorkspaceViewState;
-	preserveScreen?: boolean;
 	taskComposer?: (options: TaskComposerOptions) => Promise<Task | null>;
+	region?: "workspace-nav" | "workspace-tasks" | "workspace-details" | "workspace-footer";
 };
-
-type AgentWorkspaceInitialData = {
-	config: Awaited<ReturnType<Core["filesystem"]["loadConfig"]>>;
-	availableMilestoneTitles: string[];
-	resolveMilestoneLabel: (milestone: string) => string;
-};
-
-export function createWorkspaceViewState(): WorkspaceViewState {
-	return {
-		drafts: new Map(),
-		scrolls: new Map(),
-		filters: { search: "", status: [], taskTypes: [], projects: [], priority: "", labels: [], milestone: "" },
-		collapsed: new Set(),
-	};
-}
 
 const FIELDS: Array<[DraftField, string]> = [
 	["title", TASK_FIELD_LABELS.TITLE],
@@ -88,49 +89,26 @@ const FIELDS: Array<[DraftField, string]> = [
 	["implementationNotes", "Notes"],
 	["finalSummary", TASK_FIELD_LABELS.FINAL_SUMMARY],
 ];
-type ScrollBox = { getScroll(): number; setScroll(value: number): void; setLabel?(label: string): void };
-type LayoutWidget = { top?: number; left?: string; width?: string; height?: number; bottom?: number };
-type EditableWidget = ReturnType<typeof textarea> & {
-	cancel?: () => void;
-	readInput?: () => void;
-	cpos?: { x: number; y: number };
-	getScroll?: () => number;
-	setScroll?: (value: number) => void;
-};
 
-// Blessed exposes these runtime properties but does not declare them on every widget subtype.
-function layoutWidget<T>(widget: T): T & LayoutWidget {
-	return widget as T & LayoutWidget;
+export function createWorkspaceViewState(): WorkspaceViewState {
+	return {
+		drafts: new Map(),
+		scrolls: new Map(),
+		filters: { search: "", status: [], taskTypes: [], projects: [], priority: "", labels: [], milestone: "" },
+		collapsed: new Set(),
+		detailsVisible: true,
+	};
 }
 
-function scrollBox(widget: unknown): ScrollBox {
-	return widget as ScrollBox;
-}
-
-function editableWidget(widget: unknown): EditableWidget {
-	return widget as EditableWidget;
-}
-
-function selectedIndex(widget: unknown): number {
-	return (widget as { selected: number }).selected;
-}
-
-function workspaceMouseIndex(
-	tree: { lpos?: { xi: number; xl: number; yi: number; yl: number } },
-	data: unknown,
-): number | undefined {
-	const point = data as { x?: number; y?: number };
-	const position = tree.lpos;
-	if (!position || point.x === undefined || point.y === undefined) return undefined;
-	if (point.x < position.xi || point.x > position.xl || point.y <= position.yi || point.y >= position.yl)
-		return undefined;
-	const state = tree as { childBase?: number; getScroll?: () => number };
-	return point.y - position.yi - 1 + (state.childBase ?? state.getScroll?.() ?? 0);
+export function withWorkspaceSearch(filters: FilterState, search: string): FilterState {
+	return { ...filters, search };
 }
 
 function sessionLabel(session?: AgentSession): string {
-	return session ? `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}` : "No active session";
+	if (!session) return "No active session";
+	return `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}${session.paneId ? "" : " · pane unavailable"}`;
 }
+
 function detailsText(
 	task: Task,
 	draft?: WorkspaceDraft,
@@ -150,7 +128,7 @@ function detailsText(
 		.join("\n");
 }
 
-/** Interactive task workspace. It intentionally leaves agent sessions running on exit. */
+/** Task navigation and editing in the left native workspace pane. Agent terminals remain tmux-owned. */
 export class AgentWorkspaceController {
 	readonly #core: Core;
 	readonly #options: AgentWorkspaceOptions;
@@ -160,63 +138,53 @@ export class AgentWorkspaceController {
 		this.#options = options;
 	}
 
-	async run(): Promise<"board" | "exit"> {
+	async run(): Promise<"exit"> {
 		if (!process.stdout.isTTY) {
 			console.log("Workspace requires an interactive terminal.");
 			return "exit";
 		}
-		const initial = await this.#loadInitialData();
-		const service = this.#options.service ?? new AgentSessionService(this.#core);
-		const state = this.#options.state ?? createWorkspaceViewState();
-		return this.#mount(initial, service, state);
-	}
-
-	async #loadInitialData(): Promise<AgentWorkspaceInitialData> {
 		const config = await this.#core.filesystem.loadConfig();
 		const [milestones, archivedMilestones] = await Promise.all([
 			this.#core.filesystem.listMilestones(),
 			this.#core.filesystem.listArchivedMilestones(),
 		]);
-		return { config, ...buildTaskViewerMilestoneFilterModel(milestones, archivedMilestones) };
+		return this.#mount(config, buildTaskViewerMilestoneFilterModel(milestones, archivedMilestones));
 	}
 
 	#mount(
-		initial: AgentWorkspaceInitialData,
-		service: AgentSessionService,
-		state: WorkspaceViewState,
-	): Promise<"board" | "exit"> {
-		const core = this.#core;
-		const options = this.#options;
-		const { config: initialConfig, availableMilestoneTitles, resolveMilestoneLabel } = initial;
-		return new Promise<"board" | "exit">((resolve) => {
+		initialConfig: Awaited<ReturnType<Core["filesystem"]["loadConfig"]>>,
+		milestoneModel: ReturnType<typeof buildTaskViewerMilestoneFilterModel>,
+	): Promise<"exit"> {
+		const { core, options } = { core: this.#core, options: this.#options };
+		if (options.region === "workspace-nav") return this.#mountNavigationRegion();
+		if (options.region === "workspace-footer") return this.#mountFooterRegion();
+		const tasksOnly = options.region === "workspace-tasks";
+		const detailsOnly = options.region === "workspace-details";
+		const nativePane = tasksOnly || detailsOnly;
+		const service = options.service ?? new AgentSessionService(core);
+		const host = options.host ?? new TmuxWorkspace(core.filesystem.rootDir);
+		const state = options.state ?? createWorkspaceViewState();
+		return new Promise((resolve) => {
 			const screen = options.screen ?? createScreen({ title: formatTuiTitle("Workspace", initialConfig?.projectName) });
-			const screenEvents = screen as typeof screen & {
-				removeListener(event: string, listener: (...args: never[]) => void): void;
-			};
-			let filterHeader: FilterHeader;
 			const tree = list({
 				parent: screen,
 				top: 0,
 				left: 0,
-				width: "28%",
-				bottom: 1,
+				width: "100%",
+				height: 1,
 				border: "line",
 				label: " Tasks ",
 				keys: false,
 				mouse: true,
 				tags: true,
-				style: {
-					border: { fg: "gray" },
-					focus: { border: { fg: "yellow" } },
-					selected: { inverse: true, bold: true },
-				},
+				style: { border: { fg: "gray" }, focus: { border: { fg: "yellow" } }, selected: { inverse: true, bold: true } },
 			});
 			const details = scrollablebox({
 				parent: screen,
 				top: 0,
-				left: "28%",
-				width: "72%",
-				height: "54%",
+				left: 0,
+				width: "100%",
+				height: 1,
 				border: "line",
 				label: " Details ",
 				tags: true,
@@ -228,357 +196,238 @@ export class AgentWorkspaceController {
 				wrap: true,
 				style: { border: { fg: "gray" }, focus: { border: { fg: "yellow" } } },
 			});
-			const preview = scrollablebox({
-				parent: screen,
-				top: 0,
-				left: "28%",
-				width: "72%",
-				bottom: 1,
-				border: "line",
-				label: " Live preview ",
-				scrollable: true,
-				alwaysScroll: true,
-				mouse: true,
-				keys: true,
-				vi: true,
-				style: { border: { fg: "gray" }, focus: { border: { fg: "yellow" } } },
-			});
-			const footer = box({
-				parent: screen,
-				bottom: 0,
-				left: 0,
-				width: "100%",
-				height: 1,
-				content: "",
-			});
-			const statusRow = box({
-				parent: screen,
-				bottom: 1,
-				left: 0,
-				width: "100%",
-				height: 1,
-				content: "",
-			}) as ReturnType<typeof box> & { hide(): void; show(): void };
+			const detailsViewport = details as typeof details & {
+				show(): void;
+				hide(): void;
+				getScroll(): number;
+				setScroll(value: number): void;
+			};
+			const footer = box({ parent: screen, bottom: 0, left: 0, width: "100%", height: 1 });
+			const statusRow = box({ parent: screen, bottom: 1, left: 0, width: "100%", height: 1 }) as ReturnType<
+				typeof box
+			> & { hide(): void; show(): void };
 			statusRow.hide();
 			addScrollKeys(details, screen);
-			addScrollKeys(preview, screen);
+			let filterHeader: FilterHeader;
 			let mode: Mode = "navigation";
 			let closed = false;
 			let busy = false;
-			let generation = 0;
 			let selected = 0;
-			let leftWidth = 28;
-			let split = 54;
+			let detailField = 0;
+			let sessionAction = false;
 			let statuses = initialConfig?.statuses ?? ["To Do", "In Progress", "Done"];
-			const taskTypes = getTaskTypeValues(initialConfig);
-			const projects = getProjectValues(initialConfig);
-			const priorityOptions = getPriorityOptions(initialConfig);
 			let availableLabels = collectAvailableLabels([], initialConfig?.labels ?? []);
 			let filters = state.filters;
-			let filterFocused = false;
-			let filterPopupOpen = false;
-			let tasks: Task[] = [];
 			let entries: WorkspaceEntry[] = [];
 			let selectedTask: Task | undefined;
 			let taskSessions: TaskSessions | undefined;
 			let historySession: AgentSession | undefined;
 			let fieldEditor: { field: DraftField; widget: EditableWidget } | undefined;
-			let inputQueue = Promise.resolve();
-			let attached = false;
-			let sessionAction = false;
-			let notificationTimer: ReturnType<typeof setTimeout> | undefined;
 			let disposeConfig = () => {};
-			const { collapsed, drafts, scrolls } = state;
+			let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+			let poll: ReturnType<typeof setInterval> | undefined;
+			let refreshRunning = false;
+			let filterFocused = false;
+			let selectionGeneration = 0;
+			let displayedPaneId: string | null | undefined;
+			let presentation = Promise.resolve();
 			const active = () => taskSessions?.sessions.find((item) => item.id === taskSessions?.activeSessionId);
-			const focusedTask = () => {
-				const entry = entries[selected];
-				return entry?.kind === "task" ? entry.task : undefined;
-			};
-			let footerHeight = 1;
-			let notification = "";
-			const dispose = () => {
-				if (closed) return;
-				closed = true;
-				++generation;
-				clearInterval(poll);
-				clearNotification();
-				disposeConfig();
-				if (fieldEditor) {
-					fieldEditor.widget.cancel?.();
-					fieldEditor.widget.destroy();
-					fieldEditor = undefined;
-				}
-				filterHeader.destroy();
-				for (const widget of [tree, details, preview, footer, statusRow]) widget.destroy();
-				screenEvents.removeListener("mouse", onMouse);
-				screenEvents.removeListener("keypress", onKeypress);
-				screenEvents.removeListener("resize", onResize);
-				screenEvents.removeListener("destroy", onDestroy);
-			};
-			const close = (result: "board" | "exit") => {
-				dispose();
-				if (!options.preserveScreen) screen.destroy();
-				resolve(result);
-			};
-			const footerHelp = () => {
-				if (mode === "details")
-					return ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Field | [${formatKeymap("workspace", "history")}] History | [${formatKeymap("workspace", "close")}] Tasks `;
-				if (mode === "history")
-					return ` [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Session | [${formatKeymap("workspace", "open")}] Preview | [${formatKeymap("workspace", "close")}] Details `;
-				if (mode === "field")
-					return ` [${formatKeymap("workspace", "save")}] Save | [${formatKeymap("workspace", "close")}] Details `;
-				if (mode === "inline") return ` [${formatKeymap("workspace", "inlineClose")}] Tasks | Keys → session `;
-				if (mode === "config")
-					return ` [${formatKeymap("shared", "tab")}] Next | [${formatKeymap("workspace", "save")}] Save | [${formatKeymap("workspace", "close")}] Tasks `;
-				return ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "inlineInput")}] Input | [${formatKeymap("workspace", "open")}] Start/Attach | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close `;
-			};
-			const updateFooter = () => {
-				const formatted = formatFooterContent(footerHelp(), screen.width);
-				footerHeight = formatted.height;
-				layoutWidget(footer).height = footerHeight;
-				footer.setContent(formatted.content);
-				layoutWidget(statusRow).bottom = footerHeight;
-				layoutWidget(tree).bottom = footerHeight + (notification ? 1 : 0);
-				layoutWidget(preview).bottom = footerHeight + (notification ? 1 : 0);
-			};
+			const focusedTask = () =>
+				entries[selected]?.kind === "task"
+					? (entries[selected] as Extract<WorkspaceEntry, { kind: "task" }>).task
+					: undefined;
 			const render = () => {
-				if (closed || attached) return;
-				layout();
-				screen.render();
+				if (!closed) screen.render();
 			};
-			const clearNotification = () => {
-				if (notificationTimer) clearTimeout(notificationTimer);
-				notificationTimer = undefined;
-				notification = "";
-				statusRow.setContent("");
-				statusRow.hide();
+			const activateFooterContext = () => {
+				if (!nativePane) return;
+				const footerContext = detailsOnly ? "details" : "tasks";
+				void host.updateWorkspaceState?.<SharedWorkspaceState>((shared) =>
+					shared.footerContext === footerContext ? shared : { ...shared, footerContext },
+				);
 			};
 			const tell = (message: string) => {
-				if (closed) return;
 				if (notificationTimer) clearTimeout(notificationTimer);
-				notification = message;
 				statusRow.setContent(` ${message} `);
 				statusRow.show();
 				notificationTimer = setTimeout(() => {
-					clearNotification();
+					statusRow.hide();
 					render();
 				}, 3000);
 				render();
 			};
-			const run = (action: () => Promise<void>) => {
+			const run = (action: () => Promise<void>) =>
 				void action().catch((error) => tell(error instanceof Error ? error.message : String(error)));
+			const queuePresentation = (action: () => Promise<void>) => {
+				presentation = presentation.catch(() => {}).then(action);
+				return presentation;
 			};
-			const headerHeight = () => filterHeader.getHeight();
-			const detailsHeight = () =>
-				Math.max(
-					1,
-					Math.floor(
-						(Math.max(2, screen.height - headerHeight() - footerHeight - (notification ? 1 : 0)) * split) / 100,
-					),
+			const showAgent = (session: AgentSession | undefined, generation = selectionGeneration) =>
+				queuePresentation(async () => {
+					if (closed || generation !== selectionGeneration) return;
+					const paneId = session?.paneId ?? null;
+					if (session?.status === "running" && !paneId)
+						tell("The running agent has no tmux pane yet. Wait for startup or recover the session.");
+					if (displayedPaneId === paneId) return;
+					await host.showAgent(paneId);
+					displayedPaneId = paneId;
+				});
+			const updateFooter = () => {
+				if (nativePane) return;
+				footer.setContent(
+					formatFooterContent(
+						mode === "details"
+							? ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] History | [${formatKeymap("workspace", "close")}] Tasks `
+							: mode === "history"
+								? ` [${formatKeymap("shared", "up")}${formatKeymap("shared", "down")}] Session | [${formatKeymap("workspace", "open")}] Show agent | [${formatKeymap("workspace", "close")}] Details `
+								: ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "focusDetails")}] Focus details | [${formatKeymap("workspace", "inlineInput")}] Agent | [${formatKeymap("workspace", "open")}] Start/Show | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close `,
+						screen.width,
+					).content,
 				);
-			const layout = () => {
-				updateFooter();
-				const right = 100 - leftWidth;
-				const top = headerHeight();
-				const detailHeight = detailsHeight();
-				layoutWidget(tree).width = `${leftWidth}%`;
-				layoutWidget(tree).top = top;
-				for (const panel of [details, preview]) {
-					layoutWidget(panel).left = `${leftWidth}%`;
-					layoutWidget(panel).width = `${right}%`;
-				}
-				layoutWidget(details).top = top;
-				layoutWidget(details).height = detailHeight;
-				layoutWidget(preview).top = top + detailHeight;
-			};
-			const resizeAgent = () => {
-				if (attached) return;
-				const task = selectedTask;
-				const session = active();
-				if (task && session)
-					run(() =>
-						service.resize(
-							task.id,
-							Math.max(1, Math.floor((screen.width * (100 - leftWidth)) / 100) - 2),
-							Math.max(1, screen.height - headerHeight() - detailsHeight() - footerHeight - (notification ? 1 : 0) - 2),
-							session.id,
-						),
-					);
 			};
 			const showDetails = () => {
-				if (selectedTask) {
-					details.setContent(detailsText(selectedTask, drafts.get(selectedTask.id), active(), taskSessions?.handoff));
-					render();
-				}
+				details.setContent(
+					selectedTask
+						? detailsText(selectedTask, state.drafts.get(selectedTask.id), active(), taskSessions?.handoff)
+						: "No tasks match this filter.",
+				);
+				updateFooter();
+				render();
 			};
-			const showPreview = async (task = selectedTask, session = historySession ?? active(), token = generation) => {
-				if (!task || (mode === "history" && !session)) {
-					preview.setContent("No session selected.");
-					return;
-				}
-				if (!session) {
-					if (token === generation) {
-						preview.setContent(`No active session. Press ${formatKeymap("workspace", "open")} to start or attach.`);
-						render();
-					}
-					return;
-				}
-				const output = await service.preview(task.id, session.id);
-				if (!closed && token === generation && selectedTask?.id === task.id) {
-					preview.setContent(output || "Session has no output yet.");
-					render();
-				}
+			const layout = () => {
+				const top = tasksOnly || detailsOnly ? 0 : filterHeader.getHeight();
+				const available = Math.max(1, screen.height - top - (nativePane ? 0 : 2));
+				const treeHeight = tasksOnly
+					? available
+					: detailsOnly
+						? 1
+						: state.detailsVisible
+							? Math.max(1, Math.floor(available / 2))
+							: available;
+				tree.top = top;
+				tree.height = treeHeight;
+				details.top = detailsOnly ? 0 : top + treeHeight;
+				details.height = detailsOnly ? available : Math.max(1, available - treeHeight);
+				if (!tasksOnly && (detailsOnly || state.detailsVisible)) detailsViewport.show();
+				else detailsViewport.hide();
 			};
-			const leaveInline = () => {
-				if (mode !== "inline" || !selectedTask) return;
-				const task = selectedTask;
-				const session = active();
-				mode = "navigation";
-				if (session) run(() => service.resetSize(task.id, session.id));
-			};
-			const clearTaskSelection = (message: string) => {
-				if (selectedTask)
-					scrolls.set(selectedTask.id, {
-						details: scrollBox(details).getScroll(),
-						preview: scrollBox(preview).getScroll(),
-					});
-				if (fieldEditor) closeField();
-				leaveInline();
-				mode = "navigation";
-				++generation;
+			const clearSelection = () => {
+				++selectionGeneration;
 				selectedTask = undefined;
-				state.selectedTaskId = undefined;
 				taskSessions = undefined;
 				historySession = undefined;
-				preview.setLabel?.(" Live preview ");
-				details.setContent(message);
-				preview.setContent("");
-				clearNotification();
-				tree.focus();
-			};
-			const selectHeader = (index: number, entry: Extract<WorkspaceEntry, { kind: "header" }>) => {
-				const changed = selected !== index || selectedTask !== undefined;
-				selected = index;
-				tree.select(index);
 				state.selectedTaskId = undefined;
-				if (changed) clearTaskSelection(` ${entry.status} `);
-				render();
+				details.setContent("No tasks match this filter.");
+				run(() => showAgent(undefined));
 			};
 			const selectTask = async (index: number, task: Task) => {
 				const unchanged = selectedTask?.id === task.id;
-				if (!unchanged) {
-					clearTaskSelection("");
-					mode = "navigation";
-				}
+				if (!unchanged && selectedTask) state.scrolls.set(selectedTask.id, detailsViewport.getScroll());
 				selected = index;
 				tree.select(index);
 				selectedTask = task;
 				state.selectedTaskId = task.id;
+				void host.updateWorkspaceState?.((shared: SharedWorkspaceState) => ({ ...shared, selectedTaskId: task.id }));
+				const generation = unchanged ? selectionGeneration : ++selectionGeneration;
 				if (!unchanged) {
 					historySession = undefined;
-					details.setContent(detailsText(task, drafts.get(task.id)));
-					preview.setContent(`No active session. Press ${formatKeymap("workspace", "open")} to start or attach.`);
+					taskSessions = undefined;
+					await showAgent(undefined, generation);
 				}
-				preview.setLabel?.(" Live preview ");
-				const token = ++generation;
-				render();
+				showDetails();
 				const sessions = await service.list(task.id);
-				if (closed || token !== generation || selectedTask?.id !== task.id) return;
+				if (closed || generation !== selectionGeneration || selectedTask?.id !== task.id) return;
 				taskSessions = sessions;
-				if (mode !== "history") showDetails();
-				if (!unchanged) {
-					const saved = scrolls.get(task.id);
-					scrollBox(details).setScroll(saved?.details ?? 0);
-					scrollBox(preview).setScroll(saved?.preview ?? 0);
-				}
-				if (mode !== "history") await showPreview(task, active(), token);
+				if (!unchanged) detailsViewport.setScroll(state.scrolls.get(task.id) ?? 0);
+				showDetails();
+				if (mode !== "history") await showAgent(active(), generation);
 			};
 			const select = async (index: number) => {
 				const entry = entries[index];
 				if (!entry) return;
-				if (entry.kind === "header") selectHeader(index, entry);
-				else await selectTask(index, entry.task);
+				selected = index;
+				tree.select(index);
+				if (entry.kind === "header") {
+					clearSelection();
+					render();
+				} else await selectTask(index, entry.task);
 			};
 			const toggleGroup = async (index: number) => {
 				const entry = entries[index];
-				if (entry?.kind !== "header") {
-					return;
-				}
+				if (entry?.kind !== "header") return;
 				await select(index);
-				if (collapsed.has(entry.status)) collapsed.delete(entry.status);
-				else collapsed.add(entry.status);
+				if (state.collapsed.has(entry.status)) state.collapsed.delete(entry.status);
+				else state.collapsed.add(entry.status);
 				await reload(false);
 			};
-			const updateTreeRows = (rows: string[]) => {
-				const list = tree as typeof tree & { removeItem(index: number): void };
-				const node = screen as typeof screen & { remove(this: typeof tree, item: (typeof list.items)[number]): void };
-				while (list.items.length > rows.length) {
-					const index = list.items.length - 1;
-					// List#remove only handles numeric indexes, so use Node#remove to detach the row.
-					node.remove.call(tree, list.items[index]);
-					list.removeItem(index);
-				}
-				tree.setItems(rows);
-			};
-			const loadWorkspaceEntries = async () => {
-				const config = await core.filesystem.loadConfig();
-				if (closed) return false;
-				statuses = config?.statuses ?? statuses;
-				tasks = await core.filesystem.listTasks();
-				if (closed) return false;
-				availableLabels = collectAvailableLabels(tasks, initialConfig?.labels ?? []);
-				const filteredTasks = applyTaskFilters(
-					tasks,
-					taskFilterOptions(filters, "any", resolveMilestoneLabel),
-					createTaskSearchIndex(tasks),
-				);
-				entries = buildWorkspaceEntries(filteredTasks, statuses, "All", collapsed);
-				return filteredTasks.length > 0;
-			};
-			const reload = async (selectTask = true) => {
+			const reload = async (selectCurrent = true) => {
 				if (busy || closed) return;
 				busy = true;
 				try {
-					const previous = entries[selected];
-					const hasTasks = await loadWorkspaceEntries();
-					if (closed) return;
-					updateTreeRows(workspaceRows(entries));
-					if (!hasTasks) {
-						selected = -1;
-						clearTaskSelection("No tasks match this filter.");
-						render();
-						return;
-					}
-					selected = reconciledWorkspaceSelection(
-						entries,
-						previous,
-						state.selectedTaskId ?? selectedTask?.id,
-						!selectTask,
+					const config = await core.filesystem.loadConfig();
+					statuses = config?.statuses ?? statuses;
+					const tasks = await core.filesystem.listTasks();
+					availableLabels = collectAvailableLabels(tasks, initialConfig?.labels ?? []);
+					const filtered = applyTaskFilters(
+						tasks,
+						taskFilterOptions(filters, "any", milestoneModel.resolveMilestoneLabel),
+						createTaskSearchIndex(tasks),
 					);
-					if (selected >= 0) {
-						await select(selected);
-						render();
-					} else {
-						clearTaskSelection("No tasks match this filter.");
-						render();
+					const previous = entries[selected];
+					entries = buildWorkspaceEntries(filtered, statuses, "All", state.collapsed);
+					tree.setItems(workspaceRows(entries));
+					selected = reconciledWorkspaceSelection(entries, previous, state.selectedTaskId, !selectCurrent);
+					if (selected >= 0 && selectCurrent) await select(selected);
+					else if (selected < 0) clearSelection();
+					else if (selectedTask) {
+						const current = entries.find(
+							(entry): entry is Extract<WorkspaceEntry, { kind: "task" }> =>
+								entry.kind === "task" && entry.task.id === selectedTask?.id,
+						);
+						if (!current) clearSelection();
+						else {
+							const generation = selectionGeneration;
+							selectedTask = current.task;
+							const sessions = await service.list(current.task.id);
+							if (generation === selectionGeneration && selectedTask?.id === current.task.id) {
+								taskSessions = sessions;
+								if (mode === "history") {
+									historySession =
+										sessions.sessions.find((item) => item.id === historySession?.id) ?? sessions.sessions.at(-1);
+									showHistoryRows();
+								} else {
+									showDetails();
+									await showAgent(active(), generation);
+								}
+							}
+						}
 					}
+					render();
 				} finally {
 					busy = false;
 				}
 			};
+			const selectRequestedTask = async (taskId: string) => {
+				filters = { search: "", status: [], taskTypes: [], projects: [], priority: "", labels: [], milestone: "" };
+				state.filters = filters;
+				state.collapsed.clear();
+				filterHeader.setFilters(filters);
+				await reload(false);
+				const index = entries.findIndex((entry) => entry.kind === "task" && entry.task.id === taskId);
+				if (index >= 0) await select(index);
+				else tell(`Requested task ${taskId} is unavailable.`);
+			};
 			const closeField = () => {
 				if (!fieldEditor || !selectedTask) return;
-				const { field, widget } = fieldEditor;
-				const draft = drafts.get(selectedTask.id) ?? createWorkspaceDraft(selectedTask);
-				draft.values[field] = widget.getValue();
-				draft.cursor[field] = {
-					x: widget.cpos?.x ?? 0,
-					y: widget.cpos?.y ?? 0,
-					scroll: widget.getScroll?.() ?? 0,
+				const draft = state.drafts.get(selectedTask.id) ?? createWorkspaceDraft(selectedTask);
+				draft.values[fieldEditor.field] = fieldEditor.widget.getValue();
+				draft.cursor[fieldEditor.field] = {
+					x: fieldEditor.widget.cpos?.x ?? 0,
+					y: fieldEditor.widget.cpos?.y ?? 0,
 				};
-				drafts.set(selectedTask.id, draft);
-				widget.cancel?.();
-				widget.destroy();
+				state.drafts.set(selectedTask.id, draft);
+				fieldEditor.widget.cancel?.();
+				fieldEditor.widget.destroy();
 				fieldEditor = undefined;
 				mode = "details";
 				details.focus();
@@ -587,45 +436,40 @@ export class AgentWorkspaceController {
 			const openField = (field: DraftField) => {
 				if (!selectedTask) return;
 				const task = selectedTask;
-				const draft = drafts.get(task.id) ?? createWorkspaceDraft(task);
-				drafts.set(task.id, draft);
+				const draft = state.drafts.get(task.id) ?? createWorkspaceDraft(task);
+				state.drafts.set(task.id, draft);
 				mode = "field";
-				const widget = editableWidget(
-					textarea({
-						parent: screen,
-						top: headerHeight(),
-						left: `${leftWidth}%`,
-						width: `${100 - leftWidth}%`,
-						height: detailsHeight(),
-						border: "line",
-						label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · ${formatKeymap("workspace", "save")} save · ${formatKeymap("workspace", "close")} details `,
-						keys: true,
-						mouse: true,
-						inputOnFocus: false,
-						scrollable: true,
-						value: draft.values[field],
-					}),
-				);
+				const widget = textarea({
+					parent: screen,
+					left: 0,
+					width: "100%",
+					top: details.top,
+					height: details.height,
+					border: "line",
+					label: ` ${FIELDS.find(([name]) => name === field)?.[1]} · ${formatKeymap("workspace", "save")} save `,
+					keys: true,
+					mouse: true,
+					inputOnFocus: false,
+					scrollable: true,
+					value: draft.values[field],
+				}) as EditableWidget;
 				fieldEditor = { field, widget };
-				const savedCursor = draft.cursor[field];
-				if (savedCursor) {
-					widget.cpos = { x: savedCursor.x, y: savedCursor.y };
-					widget.setScroll?.(savedCursor.scroll);
-				}
+				const cursor = draft.cursor[field];
+				if (cursor) widget.cpos = cursor;
 				widget.focus();
-				widget.readInput();
+				widget.readInput?.();
 				widget.key(keymapKeys("workspace", "save"), () => {
 					closeField();
 					run(async () => {
 						const current = await core.getTask(task.id);
 						if (!current) throw new Error("Task no longer exists.");
 						const changes = changedTaskFields(draft, current);
-						const { acceptanceCriteria, ...textChanges } = changes;
-						const input: TaskUpdateInput = textChanges;
+						const { acceptanceCriteria, ...text } = changes;
+						const input: TaskUpdateInput = text;
 						if (acceptanceCriteria !== undefined)
 							input.acceptanceCriteria = parseAcceptanceCriteria(acceptanceCriteria);
 						if (Object.keys(input).length) await core.updateTaskFromInput(task.id, input);
-						drafts.set(task.id, createWorkspaceDraft((await core.getTask(task.id)) ?? current));
+						state.drafts.set(task.id, createWorkspaceDraft((await core.getTask(task.id)) ?? current));
 						await reload(false);
 						tell("Saved changed fields.");
 					});
@@ -637,159 +481,32 @@ export class AgentWorkspaceController {
 				});
 				render();
 			};
-			const enterDetails = () => {
-				if (!focusedTask()) return;
-				mode = "details";
-				showDetails();
-				details.setLabel?.(
-					` Details · ${formatKeymap("workspace", "edit")} edit field · ${formatKeymap("workspace", "history")} history · ${formatKeymap("workspace", "close")} task list `,
-				);
-				details.focus();
-				tell(
-					` ${formatKeymap("workspace", "edit")} edit field  ${formatKeymap("shared", "up")}${formatKeymap("shared", "down")} field  ${formatKeymap("workspace", "history")} history  ${formatKeymap("workspace", "close")} task list `,
-				);
-			};
-			let detailField = 0;
 			const showHistory = async () => {
 				if (!selectedTask || mode !== "details") return;
-				const current = await service.list(selectedTask.id);
-				taskSessions = current;
+				const taskId = selectedTask.id;
+				const generation = selectionGeneration;
+				const sessions = await service.list(taskId);
+				if (closed || generation !== selectionGeneration || selectedTask?.id !== taskId || mode !== "details") return;
+				taskSessions = sessions;
+				historySession = taskSessions.sessions.at(-1);
 				mode = "history";
-				historySession = current.sessions.at(-1);
-				preview.setLabel?.(
-					` History · ${formatKeymap("shared", "up")}${formatKeymap("shared", "down")} choose · ${formatKeymap("workspace", "open")} preview · ${formatKeymap("workspace", "close")} details `,
-				);
-				preview.setContent(
-					current.sessions
+				details.setLabel?.(" Session history ");
+				showHistoryRows();
+				updateFooter();
+				details.focus();
+				render();
+			};
+			const showHistoryRows = () => {
+				if (!taskSessions) return;
+				details.setContent(
+					taskSessions.sessions
 						.map(
-							(item, index) =>
-								`${index === current.sessions.length - 1 ? ">" : " "} ${item.createdAt}  ${item.status}  ${item.id}`,
+							(item) =>
+								`${item.id === historySession?.id ? ">" : " "} ${item.createdAt}  ${sessionLabel(item)}${item.error ? `  ${item.error}` : ""}`,
 						)
 						.join("\n") || "No session history.",
 				);
-				render();
-				preview.focus();
 			};
-			details.key(keymapKeys("workspace", "close"), () => {
-				if (mode !== "details") return;
-				mode = "navigation";
-				details.setLabel?.(" Details ");
-				tree.focus();
-				return false;
-			});
-			details.key(keymapKeys("workspace", "history"), () => {
-				if (mode === "details") run(showHistory);
-				return false;
-			});
-			details.key(
-				[...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")],
-				(_character: unknown, key: unknown) => {
-					if (mode !== "details") return;
-					detailField =
-						(detailField + ((key as { name?: string }).name === "up" ? FIELDS.length - 1 : 1)) % FIELDS.length;
-					tell(`${FIELDS[detailField]?.[1]} · ${formatKeymap("workspace", "edit")} edits`);
-					return false;
-				},
-			);
-			details.key(keymapKeys("workspace", "edit"), () => {
-				if (mode === "details") openField(FIELDS[detailField]?.[0] ?? "description");
-				return false;
-			});
-			preview.key(keymapKeys("workspace", "close"), () => {
-				if (mode !== "history") return;
-				mode = "details";
-				historySession = undefined;
-				preview.setLabel?.(" Live preview ");
-				showDetails();
-				run(() => showPreview(selectedTask, active()));
-				details.focus();
-				return false;
-			});
-			preview.key(
-				[...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")],
-				(_character: unknown, key: unknown) => {
-					if (mode !== "history" || !taskSessions?.sessions.length) return;
-					const all = taskSessions.sessions;
-					const current = historySession ?? all[0];
-					if (!current) return false;
-					const index = Math.max(
-						0,
-						Math.min(all.length - 1, all.indexOf(current) + ((key as { name?: string }).name === "up" ? -1 : 1)),
-					);
-					historySession = all[index];
-					preview.setContent(
-						all
-							.map(
-								(item) => `${item.id === historySession?.id ? ">" : " "} ${item.createdAt}  ${item.status}  ${item.id}`,
-							)
-							.join("\n"),
-					);
-					render();
-					return false;
-				},
-			);
-			preview.key(keymapKeys("workspace", "open"), () => {
-				if (mode === "history" && selectedTask) run(() => showPreview(selectedTask, historySession));
-				return false;
-			});
-			const focusFilterControl = (filterId: FilterControlId) => focusTaskFilterControl(filterHeader, filterId);
-			const openFilter = async (filterId: Exclude<FilterControlId, "search">) => {
-				if (filterPopupOpen) return;
-				filterPopupOpen = true;
-				try {
-					const nextFilters = await openTaskFilterPicker({
-						screen,
-						filterId,
-						filters,
-						statuses,
-						taskTypes,
-						projects,
-						priorityOptions,
-						labels: availableLabels,
-						milestones: availableMilestoneTitles,
-					});
-					if (nextFilters !== null) {
-						filters = nextFilters;
-						state.filters = filters;
-						filterHeader.setFilters(nextFilters);
-						await reload();
-					}
-				} finally {
-					filterPopupOpen = false;
-					focusFilterControl(filterId);
-					render();
-				}
-			};
-			filterHeader = createFilterHeader({
-				parent: screen,
-				statuses,
-				availableLabels,
-				availableMilestones: availableMilestoneTitles,
-				visibleFilters: taskFilterHeaderControls(projects),
-				initialFilters: filters,
-				onFilterChange: (nextFilters) => {
-					filters = nextFilters;
-					state.filters = filters;
-					run(() => reload());
-				},
-				onFilterPickerOpen: (filterId) => {
-					run(() => openFilter(filterId));
-				},
-			});
-			filterHeader.setFocusChangeHandler((focus) => {
-				filterFocused = focus !== null;
-				if (focus !== null && mode === "inline" && selectedTask) {
-					const task = selectedTask;
-					const session = active();
-					mode = "navigation";
-					if (session) run(() => service.resetSize(task.id, session.id));
-				}
-			});
-			filterHeader.setExitRequestHandler(() => {
-				filterFocused = false;
-				filterHeader.setBorderColor("cyan");
-				tree.focus();
-			});
 			const openConfig = () => {
 				if (!selectedTask) return;
 				mode = "config";
@@ -799,42 +516,32 @@ export class AgentWorkspaceController {
 				let editable: AgentConfiguration | undefined;
 				let worktree = false;
 				let bootstrap: AgentPreset["bootstrap"] = "prompt";
-				const bootstraps: AgentPreset["bootstrap"][] = [
-					"opencode",
-					"claude",
-					"codex",
-					"gemini",
-					"antigravity",
-					"prompt",
-				];
 				const scopeList = list({
 					parent: screen,
 					top: "8%",
-					left: "28%",
-					width: "20%",
+					left: 0,
+					width: "35%",
 					height: 6,
 					border: "line",
 					label: " Scope ",
 					keys: true,
-					mouse: true,
 					items: ["root", "project", "card"],
 				});
 				const presetList = list({
 					parent: screen,
 					top: "8%",
-					left: "48%",
-					width: "24%",
+					left: "35%",
+					width: "65%",
 					height: 6,
 					border: "line",
 					label: " Preset ",
 					keys: true,
-					mouse: true,
 				});
 				const command = textarea({
 					parent: screen,
 					top: "25%",
-					left: "28%",
-					width: "44%",
+					left: 0,
+					width: "100%",
 					height: 4,
 					border: "line",
 					label: " Command ",
@@ -843,9 +550,9 @@ export class AgentWorkspaceController {
 				});
 				const environment = textarea({
 					parent: screen,
-					top: "38%",
-					left: "28%",
-					width: "44%",
+					top: "40%",
+					left: 0,
+					width: "100%",
 					height: 6,
 					border: "line",
 					label: " Environment (KEY=value) ",
@@ -854,66 +561,43 @@ export class AgentWorkspaceController {
 				});
 				const prepare = textarea({
 					parent: screen,
-					top: "57%",
-					left: "28%",
-					width: "44%",
-					height: 6,
+					top: "62%",
+					left: 0,
+					width: "100%",
+					height: 5,
 					border: "line",
 					label: " Prepare ",
 					keys: true,
 					inputOnFocus: false,
 				});
-				const bootstrapList = list({
-					parent: screen,
-					top: "77%",
-					left: "28%",
-					width: "22%",
-					height: 4,
-					border: "line",
-					label: " Bootstrap ",
-					keys: true,
-					mouse: true,
-					items: bootstraps,
-				});
-				const worktreeBox = box({
-					parent: screen,
-					top: "77%",
-					left: "50%",
-					width: "22%",
-					height: 3,
-					border: "line",
-					label: " Worktree ",
-					mouse: true,
-				});
-				const widgets = [scopeList, presetList, command, environment, prepare, bootstrapList, worktreeBox];
-				let focusedWidget = 0;
+				const widgets = [scopeList, presetList, command, environment, prepare];
+				let focus = 0;
 				const focusWidget = (index: number) => {
-					focusedWidget = (index + widgets.length) % widgets.length;
-					for (const widget of [command, environment, prepare]) editableWidget(widget).cancel?.();
-					const widget = widgets[focusedWidget];
+					focus = (index + widgets.length) % widgets.length;
+					const widget = widgets[focus];
 					widget?.focus();
-					if (widget === command || widget === environment || widget === prepare) editableWidget(widget).readInput?.();
+					if ([command, environment, prepare].includes(widget as typeof command))
+						(widget as EditableWidget).readInput?.();
 				};
-				const tabHandler = () => {
-					if (mode !== "config") return;
-					focusWidget(focusedWidget + 1);
-					return false;
-				};
-				const closeConfig = () => {
-					screen.unkey(keymapKeys("shared", "tab"), tabHandler);
+				const close = () => {
+					screen.unkey(keymapKeys("shared", "tab"), tab);
 					screen.unkey(keymapKeys("workspace", "save"), save);
-					for (const widget of widgets) widget.destroy();
+					widgets.forEach((widget) => {
+						widget.destroy();
+					});
 					disposeConfig = () => {};
 					mode = "navigation";
 					tree.focus();
-					render();
+					showDetails();
 				};
-				disposeConfig = closeConfig;
-				const showWorktree = () => worktreeBox.setContent(` ${worktree ? "[x]" : "[ ]"} Use a task worktree `);
-				const setPreset = () => {
-					if (!editable) return;
+				const load = async () => {
+					editable = await getEditableAgentConfiguration(core, scope, scope === "card" ? task.id : undefined);
+					selectedPreset = editable.selectedPreset;
 					const preset = editable.presets[selectedPreset];
 					if (!preset) return;
+					scopeList.select(["root", "project", "card"].indexOf(scope));
+					presetList.setItems(Object.keys(editable.presets));
+					presetList.select(Object.keys(editable.presets).indexOf(selectedPreset));
 					command.setValue(preset.command);
 					environment.setValue(
 						Object.entries(preset.env)
@@ -923,104 +607,18 @@ export class AgentWorkspaceController {
 					prepare.setValue(preset.prepare);
 					worktree = preset.worktree;
 					bootstrap = preset.bootstrap;
-					bootstrapList.select(bootstraps.indexOf(bootstrap));
-					showWorktree();
-				};
-				const load = async () => {
-					editable = await getEditableAgentConfiguration(core, scope, scope === "card" ? task.id : undefined);
-					selectedPreset = editable.selectedPreset;
-					scopeList.select(["root", "project", "card"].indexOf(scope));
-					presetList.setItems([...Object.keys(editable.presets), "+ New preset"]);
-					presetList.select(Object.keys(editable.presets).indexOf(selectedPreset));
-					setPreset();
 					render();
 				};
-				run(load);
-				focusWidget(0);
-				scopeList.key(keymapKeys("workspace", "open"), () => {
-					const next = ["root", "project", "card"][selectedIndex(scopeList)] as AgentConfigScope;
-					if (next && next !== scope) {
-						scope = next;
-						run(load);
-					}
-					return false;
-				});
-				presetList.key(keymapKeys("workspace", "open"), () => {
-					const config = editable;
-					if (!config) return false;
-					const name = [...Object.keys(config.presets), "+ New preset"][selectedIndex(presetList)];
-					if (name === "+ New preset") {
-						const prompt = textarea({
-							parent: screen,
-							top: "18%",
-							left: "28%",
-							width: "44%",
-							height: 3,
-							border: "line",
-							label: ` New preset name · ${formatKeymap("workspace", "open")} confirms · ${formatKeymap("workspace", "close")} cancels `,
-							keys: true,
-							inputOnFocus: false,
-						});
-						prompt.focus();
-						prompt.readInput();
-						prompt.key(keymapKeys("workspace", "open"), () => {
-							const next = prompt.getValue().trim();
-							if (next && !config.presets[next]) {
-								config.presets[next] = {
-									command: "agent {prompt}",
-									env: {},
-									prepare: "",
-									worktree: false,
-									bootstrap: "prompt",
-								};
-								selectedPreset = next;
-								presetList.setItems([...Object.keys(config.presets), "+ New preset"]);
-								presetList.select(Object.keys(config.presets).indexOf(next));
-								setPreset();
-							}
-							prompt.destroy();
-							presetList.focus();
-							return false;
-						});
-						prompt.key(keymapKeys("workspace", "close"), () => {
-							prompt.destroy();
-							presetList.focus();
-							return false;
-						});
-					} else if (name) {
-						selectedPreset = name;
-						setPreset();
-					}
-					return false;
-				});
-				worktreeBox.key(keymapKeys("workspace", "toggleWorktree"), () => {
-					worktree = !worktree;
-					showWorktree();
-					return false;
-				});
-				bootstrapList.key(keymapKeys("workspace", "open"), () => {
-					const value = bootstraps[selectedIndex(bootstrapList)];
-					if (value) bootstrap = value as AgentPreset["bootstrap"];
-					return false;
-				});
-				worktreeBox.on("click", () => {
-					worktree = !worktree;
-					showWorktree();
-					render();
-				});
 				const save = () => {
-					if (mode !== "config") return;
+					if (mode !== "config" || !editable) return false;
 					run(async () => {
-						if (!editable) return;
-						const commandValue = command.getValue();
-						if (!commandValue.trim()) throw new Error("Command is required.");
 						const env = parsePresetEnvironment(environment.getValue());
 						await updateAgentConfiguration(
 							core,
 							scope,
-							(config) =>
-								updatePresetConfiguration(config, selectedPreset, {
-									command: commandValue,
+							(value) =>
+								updatePresetConfiguration(value, selectedPreset, {
+									command: command.getValue(),
 									environment: env,
 									prepare: prepare.getValue(),
 									worktree,
@@ -1028,87 +626,42 @@ export class AgentWorkspaceController {
 								}),
 							scope === "card" ? task.id : undefined,
 						);
-						closeConfig();
+						close();
 						tell(`Saved ${scope} preset.`);
 					});
 					return false;
 				};
-				screen.key(keymapKeys("shared", "tab"), tabHandler);
+				const tab = () => {
+					if (mode === "config") focusWidget(focus + 1);
+					return false;
+				};
+				disposeConfig = close;
+				run(load);
+				focusWidget(0);
+				screen.key(keymapKeys("shared", "tab"), tab);
 				screen.key(keymapKeys("workspace", "save"), save);
-				for (const widget of widgets) widget.key(keymapKeys("workspace", "save"), save);
-				for (const widget of widgets)
+				scopeList.key(keymapKeys("workspace", "open"), () => {
+					scope = ["root", "project", "card"][
+						(scopeList as unknown as { selected: number }).selected
+					] as AgentConfigScope;
+					run(load);
+					return false;
+				});
+				presetList.key(keymapKeys("workspace", "open"), () => {
+					if (editable) {
+						selectedPreset =
+							Object.keys(editable.presets)[(presetList as unknown as { selected: number }).selected] ?? selectedPreset;
+						run(load);
+					}
+					return false;
+				});
+				widgets.forEach((widget) => {
 					widget.key(keymapKeys("workspace", "close"), () => {
-						closeConfig();
+						close();
 						return false;
 					});
+				});
 			};
-			const onMouse = (data: unknown) => {
-				if (attached || mode === "config" || mode === "composer") return;
-				const point = data as { x?: number; y?: number; action?: string; button?: string };
-				const index = workspaceMouseIndex(
-					tree as unknown as { lpos?: { xi: number; xl: number; yi: number; yl: number } },
-					data,
-				);
-				if (index === undefined) return;
-				if (point.action !== "mousemove" && point.action !== "mousedown") return;
-				if (entries[index]?.kind === "header") {
-					if (point.action === "mousedown" && point.button === "left") run(() => toggleGroup(index));
-					else if (index !== selected) run(() => select(index));
-				}
-				if (entries[index]?.kind === "task" && index !== selected) run(() => select(index));
-			};
-			const attach = async (task: Task, session: AgentSession) => {
-				if (closed) return;
-				const mouseEnabled = (screen.program as { mouseEnabled?: boolean }).mouseEnabled === true;
-				attached = true;
-				screen.leave();
-				const resume = screen.program.pause?.();
-				try {
-					await service.attach(task.id, session.id);
-				} finally {
-					resume?.();
-					attached = false;
-					if (!closed) {
-						screen.enter();
-						if (mouseEnabled) screen.program.enableMouse();
-						render();
-						resizeAgent();
-					}
-				}
-			};
-			type NavigationAction =
-				| "quit"
-				| "board"
-				| "up"
-				| "down"
-				| "search"
-				| "shrinkSidebar"
-				| "expandSidebar"
-				| "shrinkDetails"
-				| "expandDetails"
-				| "details"
-				| "open"
-				| "inlineInput"
-				| "newTask"
-				| "handoff"
-				| "config";
-			const navigationBindings: Array<{ action: NavigationAction; keys: string[] }> = [
-				{ action: "quit", keys: keymapKeys("shared", "quitWithoutEscape") },
-				{ action: "board", keys: keymapKeys("workspace", "board") },
-				{ action: "up", keys: keymapKeys("workspace", "up") },
-				{ action: "down", keys: keymapKeys("workspace", "down") },
-				{ action: "search", keys: keymapKeys("workspace", "search") },
-				{ action: "shrinkSidebar", keys: keymapKeys("workspace", "shrinkSidebar") },
-				{ action: "expandSidebar", keys: keymapKeys("workspace", "expandSidebar") },
-				{ action: "shrinkDetails", keys: keymapKeys("workspace", "shrinkDetails") },
-				{ action: "expandDetails", keys: keymapKeys("workspace", "expandDetails") },
-				{ action: "details", keys: keymapKeys("workspace", "details") },
-				{ action: "open", keys: keymapKeys("workspace", "open") },
-				{ action: "inlineInput", keys: keymapKeys("workspace", "inlineInput") },
-				{ action: "newTask", keys: keymapKeys("workspace", "newTask") },
-				{ action: "handoff", keys: keymapKeys("workspace", "handoff") },
-				{ action: "config", keys: keymapKeys("workspace", "config") },
-			];
 			const startComposer = () => {
 				mode = "composer";
 				run(async () => {
@@ -1116,151 +669,415 @@ export class AgentWorkspaceController {
 						const created = await (options.taskComposer ?? openTaskComposer)({
 							screen,
 							statuses,
-							types: taskTypes,
-							priorities: priorityOptions.map((priority) => priority.value),
-							projects,
-							persist: async (input) => {
-								const config = await core.filesystem.loadConfig();
-								return (await core.createTaskFromInput(input, config?.autoCommit ?? false)).task;
-							},
+							types: getTaskTypeValues(initialConfig),
+							priorities: getPriorityOptions(initialConfig).map((item) => item.value),
+							projects: getProjectValues(initialConfig),
+							persist: async (input) =>
+								(await core.createTaskFromInput(input, (await core.filesystem.loadConfig())?.autoCommit ?? false)).task,
 						});
 						if (created) {
 							state.selectedTaskId = created.id;
 							await reload();
 						}
 					} finally {
-						if (!closed) {
-							mode = "navigation";
-							tree.focus();
-							render();
-						}
+						mode = "navigation";
+						tree.focus();
+						render();
 					}
 				});
 			};
-			const startOrAttachSession = () => {
+			const startOrShow = () => {
 				const task = focusedTask();
 				if (!task || sessionAction) return;
+				const generation = selectionGeneration;
 				sessionAction = true;
 				run(async () => {
 					try {
-						const session = active() ?? (await service.start(task.id));
-						if (!closed) await attach(task, session);
-						if (!closed && selectedTask?.id === task.id) await select(selected);
+						let session = active();
+						if (!session) {
+							session = await service.start(task.id);
+							if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
+							taskSessions = await service.list(task.id);
+							if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
+							session = active() ?? session;
+						}
+						if (!session.paneId) throw new Error("Agent session started without a tmux pane.");
+						await showAgent(session, generation);
+						if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
+						await host.focusAgent(true);
 					} finally {
-						attached = false;
 						sessionAction = false;
 					}
 				});
 			};
-			const moveSelection = (step: number) => {
-				const next = Math.max(0, Math.min(entries.length - 1, selected + step));
-				if (next !== selected) run(() => select(next));
-			};
-			const resizePanel = (panel: "sidebar" | "details", amount: number) => {
-				if (panel === "sidebar") leftWidth = Math.max(18, Math.min(50, leftWidth + amount));
-				else split = Math.max(30, Math.min(75, split + amount));
-				layout();
-				resizeAgent();
-				render();
-			};
-			const openSelectedEntry = () => {
-				if (entries[selected]?.kind === "header") run(() => toggleGroup(selected));
-				else startOrAttachSession();
-			};
-			const sendHandoffRequest = () => {
+			const onKeypress = (_character: unknown, raw: unknown) => {
+				const key = raw as { name?: string; full?: string; sequence?: string; ctrl?: boolean };
+				if (mode === "field" || mode === "config" || mode === "composer") return;
+				if (filterFocused) return;
+				if (mode === "details") {
+					if (matchesKey(keymapKeys("workspace", "close"), key)) {
+						mode = "navigation";
+						details.setLabel?.(" Details ");
+						tree.focus();
+						updateFooter();
+						render();
+					} else if (matchesKey(keymapKeys("workspace", "history"), key)) run(showHistory);
+					else if (matchesKey(keymapKeys("workspace", "edit"), key))
+						openField(FIELDS[detailField]?.[0] ?? "description");
+					else if (matchesKey([...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")], key))
+						detailField = (detailField + (key.name === "up" ? FIELDS.length - 1 : 1)) % FIELDS.length;
+					return;
+				}
+				if (mode === "history") {
+					if (matchesKey(keymapKeys("workspace", "close"), key)) {
+						mode = "details";
+						historySession = undefined;
+						showDetails();
+						return;
+					}
+					if (matchesKey(keymapKeys("workspace", "open"), key))
+						run(async () => {
+							await showAgent(historySession);
+							await host.focusAgent(true);
+						});
+					else if (
+						matchesKey([...keymapKeys("shared", "up"), ...keymapKeys("shared", "down")], key) &&
+						taskSessions?.sessions.length
+					) {
+						const all = taskSessions.sessions;
+						const current = historySession ?? all[0];
+						if (!current) return;
+						const index = Math.max(0, Math.min(all.length - 1, all.indexOf(current) + (key.name === "up" ? -1 : 1)));
+						historySession = all[index];
+						showHistoryRows();
+						render();
+					}
+					return;
+				}
+				if (matchesKey(keymapKeys("shared", "quitWithoutEscape"), key)) {
+					run(() => host.detach());
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "board"), key)) {
+					run(() => host.showBoard());
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "up"), key) || matchesKey(keymapKeys("workspace", "down"), key)) {
+					const next = Math.max(0, Math.min(entries.length - 1, selected + (key.name === "up" ? -1 : 1)));
+					if (next !== selected) run(() => select(next));
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "search"), key)) {
+					run(async () => {
+						await host.focusSearch?.();
+					});
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "details"), key)) {
+					state.detailsVisible = !state.detailsVisible;
+					layout();
+					render();
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "focusDetails"), key) && focusedTask()) {
+					mode = "details";
+					details.focus();
+					updateFooter();
+					render();
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "open"), key)) {
+					if (entries[selected]?.kind === "header") run(() => toggleGroup(selected));
+					else startOrShow();
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "inlineInput"), key)) {
+					filterHeader.setExitRequestHandler(() => tree.focus());
+					run(() => host.focusAgent(false));
+					return;
+				}
+				if (matchesKey(keymapKeys("workspace", "newTask"), key)) {
+					startComposer();
+					return;
+				}
 				const task = focusedTask();
-				if (task)
+				if (matchesKey(keymapKeys("workspace", "handoff"), key) && task)
 					run(async () => {
 						await service.requestHandoff(task.id);
 						await select(selected);
 					});
+				if (matchesKey(keymapKeys("workspace", "config"), key)) openConfig();
 			};
-			const navigationActions: Record<NavigationAction, () => void> = {
-				quit: () => close("exit"),
-				board: () => close("board"),
-				up: () => moveSelection(-1),
-				down: () => moveSelection(1),
-				search: () => filterHeader.focusSearch(),
-				shrinkSidebar: () => resizePanel("sidebar", -2),
-				expandSidebar: () => resizePanel("sidebar", 2),
-				shrinkDetails: () => resizePanel("details", -2),
-				expandDetails: () => resizePanel("details", 2),
-				details: enterDetails,
-				open: openSelectedEntry,
-				inlineInput: () => {
-					if (!focusedTask()) return;
-					if (active()) {
-						mode = "inline";
-						tell("Inline tmux input · Ctrl+Q returns");
-					} else tell("Start a session first.");
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				if (poll) clearInterval(poll);
+				if (notificationTimer) clearTimeout(notificationTimer);
+				disposeConfig();
+				filterHeader.destroy();
+				[tree, details, footer, statusRow].forEach((widget) => {
+					widget.destroy();
+				});
+				screen.destroy();
+				resolve("exit");
+			};
+			filterHeader = createFilterHeader({
+				parent: screen,
+				statuses,
+				availableLabels,
+				availableMilestones: milestoneModel.availableMilestoneTitles,
+				visibleFilters: taskFilterHeaderControls(getProjectValues(initialConfig)).filter((id) => id !== "search"),
+				initialFilters: filters,
+				onFilterChange: (next) => {
+					filters = next;
+					state.filters = next;
+					void host.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({ ...shared, filters: next }));
+					run(() => reload());
 				},
-				newTask: startComposer,
-				handoff: sendHandoffRequest,
-				config: openConfig,
-			};
-			const forwardsInlineInput = (
-				ch: string,
-				key: { name?: string; full?: string; sequence?: string; ctrl?: boolean },
-			) => {
-				if (mode !== "inline" || !selectedTask) return false;
-				if (matchesKey(keymapKeys("workspace", "inlineClose"), key)) {
-					const task = selectedTask;
-					const session = active();
-					mode = "navigation";
-					tell("Task navigation.");
-					if (session) run(() => service.resetSize(task.id, session.id));
-					return true;
-				}
-				const input = terminalInput(ch, key);
-				const session = active();
-				if (input && session) {
-					const task = selectedTask;
-					inputQueue = inputQueue
-						.then(() => service.sendInput(task.id, input, session.id))
-						.catch((error) => tell(error instanceof Error ? error.message : String(error)));
-				}
-				return true;
-			};
-			const capturesWorkspaceKey = () =>
-				filterFocused ||
-				filterPopupOpen ||
-				mode === "composer" ||
-				mode === "field" ||
-				mode === "config" ||
-				mode === "details" ||
-				mode === "history";
-			const dispatchNavigationKey = (key: { name?: string; full?: string; sequence?: string; ctrl?: boolean }) => {
-				const action = navigationBindings.find((binding) => matchesKey(binding.keys, key))?.action;
-				if (action) navigationActions[action]();
-			};
-			const onKeypress = (character: unknown, raw: unknown) => {
-				if (attached) return;
-				const ch = typeof character === "string" ? character : "";
-				const key = raw as { name?: string; full?: string; sequence?: string; ctrl?: boolean };
-				if (capturesWorkspaceKey() || forwardsInlineInput(ch, key)) return;
-				dispatchNavigationKey(key);
-			};
-			const onResize = () => {
-				if (attached) return;
+				onFilterPickerOpen: (id) =>
+					run(async () => {
+						const next = await openTaskFilterPicker({
+							screen,
+							filterId: id as Exclude<FilterControlId, "search">,
+							filters,
+							statuses,
+							taskTypes: getTaskTypeValues(initialConfig),
+							projects: getProjectValues(initialConfig),
+							priorityOptions: getPriorityOptions(initialConfig),
+							labels: availableLabels,
+							milestones: milestoneModel.availableMilestoneTitles,
+						});
+						if (next) {
+							filters = next;
+							state.filters = next;
+							filterHeader.setFilters(next);
+							await reload();
+						}
+					}),
+			});
+			filterHeader.setFocusChangeHandler((focus) => {
+				filterFocused = focus !== null;
+			});
+			filterHeader.setExitRequestHandler(() => {
+				filterFocused = false;
+				tree.focus();
+			});
+			if (tasksOnly || detailsOnly) filterHeader.hide();
+			if (nativePane) {
+				(footer as unknown as { hide(): void }).hide();
+				statusRow.hide();
+			}
+			if (tasksOnly) detailsViewport.hide();
+			if (detailsOnly) (tree as unknown as { hide(): void }).hide();
+			layout();
+			screen.on("keypress", (character, raw) => {
+				activateFooterContext();
+				onKeypress(character, raw);
+			});
+			screen.on("resize", () => {
 				filterHeader.rebuild();
 				layout();
-				resizeAgent();
 				render();
-			};
-			const poll = setInterval(() => {
-				if (!closed && !attached && mode !== "field" && mode !== "history" && mode !== "config" && mode !== "composer")
+			});
+			screen.on("destroy", close);
+			updateFooter();
+			run(async () => {
+				await reload();
+				if (detailsOnly) {
+					mode = "details";
+					details.focus();
+					updateFooter();
+					render();
+				} else tree.focus();
+			});
+			poll = setInterval(
+				() =>
 					run(async () => {
-						if (selectedTask) await service.recover(selectedTask.id);
-						await reload(false);
-					});
-			}, 2000);
-			const onDestroy = () => dispose();
-			screen.on("mouse", onMouse);
-			screen.on("keypress", onKeypress);
-			screen.on("resize", onResize);
-			screen.on("destroy", onDestroy);
-			layout();
-			run(() => reload());
+						if (refreshRunning || closed || mode === "field" || mode === "config" || mode === "composer") return;
+						refreshRunning = true;
+						try {
+							const shared = await host.workspaceState?.<SharedWorkspaceState>();
+							if (shared?.filters && JSON.stringify(shared.filters) !== JSON.stringify(filters)) {
+								filters = shared.filters;
+								state.filters = filters;
+								filterHeader.setFilters(filters);
+								await reload();
+							}
+							const sharedTaskId = shared?.selectedTaskId;
+							if (detailsOnly && sharedTaskId !== state.selectedTaskId) {
+								const index = entries.findIndex((entry) => entry.kind === "task" && entry.task.id === sharedTaskId);
+								if (index >= 0) await select(index);
+								else clearSelection();
+							}
+							const requested = detailsOnly ? undefined : await host.takeTaskRequest();
+							if (requested) await selectRequestedTask(requested);
+							else {
+								if (selectedTask) await service.recover(selectedTask.id);
+								await reload(false);
+							}
+						} finally {
+							refreshRunning = false;
+						}
+					}),
+				2000,
+			);
+		});
+	}
+
+	#mountNavigationRegion(): Promise<"exit"> {
+		const core = this.#core;
+		const host = this.#options.host ?? new TmuxWorkspace(core.filesystem.rootDir);
+		return new Promise((resolve) => {
+			const screen = this.#options.screen ?? createScreen({ title: formatTuiTitle("Workspace") });
+			let closed = false;
+			let header: FilterHeader;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				header.destroy();
+				screen.destroy();
+				resolve("exit");
+			};
+			void (async () => {
+				const [config, tasks, milestones, archived] = await Promise.all([
+					core.filesystem.loadConfig(),
+					core.filesystem.listTasks(),
+					core.filesystem.listMilestones(),
+					core.filesystem.listArchivedMilestones(),
+				]);
+				const shared = ((await host.workspaceState?.<SharedWorkspaceState>()) ?? {}) as SharedWorkspaceState;
+				let navigationFilters = shared.filters ?? createWorkspaceViewState().filters;
+				const milestoneModel = buildTaskViewerMilestoneFilterModel(milestones, archived);
+				header = createFilterHeader({
+					parent: screen,
+					statuses: config?.statuses ?? ["To Do", "In Progress", "Done"],
+					availableLabels: collectAvailableLabels(tasks, config?.labels ?? []),
+					availableMilestones: milestoneModel.availableMilestoneTitles,
+					visibleFilters: taskFilterHeaderControls(getProjectValues(config)).filter((id) => id !== "search"),
+					initialFilters: navigationFilters,
+					onFilterChange: (filters) =>
+						void (async () => {
+							navigationFilters = filters;
+							await host.updateWorkspaceState?.<SharedWorkspaceState>((state) => ({ ...state, filters }));
+						})(),
+					onFilterPickerOpen: (id) =>
+						void openTaskFilterPicker({
+							screen,
+							filterId: id,
+							filters: navigationFilters,
+							statuses: config?.statuses ?? ["To Do", "In Progress", "Done"],
+							taskTypes: getTaskTypeValues(config),
+							projects: getProjectValues(config),
+							priorityOptions: getPriorityOptions(config),
+							labels: collectAvailableLabels(tasks, config?.labels ?? []),
+							milestones: milestoneModel.availableMilestoneTitles,
+						}).then((next) => {
+							if (next) {
+								navigationFilters = next;
+								header.setFilters(next);
+								void host.updateWorkspaceState?.<SharedWorkspaceState>((state) => ({ ...state, filters: next }));
+							}
+						}),
+				});
+				screen.key(keymapKeys("shared", "tab"), () => {
+					void host.focusAgent(false);
+					return false;
+				});
+				screen.key(keymapKeys("workspace", "search"), () => {
+					void host.focusSearch?.();
+					return false;
+				});
+				const resize = () => {
+					header.rebuild();
+					void host.resizeNavigation?.(header.getHeight());
+					screen.render();
+				};
+				screen.on("resize", resize);
+				void host.resizeNavigation?.(header.getHeight());
+				screen.key(["q", "C-c"], close);
+				screen.on("destroy", close);
+				screen.render();
+			})().catch(close);
+		});
+	}
+
+	#mountFooterRegion(): Promise<"exit"> {
+		const core = this.#core;
+		const host = this.#options.host ?? new TmuxWorkspace(core.filesystem.rootDir);
+		return new Promise((resolve) => {
+			const screen = this.#options.screen ?? createScreen({ title: formatTuiTitle("Workspace") });
+			let closed = false;
+			let filters: FilterState = createWorkspaceViewState().filters;
+			let context: SharedWorkspaceState["footerContext"] = "tasks";
+			let pending = Promise.resolve();
+			let poll: ReturnType<typeof setInterval> | undefined;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				if (poll) clearInterval(poll);
+				footer.destroy();
+				screen.destroy();
+				resolve("exit");
+			};
+			const footer = new FooterSearch({
+				screen,
+				content: () => {
+					const query = filters.search ? ` | {yellow-fg}Search: ${filters.search}{/}` : "";
+					if (context === "details")
+						return ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] History | [${formatKeymap("workspace", "close")}] Tasks${query}`;
+					return ` [${formatKeymap("workspace", "up")}${formatKeymap("workspace", "down")}] Task | [${formatKeymap("workspace", "search")}] Search | [${formatKeymap("workspace", "details")}] Details | [${formatKeymap("workspace", "focusDetails")}] Focus details | [${formatKeymap("workspace", "inlineInput")}] Agent | [${formatKeymap("workspace", "open")}] Start/Show | [${formatKeymap("workspace", "newTask")}] New | [${formatKeymap("workspace", "board")}] Board | [${formatKeymap("shared", "quitWithoutEscape")}] Close${query}`;
+				},
+				query: () => filters.search,
+				onQueryChange: (query) => {
+					pending = pending.then(() =>
+						host.updateWorkspaceState?.<SharedWorkspaceState>((state) => {
+							filters = withWorkspaceSearch(state.filters ?? filters, query);
+							return { ...state, filters, footerEditing: true };
+						}),
+					);
+				},
+				onFocusChange: (editing) => {
+					pending = pending.then(() =>
+						host.updateWorkspaceState?.<SharedWorkspaceState>((state) => ({ ...state, footerEditing: editing })),
+					);
+				},
+				onSubmit: async () => {
+					await pending;
+					await host.focusTasks?.();
+				},
+				onCancel: async () => {
+					await pending;
+					await host.focusTasks?.();
+				},
+				onHeightChange: (height) => void host.resizeFooter?.(height),
+			});
+			const sync = async () => {
+				const shared = await host.workspaceState?.<SharedWorkspaceState>();
+				if (!shared || footer.isEditing) return;
+				if (shared.filters) filters = shared.filters;
+				context = shared.footerContext ?? "tasks";
+				footer.render();
+			};
+			const focusSearch = async () => {
+				const shared = await host.workspaceState?.<SharedWorkspaceState>();
+				if (shared?.filters) filters = shared.filters;
+				context = shared?.footerContext ?? context;
+				footer.focus();
+			};
+			void (async () => {
+				const shared = await host.workspaceState?.<SharedWorkspaceState>();
+				if (shared?.filters) filters = shared.filters;
+				context = shared?.footerContext ?? context;
+				footer.render();
+				screen.key(keymapKeys("workspace", "search"), () => {
+					void focusSearch();
+					return false;
+				});
+				screen.on("resize", () => footer.render());
+				screen.on("destroy", close);
+				poll = setInterval(() => void sync(), 250);
+				screen.render();
+			})().catch(close);
 		});
 	}
 }

@@ -18,6 +18,7 @@ function session(id: string): AgentSession {
 		taskId: "TASK-1",
 		preset: "test",
 		configScope: "project",
+		paneId: "%1",
 		tmuxName: id,
 		cwd: "/tmp",
 		createdAt: "2026-01-01T00:00:00.000Z",
@@ -60,5 +61,14 @@ describe("SessionStore", () => {
 			JSON.stringify({ version: 1, taskId: "TASK-1", activeSessionId: "missing", sessions: [{ id: "bad" }] }),
 		);
 		await expect(store.read("TASK-1")).rejects.toThrow("Could not read session state for TASK-1: invalid state");
+
+		const missingPane = session("missing-pane");
+		delete missingPane.paneId;
+		await writeFile(statePath, JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [missingPane] }));
+		await expect(store.read("TASK-1")).rejects.toThrow("Could not read session state for TASK-1: invalid state");
+
+		missingPane.status = "starting";
+		await writeFile(statePath, JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [missingPane] }));
+		expect((await store.read("TASK-1")).sessions[0]?.paneId).toBeUndefined();
 	});
 });
