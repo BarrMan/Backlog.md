@@ -631,17 +631,35 @@ export class TmuxWorkspace {
 		if (!paneId) return;
 		if (!(await this.paneExists(paneId))) throw new Error(`Agent pane ${paneId} no longer exists`);
 		let display = await this.displayPane();
+		await this.fitPaneToDisplay(paneId, display);
 		let swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", paneId, "-t", display]);
 		if (swapped.exitCode !== 0 && /can't find pane/i.test(swapped.stderr)) {
 			await this.unset(DISPLAY_PANE);
 			await this.heal();
 			display = await this.displayPane();
+			await this.fitPaneToDisplay(paneId, display);
 			swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", paneId, "-t", display]);
 		}
 		if (swapped.exitCode !== 0) throw this.error("Could not show agent pane", swapped);
 		await this.set(`${ACTIVE}_return_${paneId.slice(1)}`, display);
 		await this.set(ACTIVE, paneId);
 		await this.set(DISPLAY_PANE, paneId);
+	}
+
+	private async fitPaneToDisplay(paneId: string, display: string): Promise<void> {
+		const size = await this.command(
+			["tmux", "display-message", "-p", "-t", display, "#{pane_width} #{pane_height}"],
+			"Could not read workspace display size",
+		);
+		const parts = size.stdout.trim().split(/\s+/, 2).map(Number);
+		const width = parts[0];
+		const height = parts[1];
+		if (width === undefined || height === undefined) return;
+		if (!Number.isFinite(width) || width < 1 || !Number.isFinite(height) || height < 1) return;
+		await this.require(
+			["tmux", "resize-window", "-t", paneId, "-x", String(width), "-y", String(height)],
+			"Could not pre-size agent pane",
+		);
 	}
 
 	private async returnAgent(agent: string): Promise<void> {

@@ -8,6 +8,7 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 	readonly calls: string[][] = [];
 	readonly options = new Map<string, string>();
 	readonly paneHeights = new Map<string, number>();
+	readonly paneWidths = new Map<string, number>();
 	readonly deadPanes = new Set<string>();
 	readonly missingPanes = new Set<string>();
 	readonly paneMetadata = new Map<string, Record<string, string>>();
@@ -96,6 +97,12 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 					stdout: `${target} ${this.deadPanes.has(target ?? "") ? "1" : "0"}\n`,
 					stderr: "",
 				};
+			if (format === "#{pane_width} #{pane_height}")
+				return {
+					exitCode: 0,
+					stdout: `${this.paneWidths.get(target ?? "") ?? 80} ${this.paneHeights.get(target ?? "") ?? 24}\n`,
+					stderr: "",
+				};
 			if (format === "#{pane_height}")
 				return { exitCode: 0, stdout: `${this.paneHeights.get(target ?? "") ?? 0}\n`, stderr: "" };
 			if (format === "#{pane_dead}")
@@ -176,8 +183,15 @@ describe("TmuxWorkspace", () => {
 			"@backlog_session": "session-2",
 			"@backlog_role": "agent",
 		});
+		runner.paneWidths.set("%6", 100);
+		runner.paneHeights.set("%6", 12);
 		await workspace.showAgentSession("TASK-1", "session-1");
 		await workspace.showAgentSession("TASK-2", "session-2");
+		const resizes = runner.calls.filter((args) => args[1] === "resize-window");
+		expect(resizes).toEqual([
+			["tmux", "resize-window", "-t", "%42", "-x", "100", "-y", "12"],
+			["tmux", "resize-window", "-t", "%43", "-x", "100", "-y", "12"],
+		]);
 		const swaps = runner.calls.filter((args) => args[1] === "swap-pane");
 		expect(swaps).toEqual([
 			["tmux", "swap-pane", "-d", "-s", "%42", "-t", "%6"],
