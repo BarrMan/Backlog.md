@@ -39,6 +39,20 @@ async function waitFor(
 	throw new Error(`Timed out waiting for ${label}.\n${await diagnostics()}`);
 }
 
+async function removeTmuxSocket(socket: string): Promise<void> {
+	if (process.getuid === undefined) return;
+	await rm(`/private/tmp/tmux-${process.getuid()}/${socket}`, { force: true });
+}
+
+async function killTmuxServer(socket: string, tmuxBin = tmuxPath as string): Promise<void> {
+	const child = Bun.spawn([tmuxBin, "-f", "/dev/null", "-L", socket, "kill-server"], {
+		stdout: "ignore",
+		stderr: "ignore",
+	});
+	await child.exited.catch(() => undefined);
+	await removeTmuxSocket(socket);
+}
+
 describe("workspace native tmux integration", () => {
 	integration("recovers startup after the process that acquired a real tmux bootstrap lock is killed", async () => {
 		const directory = createUniqueTestDir("tmux-workspace-stale-bootstrap");
@@ -77,7 +91,7 @@ describe("workspace native tmux integration", () => {
 			expect(await server.hasSession(workspace.sessionName)).toBe(true);
 		} finally {
 			if (owner.exitCode === null) owner.kill("SIGKILL");
-			await server.cmd("kill-server").catch(() => {});
+			await killTmuxServer(socket);
 		}
 	});
 
@@ -97,6 +111,14 @@ describe("workspace native tmux integration", () => {
 				TERM: "xterm-256color",
 				BACKLOG_TEST_STEP: stepPath,
 				BACKLOG_TEST_ACKNOWLEDGEMENT: acknowledgementPath,
+			};
+			const clients: ReturnType<typeof Bun.spawn>[] = [];
+			const stopClients = async () => {
+				for (const client of clients.splice(0)) {
+					if (client.exitCode !== null) continue;
+					client.kill();
+					await Promise.race([client.exited, Bun.sleep(1_000)]).catch(() => undefined);
+				}
 			};
 			const tmux = async (...args: string[]): Promise<TmuxResult> => {
 				const child = Bun.spawn([join(bin, "tmux"), ...args], {
@@ -221,6 +243,7 @@ while {1} {
 					stdout: "ignore",
 					stderr: "pipe",
 				});
+				clients.push(client);
 				await waitFor(
 					async () =>
 						(await Bun.file(acknowledgementPath)
@@ -842,7 +865,7 @@ while {1} {
 				expect((await panes(`${host}:Workspace`))[0]).toStartWith(`${navigationId}:`);
 				expect(await requireTmux("display-message", "-p", "-t", agent, "#{pane_pid}")).toBe(agentPid);
 
-				await startClient(false, 140, 50);
+				const replacementClient = await startClient(false, 140, 50);
 				expect((await requireTmux("list-windows", "-t", host, "-F", "#{window_name}")).split("\n")).toEqual([
 					"Board",
 					"Workspace",
@@ -871,8 +894,11 @@ while {1} {
 				const stopped = await runTestCli(["agent-session", "stop", first.id], { cwd: directory, env: environment });
 				expect(stopped.exitCode).toBe(0);
 				expect((await panes(`${host}:Workspace`))[0]).toStartWith(`${navigationId}:`);
+				await requestClientKey("q");
+				expect(await replacementClient.exited).toBe(0);
 			} finally {
-				await tmux("kill-server");
+				await stopClients();
+				await killTmuxServer(socket);
 			}
 		},
 		60_000,

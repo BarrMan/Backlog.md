@@ -518,6 +518,11 @@ function isolatedTmuxServer(socket: string): Server {
 	return new Server({ socketName: socket, configFile: "/dev/null", environment: { ...process.env, TMUX: "" } });
 }
 
+async function removeTmuxSocket(socket: string): Promise<void> {
+	if (process.getuid === undefined) return;
+	await rm(`/private/tmp/tmux-${process.getuid()}/${socket}`, { force: true });
+}
+
 async function cmdOutput(server: Server, command: string, args: readonly string[] = []): Promise<string> {
 	const lines = await server.cmd(command, args);
 	return lines.length ? `${lines.join("\n")}\n` : "";
@@ -529,14 +534,16 @@ describe("TmuxWorkspace real tmux", () => {
 		async () => {
 			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
 			paths.push(directory);
-			const server = isolatedTmuxServer(`backlog-workspace-${crypto.randomUUID().slice(0, 8)}`);
+			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
+			const server = isolatedTmuxServer(socket);
 			const workspace = new TmuxWorkspace(await realpath(directory), server);
 			try {
 				await workspace.showWorkspace();
 				const listed = await cmdOutput(server, "list-windows", ["-t", workspace.sessionName, "-F", "#{window_name}"]);
 				expect(listed.split("\n")).toEqual(expect.arrayContaining(["Board", "Workspace"]));
 			} finally {
-				await server.cmd("kill-server");
+				await server.cmd("kill-server").catch(() => {});
+				await removeTmuxSocket(socket);
 			}
 		},
 		10_000,
@@ -547,7 +554,8 @@ describe("TmuxWorkspace real tmux", () => {
 		async () => {
 			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
 			paths.push(directory);
-			const server = isolatedTmuxServer(`backlog-workspace-${crypto.randomUUID().slice(0, 8)}`);
+			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
+			const server = isolatedTmuxServer(socket);
 			const workspace = new TmuxWorkspace(await realpath(directory), server);
 			try {
 				await workspace.showWorkspace();
@@ -575,7 +583,8 @@ describe("TmuxWorkspace real tmux", () => {
 				]);
 				expect(rebuilt.split("\n")).toEqual(expect.arrayContaining(["Board:1", "Workspace:5"]));
 			} finally {
-				await server.cmd("kill-server");
+				await server.cmd("kill-server").catch(() => {});
+				await removeTmuxSocket(socket);
 			}
 		},
 		10_000,
@@ -586,7 +595,8 @@ describe("TmuxWorkspace real tmux", () => {
 		async () => {
 			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
 			paths.push(directory);
-			const server = isolatedTmuxServer(`backlog-workspace-${crypto.randomUUID().slice(0, 8)}`);
+			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
+			const server = isolatedTmuxServer(socket);
 			const host = new TmuxWorkspace(await realpath(directory), server);
 			try {
 				await host.showBoard();
@@ -665,7 +675,8 @@ describe("TmuxWorkspace real tmux", () => {
 				]);
 				expect(secondCurrent.trim()).toBe("Board");
 			} finally {
-				await server.cmd("kill-server");
+				await server.cmd("kill-server").catch(() => {});
+				await removeTmuxSocket(socket);
 			}
 		},
 		10_000,
