@@ -10,6 +10,7 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 	readonly paneHeights = new Map<string, number>();
 	readonly deadPanes = new Set<string>();
 	readonly missingPanes = new Set<string>();
+	readonly paneMetadata = new Map<string, Record<string, string>>();
 	clients = "";
 	#nextPane = 3;
 	#locks = new Set<string>();
@@ -56,13 +57,31 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 		if (args[1] === "list-windows") return { exitCode: 0, stdout: "@1\n@2\n", stderr: "" };
 		if (args[1] === "split-window") return { exitCode: 0, stdout: `%${this.#nextPane++}\n`, stderr: "" };
 		if (args[1] === "has-session") return { exitCode: this.options.has("session") ? 0 : 1, stdout: "", stderr: "" };
+		if (args[1] === "list-panes") {
+			const rows = [...this.paneMetadata.entries()].map(([pane, metadata]) =>
+				[
+					pane,
+					this.deadPanes.has(pane) ? "1" : "0",
+					metadata["@backlog_root"] ?? "",
+					metadata["@backlog_task"] ?? "",
+					metadata["@backlog_session"] ?? "",
+					metadata["@backlog_role"] ?? "",
+				].join("\t"),
+			);
+			return { exitCode: 0, stdout: `${rows.join("\n")}\n`, stderr: "" };
+		}
 		if (args[1] === "show-options") {
 			const value = this.options.get(args.at(-1) as string);
 			return { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : "", stderr: "" };
 		}
 		if (args[1] === "set-option") {
 			this.options.set("session", "yes");
-			if (!args.includes("-qu")) this.options.set(args.at(-2) as string, args.at(-1) as string);
+			if (args.includes("-p")) {
+				const pane = args[args.indexOf("-t") + 1] ?? "";
+				const metadata = this.paneMetadata.get(pane) ?? {};
+				metadata[args.at(-2) as string] = args.at(-1) as string;
+				this.paneMetadata.set(pane, metadata);
+			} else if (!args.includes("-qu")) this.options.set(args.at(-2) as string, args.at(-1) as string);
 			else this.options.delete(args.at(-1) as string);
 		}
 		if (args[1] === "display-message") {
@@ -142,11 +161,23 @@ describe("TmuxWorkspace", () => {
 		]);
 	});
 
-	it("returns the displayed agent to its backing slot before showing another agent", async () => {
+	it("returns the displayed agent to its backing slot before showing another metadata-selected agent", async () => {
 		const runner = new RecordingRunner();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
-		await workspace.showAgent("%42");
-		await workspace.showAgent("%43");
+		runner.paneMetadata.set("%42", {
+			"@backlog_root": workspace.rootPath,
+			"@backlog_task": "TASK-1",
+			"@backlog_session": "session-1",
+			"@backlog_role": "agent",
+		});
+		runner.paneMetadata.set("%43", {
+			"@backlog_root": workspace.rootPath,
+			"@backlog_task": "TASK-2",
+			"@backlog_session": "session-2",
+			"@backlog_role": "agent",
+		});
+		await workspace.showAgentSession("TASK-1", "session-1");
+		await workspace.showAgentSession("TASK-2", "session-2");
 		const swaps = runner.calls.filter((args) => args[1] === "swap-pane");
 		expect(swaps).toEqual([
 			["tmux", "swap-pane", "-d", "-s", "%42", "-t", "%6"],
@@ -510,15 +541,24 @@ describe("TmuxWorkspace real tmux", () => {
 			const host = new TmuxWorkspace(await realpath(directory), runner);
 			try {
 				await host.showBoard();
-				const agent = async (name: string) =>
-					(
+				const placeholderCommand = "exec sleep 60";
+				const agent = async (name: string, taskId: string, sessionId: string, rootPath = host.rootPath) => {
+					const pane = (
 						await runner.run(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, placeholderCommand])
 					).stdout.trim();
-				const placeholderCommand = "exec sleep 60";
-				const a = await agent("agent-a");
-				const b = await agent("agent-b");
-				await host.showAgent(a);
-				await host.showAgent(a);
+					for (const [option, value] of [
+						["@backlog_root", rootPath],
+						["@backlog_task", taskId],
+						["@backlog_session", sessionId],
+						["@backlog_role", "agent"],
+					] as const)
+						await runner.run(["tmux", "set-option", "-p", "-t", pane, option, value]);
+					return pane;
+				};
+				const a = await agent("agent-a", "TASK-1", "session-a");
+				await agent("agent-b", "TASK-2", "session-b");
+				await host.showAgentSession("TASK-1", "session-a");
+				await host.showAgentSession("TASK-1", "session-a");
 				const current = await runner.run(["tmux", "display-message", "-p", "-t", host.sessionName, "#{window_name}"]);
 				expect(current.stdout.trim()).toBe("Board");
 				await host.showWorkspace();
@@ -540,18 +580,18 @@ describe("TmuxWorkspace real tmux", () => {
 						.find((pane) => pane.endsWith(":1"))
 						?.slice(0, -2);
 				expect(await selectedWorkspacePane()).toBe(tasks);
-				await host.showAgent(b);
+				await host.showAgentSession("TASK-2", "session-b");
 				expect(await selectedWorkspacePane()).toBe(tasks);
-				await host.showAgent(a);
+				await host.showAgentSession("TASK-1", "session-a");
 				expect(await selectedWorkspacePane()).toBe(tasks);
 				await host.focusAgent(true);
 				await host.focusAgent(false);
 				const selected = await runner.run(["tmux", "display-message", "-p", "-t", host.sessionName, "#{pane_id}"]);
 				expect(selected.stdout.trim()).toBe(a);
-				await host.showAgent(b);
-				await host.showAgent(a);
+				await host.showAgentSession("TASK-2", "session-b");
+				await host.showAgentSession("TASK-1", "session-a");
 				await runner.run(["tmux", "kill-pane", "-t", a]);
-				await host.showAgent(null);
+				await host.showAgentSession(undefined);
 				const display = await runner.run([
 					"tmux",
 					"show-options",
@@ -565,8 +605,8 @@ describe("TmuxWorkspace real tmux", () => {
 				paths.push(secondDirectory);
 				const second = new TmuxWorkspace(await realpath(secondDirectory), runner);
 				await second.showBoard();
-				const c = await agent("agent-c");
-				await host.showAgent(c);
+				await agent("agent-c", "TASK-3", "session-c", second.rootPath);
+				await expect(host.showAgentSession("TASK-3", "session-c")).rejects.toThrow("no longer exists");
 				const secondCurrent = await runner.run([
 					"tmux",
 					"display-message",

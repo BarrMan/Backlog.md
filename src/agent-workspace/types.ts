@@ -49,8 +49,6 @@ export interface AgentSession {
 	/** The exact launch configuration, retained so replacements cannot drift with later config edits. */
 	presetSnapshot?: AgentPreset;
 	configScope: AgentConfigScope;
-	/** Stable tmux pane identity. It is assigned after the placeholder pane is created. */
-	paneId?: string;
 	/** Name of the temporary backing tmux session created during launch. */
 	tmuxName: string;
 	cwd: string;
@@ -62,6 +60,8 @@ export interface AgentSession {
 	outputPath: string;
 	bootstrapPath: string;
 	error?: string;
+	lastUsedAt?: string;
+	useCount?: number;
 }
 
 export interface HandoffRequest {

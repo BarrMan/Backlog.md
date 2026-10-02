@@ -18,6 +18,7 @@ class FakeTmux implements AgentSessionRunner {
 	prepareDelay = 0;
 	panes = 0;
 	missingPanes = new Set<string>();
+	paneMetadata = new Map<string, Record<string, string>>();
 
 	async run(
 		args: string[],
@@ -33,13 +34,39 @@ class FakeTmux implements AgentSessionRunner {
 			return { exitCode: 1, stdout: "", stderr: "launch failed" };
 		if (args[0] === "tmux" && args[1] === "kill-pane" && this.failStop)
 			return { exitCode: 1, stdout: "", stderr: "stop failed" };
+		if (args[0] === "tmux" && args[1] === "kill-pane") {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			this.missingPanes.add(target);
+			return { exitCode: 0, stdout: "", stderr: "" };
+		}
 		if (args[0] === "git" && args[1] === "rev-parse") return { exitCode: 0, stdout: ".git\n", stderr: "" };
 		if (args[0] === "tmux" && args[1] === "new-session")
 			return { exitCode: 0, stdout: `%${++this.panes}\n`, stderr: "" };
+		if (args[0] === "tmux" && args[1] === "set-option" && args.includes("-p")) {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			const metadata = this.paneMetadata.get(target) ?? {};
+			metadata[args.at(-2) ?? ""] = args.at(-1) ?? "";
+			this.paneMetadata.set(target, metadata);
+			return { exitCode: 0, stdout: "", stderr: "" };
+		}
+		if (args[0] === "tmux" && args[1] === "list-panes") {
+			const rows = [...this.paneMetadata.entries()].map(([pane, metadata]) =>
+				[
+					pane,
+					this.missingPanes.has(pane) ? "1" : "0",
+					metadata["@backlog_root"] ?? "",
+					metadata["@backlog_task"] ?? "",
+					metadata["@backlog_session"] ?? "",
+					metadata["@backlog_role"] ?? "",
+				].join("\t"),
+			);
+			return { exitCode: 0, stdout: `${rows.join("\n")}\n`, stderr: "" };
+		}
 		if (args[0] === "tmux" && args[1] === "display-message") {
 			const target = args[args.indexOf("-t") + 1] ?? "";
 			const format = args.at(-1);
-			if (this.missingPanes.has(target)) return { exitCode: 0, stdout: "\n", stderr: "" };
+			if (this.missingPanes.has(target))
+				return { exitCode: 0, stdout: format === "#{pane_id} #{pane_dead}" ? `${target} 1\n` : "\n", stderr: "" };
 			if (format === "#{pane_id} #{pane_dead}") return { exitCode: 0, stdout: `${target} 0\n`, stderr: "" };
 			return { exitCode: 0, stdout: format === "#{cursor_y}" ? "0\n" : "0 0\n", stderr: "" };
 		}
@@ -68,13 +95,16 @@ describe("AgentSessionService", () => {
 		runner = new FakeTmux();
 	});
 
-	it("persists the placeholder pane before launching the agent", async () => {
+	it("tags the placeholder pane before launching the agent", async () => {
 		const service = new AgentSessionService(core, { runner });
 		const session = await service.start("task-1");
-		expect(session.paneId).toBe("%1");
-		expect((await service.list("task-1")).sessions[0]?.paneId).toBe("%1");
+		expect("paneId" in session).toBe(false);
+		expect("paneId" in ((await service.list("task-1")).sessions[0] ?? {})).toBe(false);
 		const created = runner.commands.find((command) => command[0] === "tmux" && command[1] === "new-session");
 		expect(created?.slice(0, 6)).toEqual(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}"]);
+		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_task", "TASK-1"]);
+		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_session", session.id]);
+		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_role", "agent"]);
 		expect(runner.commands).toContainEqual([
 			"tmux",
 			"respawn-pane",
@@ -142,6 +172,21 @@ describe("AgentSessionService", () => {
 		expect((await service.list("task-1")).sessions).toHaveLength(2);
 	});
 
+	it("auto-stops the least-used live session when the running cap is reached", async () => {
+		await core.createTaskFromInput({ title: "Second", status: "To Do" }, false);
+		await core.createTaskFromInput({ title: "Third", status: "To Do" }, false);
+		const service = new AgentSessionService(core, { runner });
+		const first = await service.start("task-1", { maxRunningSessions: 99 });
+		await service.start("task-2", { maxRunningSessions: 99 });
+		await service.touchUsage("task-1", first.id);
+		const third = await service.start("task-3", { maxRunningSessions: 2 });
+
+		expect((await service.list("task-1")).sessions[0]?.status).toBe("running");
+		expect((await service.list("task-2")).sessions[0]?.status).toBe("stopped");
+		expect((await service.list("task-3")).sessions[0]?.id).toBe(third.id);
+		expect((await service.list("task-3")).sessions[0]?.status).toBe("running");
+	});
+
 	it("records launch failures durably and lets a later start retry", async () => {
 		await upsertAgentConfiguration(core, "project", {
 			selectedPreset: "test",
@@ -197,8 +242,8 @@ describe("AgentSessionService", () => {
 
 	it("recovers a running session whose tmux pane target resolves to no pane", async () => {
 		const service = new AgentSessionService(core, { runner });
-		const session = await service.start("task-1");
-		runner.missingPanes.add(session.paneId ?? "");
+		await service.start("task-1");
+		runner.missingPanes.add("%1");
 
 		await service.recover("task-1");
 
@@ -217,7 +262,7 @@ describe("AgentSessionService", () => {
 		expect(failed.handoff?.status).toBe("failed");
 		expect(failed.sessions.filter((session) => session.status === "running")).toHaveLength(1);
 		expect(failed.activeSessionId).toBe(first.id);
-		expect(runner.commands).not.toContainEqual(["tmux", "kill-pane", "-t", first.paneId]);
+		expect(runner.commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
 
 		runner.failLaunch = false;
 		const reconstructed = new AgentSessionService(core, { runner });

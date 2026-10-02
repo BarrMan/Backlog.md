@@ -19,7 +19,7 @@ type Widget = {
 };
 type Host = {
 	showBoard(): Promise<void>;
-	showAgent(paneId: string | null): Promise<void>;
+	showAgentSession(taskId: string | undefined, sessionId?: string): Promise<void>;
 	focusAgent(zoom: boolean): Promise<void>;
 	takeTaskRequest(): Promise<string | undefined>;
 	detach(): Promise<void>;
@@ -30,7 +30,7 @@ function press(screen: Widget, name: string, character = "", ctrl = false): void
 	screen.emit("keypress", character, key);
 	screen.emit(`key ${name}`, character, key);
 }
-function session(id: string, paneId?: string): AgentSession {
+function session(id: string): AgentSession {
 	return {
 		id,
 		taskId: "TASK-1",
@@ -43,7 +43,6 @@ function session(id: string, paneId?: string): AgentSession {
 		status: "running",
 		outputPath: "/tmp/output",
 		bootstrapPath: "/tmp/bootstrap",
-		...(paneId && { paneId }),
 	} as AgentSession;
 }
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
@@ -72,7 +71,7 @@ describe("agent workspace native tmux presentation", () => {
 				state,
 				host: {
 					showBoard: async () => {},
-					showAgent: async () => {},
+					showAgentSession: async () => {},
 					focusAgent: async () => {
 						calls.push("focus");
 					},
@@ -130,7 +129,7 @@ describe("agent workspace native tmux presentation", () => {
 				state,
 				host: {
 					showBoard: async () => {},
-					showAgent: async () => {},
+					showAgentSession: async () => {},
 					focusAgent: async () => {},
 					takeTaskRequest: async () => undefined,
 					detach: async () => {},
@@ -174,7 +173,7 @@ describe("agent workspace native tmux presentation", () => {
 				state,
 				host: {
 					showBoard: async () => {},
-					showAgent: async () => {},
+					showAgentSession: async () => {},
 					focusAgent: async () => {},
 					takeTaskRequest: async () => {
 						const request = requestedTaskId;
@@ -206,6 +205,7 @@ describe("agent workspace native tmux presentation", () => {
 		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void };
+		const state = createWorkspaceViewState();
 		const calls: string[] = [];
 		let resolveStart: ((session: AgentSession) => void) | undefined;
 		const started = new Promise<AgentSession>((resolve) => {
@@ -223,10 +223,11 @@ describe("agent workspace native tmux presentation", () => {
 			await core.createTaskFromInput({ title: "Second", status: "To Do" }, false);
 			const workspace = new AgentWorkspaceController(core, {
 				screen: screen as never,
+				state,
 				host: {
 					showBoard: async () => {},
-					showAgent: async (pane) => {
-						calls.push(`show:${pane}`);
+					showAgentSession: async (taskId, sessionId) => {
+						calls.push(`show:${taskId}:${sessionId}`);
 					},
 					focusAgent: async () => {
 						calls.push("focus");
@@ -240,12 +241,12 @@ describe("agent workspace native tmux presentation", () => {
 					start: async () => await started,
 				} as unknown as AgentSessionService,
 			}).run();
-			await waitUntil(() => calls.includes("show:null"), "initial empty agent display");
+			await waitUntil(() => state.selectedTaskId === "TASK-1", "initial task selection");
 			press(screen, "enter", "\r");
 			press(screen, "down");
-			resolveStart?.(session("late", "%99"));
+			resolveStart?.(session("late"));
 			await Bun.sleep(30);
-			expect(calls).not.toContain("show:%99");
+			expect(calls).not.toContain("show:TASK-1:late");
 			expect(calls).not.toContain("focus");
 			press(screen, "q", "q");
 			screen.destroy();
@@ -274,15 +275,15 @@ describe("agent workspace native tmux presentation", () => {
 			await initializeTestProject(core, "Workspace stale preview recovery");
 			const { task: first } = await core.createTaskFromInput({ title: "First", status: "To Do" }, false);
 			const { task: second } = await core.createTaskFromInput({ title: "Second", status: "To Do" }, false);
-			staleByTask.set(first.id, { ...session("stale-first", "%91"), taskId: first.id });
-			staleByTask.set(second.id, { ...session("stale-second", "%92"), taskId: second.id });
+			staleByTask.set(first.id, { ...session("stale-first"), taskId: first.id });
+			staleByTask.set(second.id, { ...session("stale-second"), taskId: second.id });
 			const workspace = new AgentWorkspaceController(core, {
 				screen: screen as never,
 				state,
 				host: {
 					showBoard: async () => {},
-					showAgent: async (pane) => {
-						shown.push(`show:${pane}`);
+					showAgentSession: async (taskId, sessionId) => {
+						shown.push(`show:${taskId}:${sessionId}`);
 					},
 					focusAgent: async () => {},
 					takeTaskRequest: async () => undefined,
@@ -305,12 +306,12 @@ describe("agent workspace native tmux presentation", () => {
 			}).run();
 			await waitUntil(() => events.includes(`list:${first.id}:recovered`), "initial recovered session list");
 			expect(events.indexOf(`recover:${first.id}`)).toBeLessThan(events.indexOf(`list:${first.id}:recovered`));
-			expect(shown).not.toContain("show:%91");
+			expect(shown).not.toContain(`show:${first.id}:stale-first`);
 			press(screen, "down");
 			await waitUntil(() => state.selectedTaskId === second.id, "second task selection");
 			await waitUntil(() => events.includes(`list:${second.id}:recovered`), "second recovered session list");
 			expect(events.indexOf(`recover:${second.id}`)).toBeLessThan(events.indexOf(`list:${second.id}:recovered`));
-			expect(shown).not.toContain("show:%92");
+			expect(shown).not.toContain(`show:${second.id}:stale-second`);
 			press(screen, "q", "q");
 			screen.destroy();
 			await workspace;
@@ -328,14 +329,14 @@ describe("agent workspace native tmux presentation", () => {
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void; children: Widget[] };
 		const calls: Array<string> = [];
-		const active = session("active", "%42");
+		const active = session("active");
 		const sessions: TaskSessions = { taskId: "TASK-1", activeSessionId: active.id, sessions: [active] };
 		const host: Host = {
 			showBoard: async () => {
 				calls.push("board");
 			},
-			showAgent: async (pane) => {
-				calls.push(`show:${pane}`);
+			showAgentSession: async (taskId, sessionId) => {
+				calls.push(`show:${taskId}:${sessionId}`);
 			},
 			focusAgent: async (zoom) => {
 				calls.push(`focus:${zoom}`);
@@ -357,9 +358,10 @@ describe("agent workspace native tmux presentation", () => {
 					list: async () => sessions,
 					recover: async () => {},
 					start: async () => active,
+					touchUsage: async () => {},
 				} as unknown as AgentSessionService,
 			}).run();
-			await waitUntil(() => calls.includes("show:%42"), "initial pane selection");
+			await waitUntil(() => calls.includes("show:TASK-1:active"), "initial pane selection");
 			press(screen, "enter", "\r");
 			await waitUntil(() => calls.includes("focus:true"), "zoomed agent focus");
 			press(screen, "tab", "\t");
@@ -388,7 +390,7 @@ describe("agent workspace native tmux presentation", () => {
 		const calls: string[] = [];
 		const host: Host = {
 			showBoard: async () => {},
-			showAgent: async () => {},
+			showAgentSession: async () => {},
 			focusAgent: async () => {},
 			takeTaskRequest: async () => undefined,
 			detach: async () => {
@@ -417,16 +419,17 @@ describe("agent workspace native tmux presentation", () => {
 		}
 	});
 
-	it("does not substitute a pane when a running session has no stable pane id", async () => {
+	it("shows a running session by task/session identity", async () => {
 		const directory = createUniqueTestDir("workspace-missing-pane");
 		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void; children: Widget[] };
 		const calls: string[] = [];
+		const touches: string[] = [];
 		const host: Host = {
 			showBoard: async () => {},
-			showAgent: async (pane) => {
-				calls.push(String(pane));
+			showAgentSession: async (taskId, sessionId) => {
+				calls.push(`${taskId}:${sessionId}`);
 			},
 			focusAgent: async () => {},
 			takeTaskRequest: async () => undefined,
@@ -444,12 +447,17 @@ describe("agent workspace native tmux presentation", () => {
 				service: {
 					list: async () => ({ taskId: "TASK-1", activeSessionId: current.id, sessions: [current] }),
 					recover: async () => {},
+					touchUsage: async (taskId: string, sessionId: string) => {
+						touches.push(`${taskId}:${sessionId}`);
+					},
 				} as unknown as AgentSessionService,
 			}).run();
-			await waitUntil(() => calls.includes("null"), "empty display placeholder");
+			await waitUntil(() => calls.includes("TASK-1:active"), "running session display");
 			press(screen, "enter", "\r");
 			await Bun.sleep(20);
-			expect(calls).not.toContain("undefined");
+			expect(calls).toContain("undefined:undefined");
+			expect(calls).toContain("TASK-1:active");
+			expect(touches).toContain("TASK-1:active");
 			press(screen, "q", "q");
 			screen.destroy();
 			await workspace;

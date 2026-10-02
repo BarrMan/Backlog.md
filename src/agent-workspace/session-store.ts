@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rename } from "node:fs/promises";
+import { mkdir, readdir, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import type { AgentSessionRunner } from "./session-process.ts";
@@ -52,12 +52,14 @@ function isSession(value: unknown, taskId: string): value is AgentSession {
 		if (typeof value[key] !== "string") return false;
 	}
 	return (
-		(value.paneId === undefined || typeof value.paneId === "string") &&
-		(value.status === AGENT_SESSION_STATUS.STARTING || typeof value.paneId === "string") &&
+		!("paneId" in value) &&
 		(value.presetSnapshot === undefined || isPreset(value.presetSnapshot)) &&
 		AGENT_CONFIG_SCOPES.includes(value.configScope as AgentSession["configScope"]) &&
-		["endedAt", "predecessorId", "error"].every((key) => value[key] === undefined || typeof value[key] === "string") &&
-		(value.ownerPid === undefined || typeof value.ownerPid === "number")
+		["endedAt", "predecessorId", "error", "lastUsedAt"].every(
+			(key) => value[key] === undefined || typeof value[key] === "string",
+		) &&
+		(value.ownerPid === undefined || typeof value.ownerPid === "number") &&
+		(value.useCount === undefined || (typeof value.useCount === "number" && value.useCount >= 0))
 	);
 }
 
@@ -124,6 +126,41 @@ export class SessionStore {
 	}
 
 	async paths(taskId: string): Promise<SessionPaths> {
+		const taskDir = join(await this.projectStateRoot(), slug(taskId));
+		return { taskDir, statePath: join(taskDir, "state.json") };
+	}
+
+	async readAll(): Promise<SessionState[]> {
+		const root = await this.projectStateRoot();
+		let entries: string[];
+		try {
+			entries = (await readdir(root, { withFileTypes: true }))
+				.filter((entry) => entry.isDirectory())
+				.map((entry) => entry.name);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
+		}
+		const states: SessionState[] = [];
+		for (const entry of entries) {
+			try {
+				const parsed = JSON.parse(await Bun.file(join(root, entry, "state.json")).text());
+				if (isRecord(parsed) && typeof parsed.taskId === "string") states.push(this.validate(parsed, parsed.taskId));
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
+		return states;
+	}
+
+	async write(path: string, content: string): Promise<void> {
+		await mkdir(dirname(path), { recursive: true });
+		const temporary = `${path}.${randomUUID()}.tmp`;
+		await Bun.write(temporary, content);
+		await rename(temporary, path);
+	}
+
+	private async projectStateRoot(): Promise<string> {
 		const git = await this.runner.run(["git", "rev-parse", "--git-common-dir"], { cwd: this.rootDir });
 		const projectHash = createHash("sha256").update(resolve(this.rootDir)).digest("hex").slice(0, 16);
 		const root =
@@ -134,15 +171,7 @@ export class SessionStore {
 						"backlog-workspace",
 						projectHash,
 					);
-		const taskDir = join(root, projectHash, slug(taskId));
-		return { taskDir, statePath: join(taskDir, "state.json") };
-	}
-
-	async write(path: string, content: string): Promise<void> {
-		await mkdir(dirname(path), { recursive: true });
-		const temporary = `${path}.${randomUUID()}.tmp`;
-		await Bun.write(temporary, content);
-		await rename(temporary, path);
+		return join(root, projectHash);
 	}
 
 	private empty(taskId: string): SessionState {

@@ -9,6 +9,7 @@ import type {
 	AgentSession,
 	TaskSessions,
 } from "../../agent-workspace/types.ts";
+import { activeSessionOf, WorkspaceStateService } from "../../agent-workspace/workspace-state.ts";
 import type { Core } from "../../core/backlog.ts";
 import type { Task, TaskUpdateInput } from "../../types/index.ts";
 import { collectAvailableLabels } from "../../utils/label-filter.ts";
@@ -46,7 +47,10 @@ import {
 import { reconciledWorkspaceSelection, workspaceRows } from "./reconciliation.ts";
 
 type Mode = "navigation" | "details" | "field" | "history" | "output" | "config" | "composer";
-type WorkspaceHost = Pick<TmuxWorkspace, "showBoard" | "showAgent" | "focusAgent" | "takeTaskRequest" | "detach"> &
+type WorkspaceHost = Pick<
+	TmuxWorkspace,
+	"showBoard" | "showAgentSession" | "focusAgent" | "takeTaskRequest" | "detach"
+> &
 	Partial<
 		Pick<
 			TmuxWorkspace,
@@ -83,6 +87,7 @@ type SharedWorkspaceState = Pick<WorkspaceViewState, "filters" | "selectedTaskId
 export type AgentWorkspaceOptions = {
 	screen?: ReturnType<typeof createScreen>;
 	service?: AgentSessionService;
+	workspaceState?: WorkspaceStateService;
 	host?: WorkspaceHost;
 	state?: WorkspaceViewState;
 	taskComposer?: (options: TaskComposerOptions) => Promise<Task | null>;
@@ -138,7 +143,7 @@ export function createLatestWorkspaceSearchPublisher(publish: (search: string) =
 
 function sessionLabel(session?: AgentSession): string {
 	if (!session) return "No active session";
-	return `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}${session.paneId ? "" : " · pane unavailable"}`;
+	return `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}`;
 }
 
 function detailsText(
@@ -194,6 +199,7 @@ export class AgentWorkspaceController {
 		const detailsOnly = options.region === "workspace-details";
 		const nativePane = tasksOnly || detailsOnly;
 		const service = options.service ?? new AgentSessionService(core);
+		const workspaceState = options.workspaceState ?? new WorkspaceStateService(core, { sessions: service });
 		const host = options.host ?? new TmuxWorkspace(core.filesystem.rootDir);
 		const state = options.state ?? createWorkspaceViewState();
 		return new Promise((resolve) => {
@@ -265,13 +271,10 @@ export class AgentWorkspaceController {
 			let refreshRunning = false;
 			let filterFocused = false;
 			let selectionGeneration = 0;
-			let displayedPaneId: string | null | undefined;
+			let displayedAgent: { taskId?: string; sessionId?: string } | undefined;
 			let presentation = Promise.resolve();
-			const active = () => taskSessions?.sessions.find((item) => item.id === taskSessions?.activeSessionId);
-			const listRecoveredSessions = async (taskId: string) => {
-				await service.recover(taskId);
-				return service.list(taskId);
-			};
+			const active = () => (taskSessions ? activeSessionOf(taskSessions) : undefined);
+			const listRecoveredSessions = async (taskId: string) => await workspaceState.sessionState(taskId);
 			const focusedTask = () =>
 				entries[selected]?.kind === "task"
 					? (entries[selected] as Extract<WorkspaceEntry, { kind: "task" }>).task
@@ -302,15 +305,24 @@ export class AgentWorkspaceController {
 				presentation = presentation.catch(() => {}).then(action);
 				return presentation;
 			};
-			const showAgent = (session: AgentSession | undefined, generation = selectionGeneration) =>
+			const touchDisplayedAgent = async () => {
+				if (displayedAgent?.taskId && displayedAgent.sessionId)
+					await workspaceState.touchSession(displayedAgent.taskId, displayedAgent.sessionId);
+			};
+			const showAgent = (task: Task | undefined, session: AgentSession | undefined, generation = selectionGeneration) =>
 				queuePresentation(async () => {
 					if (closed || generation !== selectionGeneration) return;
-					const paneId = session?.status === "running" ? (session.paneId ?? null) : null;
-					if (session?.status === "running" && !paneId)
-						tell("The running agent has no tmux pane yet. Wait for startup or recover the session.");
-					if (displayedPaneId === paneId) return;
-					await host.showAgent(paneId);
-					displayedPaneId = paneId;
+					const next = {
+						taskId: task && session?.status === "running" ? task.id : undefined,
+						sessionId: session?.status === "running" ? session.id : undefined,
+					};
+					if (displayedAgent && displayedAgent.taskId === next.taskId && displayedAgent.sessionId === next.sessionId) {
+						await touchDisplayedAgent();
+						return;
+					}
+					await host.showAgentSession(next.taskId, next.sessionId);
+					displayedAgent = next;
+					if (next.taskId && next.sessionId) await workspaceState.touchSession(next.taskId, next.sessionId);
 				});
 			const updateFooter = () => {
 				if (nativePane) return;
@@ -363,7 +375,7 @@ export class AgentWorkspaceController {
 				historySession = undefined;
 				state.selectedTaskId = undefined;
 				details.setContent("No tasks match this filter.");
-				run(() => showAgent(undefined));
+				run(() => showAgent(undefined, undefined));
 			};
 			const selectTask = async (index: number, task: Task) => {
 				const unchanged = selectedTask?.id === task.id;
@@ -379,7 +391,7 @@ export class AgentWorkspaceController {
 					details.setLabel?.(" Details ");
 					historySession = undefined;
 					taskSessions = undefined;
-					await showAgent(undefined, generation);
+					await showAgent(undefined, undefined, generation);
 				}
 				showDetails();
 				const sessions = await listRecoveredSessions(task.id);
@@ -387,7 +399,7 @@ export class AgentWorkspaceController {
 				taskSessions = sessions;
 				if (!unchanged) detailsViewport.setScroll(state.scrolls.get(task.id) ?? 0);
 				showDetails();
-				if (mode !== "history" && mode !== "output") await showAgent(active(), generation);
+				if (mode !== "history" && mode !== "output") await showAgent(selectedTask, active(), generation);
 			};
 			const select = async (index: number) => {
 				const entry = entries[index];
@@ -446,7 +458,7 @@ export class AgentWorkspaceController {
 									showHistoryRows();
 								} else if (mode !== "output") {
 									showDetails();
-									await showAgent(active(), generation);
+									await showAgent(selectedTask, active(), generation);
 								}
 							}
 						}
@@ -561,7 +573,7 @@ export class AgentWorkspaceController {
 				if (!selectedTask || mode !== "details") return;
 				const taskId = selectedTask.id;
 				const generation = selectionGeneration;
-				const sessions = await service.list(taskId);
+				const sessions = await workspaceState.listSessions(taskId);
 				if (closed || generation !== selectionGeneration || selectedTask?.id !== taskId || mode !== "details") return;
 				taskSessions = sessions;
 				historySession = taskSessions.sessions.at(-1);
@@ -772,14 +784,13 @@ export class AgentWorkspaceController {
 					try {
 						let session = active();
 						if (!session) {
-							session = await service.start(task.id);
+							({ activeSession: session, sessions: taskSessions } = await workspaceState.startSession(task.id));
 							if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
-							taskSessions = await service.list(task.id);
+							taskSessions = await workspaceState.listSessions(task.id);
 							if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
 							session = active() ?? session;
 						}
-						if (!session.paneId) throw new Error("Agent session started without a tmux pane.");
-						await showAgent(session, generation);
+						await showAgent(task, session, generation);
 						if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
 						await host.focusAgent(true);
 					} finally {
@@ -841,11 +852,11 @@ export class AgentWorkspaceController {
 							const task = selectedTask;
 							if (!session || !task) return;
 							if (session.status === "running") {
-								await showAgent(session);
+								await showAgent(task, session);
 								await host.focusAgent(true);
 								return;
 							}
-							const output = await service.output(task.id, session.id);
+							const output = await workspaceState.sessionOutput(task.id, session.id);
 							if (closed || selectedTask?.id !== task.id || historySession?.id !== session.id || mode !== "history")
 								return;
 							mode = "output";
@@ -922,7 +933,10 @@ export class AgentWorkspaceController {
 				}
 				if (matchesKey(keymapKeys("workspace", "inlineInput"), key)) {
 					filterHeader.setExitRequestHandler(() => tree.focus());
-					run(() => host.focusAgent(false));
+					run(async () => {
+						await touchDisplayedAgent();
+						await host.focusAgent(false);
+					});
 					return;
 				}
 				if (matchesKey(keymapKeys("workspace", "newTask"), key)) {
@@ -932,7 +946,7 @@ export class AgentWorkspaceController {
 				const task = focusedTask();
 				if (matchesKey(keymapKeys("workspace", "handoff"), key) && task)
 					run(async () => {
-						await service.requestHandoff(task.id);
+						await workspaceState.requestHandoff(task.id);
 						await select(selected);
 					});
 				if (matchesKey(keymapKeys("workspace", "config"), key)) openConfig();

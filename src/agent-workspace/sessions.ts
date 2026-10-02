@@ -22,6 +22,7 @@ import {
 
 const TERMINAL_HANDOFF_STATUSES = new Set<HandoffStatus>([HANDOFF_STATUS.COMPLETED, HANDOFF_STATUS.FAILED]);
 const REPLACEABLE_HANDOFF_STATUSES = new Set<HandoffStatus>([HANDOFF_STATUS.READY, HANDOFF_STATUS.FAILED]);
+const DEFAULT_MAX_RUNNING_AGENT_SESSIONS = 10;
 
 export type { AgentSessionRunner } from "./session-process.ts";
 
@@ -41,7 +42,7 @@ export class AgentSessionService {
 		options: { runner?: AgentSessionRunner } = {},
 	) {
 		this.runner = options.runner ?? new BunRunner();
-		this.process = new SessionProcess(this.runner);
+		this.process = new SessionProcess(this.runner, this.core.filesystem.rootDir);
 		this.store = new SessionStore(this.core.filesystem.rootDir, this.runner);
 		this.backgroundWorkers = !options.runner;
 	}
@@ -51,14 +52,19 @@ export class AgentSessionService {
 		return await this.store.read(task.id);
 	}
 
-	async start(taskId: string, options: { preset?: string; predecessorId?: string } = {}): Promise<AgentSession> {
+	async start(
+		taskId: string,
+		options: { preset?: string; predecessorId?: string; maxRunningSessions?: number } = {},
+	): Promise<AgentSession> {
 		if (options.predecessorId) throw new Error("Use agent-session handoff to replace a session.");
 		const task = await this.requireTask(taskId);
 		const resolved = await resolveAgentConfiguration(this.core, task.id);
 		const presetName = options.preset ?? resolved.config.selectedPreset;
 		const preset = resolved.config.presets[presetName];
 		if (!preset) throw new Error(`Agent preset not found: ${presetName}`);
-		return await this.startReserved(task, presetName, preset, resolved.scope);
+		return await this.startReserved(task, presetName, preset, resolved.scope, {
+			maxRunningSessions: options.maxRunningSessions,
+		});
 	}
 
 	private async startReserved(
@@ -66,7 +72,7 @@ export class AgentSessionService {
 		presetName: string,
 		preset: AgentPreset,
 		configScope: AgentSession["configScope"],
-		options: { predecessorId?: string; cwd?: string } = {},
+		options: { predecessorId?: string; cwd?: string; maxRunningSessions?: number } = {},
 	): Promise<AgentSession> {
 		const inProgress = await this.inProgressStatus();
 		const paths = await this.store.paths(task.id);
@@ -113,11 +119,7 @@ export class AgentSessionService {
 			if (preset.worktree)
 				await ensureSessionWorktree(this.runner, this.core.filesystem.rootDir, task.id, reserved.cwd);
 			const env = { ...process.env, ...preset.env, ...this.environment(reserved) } as Record<string, string>;
-			const paneId = await this.process.create(reserved, env);
-			await this.store.mutate(task.id, async (state) => {
-				this.session(state, reserved.id).paneId = paneId;
-			});
-			reserved.paneId = paneId;
+			await this.process.create(reserved, env);
 			if (preset.prepare) await this.process.prepare(preset.prepare, reserved.cwd, env);
 			await this.store.write(
 				reserved.bootstrapPath,
@@ -146,19 +148,17 @@ export class AgentSessionService {
 				current.status = AGENT_SESSION_STATUS.RUNNING;
 				current.ownerPid = undefined;
 				current.error = undefined;
+				this.touch(current, timestamp());
 				state.activeSessionId = current.id;
 				state.hasSuccessfulSession = true;
 			});
 			reserved.status = AGENT_SESSION_STATUS.RUNNING;
+			this.touch(reserved, timestamp());
+			await this.enforceRunningLimit(reserved, options.maxRunningSessions ?? DEFAULT_MAX_RUNNING_AGENT_SESSIONS);
 			return reserved;
 		} catch (error) {
-			if (reserved.paneId) await this.process.kill(reserved);
+			await this.process.kill(reserved);
 			await this.store.mutate(task.id, async (state) => {
-				if (!reserved.paneId) {
-					state.sessions = state.sessions.filter((candidate) => candidate.id !== reserved.id);
-					if (state.activeSessionId === reserved.id) delete state.activeSessionId;
-					return;
-				}
 				const current = this.session(state, reserved.id);
 				current.status = AGENT_SESSION_STATUS.FAILED;
 				current.endedAt = timestamp();
@@ -184,7 +184,8 @@ export class AgentSessionService {
 	}
 
 	async output(taskId: string, sessionId?: string): Promise<string> {
-		const { session } = await this.sessionSnapshot(taskId, sessionId, false);
+		const { task, session } = await this.sessionSnapshot(taskId, sessionId, false);
+		await this.touchSession(task.id, session.id);
 		try {
 			return await Bun.file(session.outputPath).text();
 		} catch {
@@ -193,7 +194,8 @@ export class AgentSessionService {
 	}
 
 	async attach(taskId: string, sessionId?: string): Promise<void> {
-		const { session } = await this.sessionSnapshot(taskId, sessionId);
+		const { task, session } = await this.sessionSnapshot(taskId, sessionId);
+		await this.touchSession(task.id, session.id);
 		await this.process.attach(session);
 	}
 
@@ -210,6 +212,7 @@ export class AgentSessionService {
 			if (state.handoff && !TERMINAL_HANDOFF_STATUSES.has(state.handoff.status))
 				throw new Error(`Task ${task.id} already has a handoff request.`);
 			const active = this.active(state);
+			this.touch(active, timestamp());
 			const next: HandoffRequest = {
 				id: randomUUID(),
 				sessionId: active.id,
@@ -269,6 +272,15 @@ export class AgentSessionService {
 		}
 	}
 
+	async touchUsage(taskId: string, sessionId?: string): Promise<void> {
+		const task = await this.requireTask(taskId);
+		const state = await this.store.read(task.id);
+		const session = sessionId
+			? state.sessions.find((candidate) => candidate.id === sessionId)
+			: state.sessions.find((candidate) => candidate.id === state.activeSessionId);
+		if (session) await this.touchSession(task.id, session.id);
+	}
+
 	async recover(taskId: string): Promise<void> {
 		const task = await this.requireTask(taskId);
 		const state = await this.store.read(task.id);
@@ -277,9 +289,7 @@ export class AgentSessionService {
 				candidate.status === AGENT_SESSION_STATUS.STARTING || candidate.status === AGENT_SESSION_STATUS.RUNNING,
 		)) {
 			if (session.status === AGENT_SESSION_STATUS.STARTING && this.ownerIsAlive(session.ownerPid)) continue;
-			const alive = session.paneId
-				? await this.process.alive(session)
-				: { exitCode: 1, stdout: "", stderr: "missing pane ID" };
+			const alive = await this.process.alive(session);
 			const dead = alive;
 			if (alive.exitCode === 0 && dead.stdout.trim() !== "1" && session.status === AGENT_SESSION_STATUS.RUNNING)
 				continue;
@@ -304,6 +314,48 @@ export class AgentSessionService {
 		if (recovered.handoff?.status === HANDOFF_STATUS.READY) {
 			await this.continueHandoff(task.id);
 		}
+	}
+
+	private async enforceRunningLimit(current: AgentSession, max: number): Promise<void> {
+		if (max < 1) return;
+		const states = await this.store.readAll();
+		const live: AgentSession[] = [];
+		for (const state of states) {
+			for (const session of state.sessions) {
+				if (session.status !== AGENT_SESSION_STATUS.RUNNING) continue;
+				const alive = await this.process.alive(session);
+				if (alive.exitCode === 0 && alive.stdout.trim() === "0") live.push(session);
+			}
+		}
+		if (live.length <= max) return;
+		const candidates = live
+			.filter((session) => session.id !== current.id && session.taskId !== current.taskId)
+			.sort((left, right) => {
+				const use = (left.useCount ?? 0) - (right.useCount ?? 0);
+				if (use !== 0) return use;
+				return (left.lastUsedAt ?? left.createdAt).localeCompare(right.lastUsedAt ?? right.createdAt);
+			});
+		const stopCount = live.length - max;
+		for (const session of candidates.slice(0, stopCount)) {
+			await this.process.kill(session);
+			await this.store.mutate(session.taskId, async (state) => {
+				const current = this.session(state, session.id);
+				current.status = AGENT_SESSION_STATUS.STOPPED;
+				current.endedAt = timestamp();
+				if (state.activeSessionId === current.id) delete state.activeSessionId;
+			});
+		}
+	}
+
+	private async touchSession(taskId: string, sessionId: string): Promise<void> {
+		await this.store.mutate(taskId, async (state) => {
+			this.touch(this.session(state, sessionId), timestamp());
+		});
+	}
+
+	private touch(session: AgentSession, at: string): void {
+		session.lastUsedAt = at;
+		session.useCount = (session.useCount ?? 0) + 1;
 	}
 
 	private async requireTask(taskId: string) {

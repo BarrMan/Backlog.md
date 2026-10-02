@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { captureProcessOutput } from "../process/capture.ts";
 import { buildAgentLaunchCommand } from "./bootstrap.ts";
 import { fail, type SessionCommandResult } from "./session-utils.ts";
@@ -5,6 +6,12 @@ import type { AgentPreset, AgentSession } from "./types.ts";
 
 const LAUNCH_SETTLE_DELAY_MS = 25;
 const TMUX_PLACEHOLDER_COMMAND = "exec sleep 2147483647";
+const PANE_METADATA_FORMAT =
+	"#{pane_id}\t#{pane_dead}\t#{@backlog_root}\t#{@backlog_task}\t#{@backlog_session}\t#{@backlog_role}";
+const PANE_OPTION_ROOT = "@backlog_root";
+const PANE_OPTION_TASK = "@backlog_task";
+const PANE_OPTION_SESSION = "@backlog_session";
+const PANE_OPTION_ROLE = "@backlog_role";
 
 export interface AgentSessionRunner {
 	run(
@@ -39,14 +46,21 @@ function quote(value: string): string {
 }
 
 export class SessionProcess {
-	constructor(private readonly runner: AgentSessionRunner) {}
+	private readonly rootDir: string;
+
+	constructor(
+		private readonly runner: AgentSessionRunner,
+		rootDir: string,
+	) {
+		this.rootDir = realpathSync(rootDir);
+	}
 
 	async prepare(command: string, cwd: string, env: Record<string, string>): Promise<void> {
 		const result = await this.runner.run(["/bin/sh", "-lc", command], { cwd, env });
 		if (result.exitCode !== 0) throw fail("Agent preparation failed", result);
 	}
 
-	async create(session: AgentSession, env: Record<string, string>): Promise<string> {
+	async create(session: AgentSession, env: Record<string, string>): Promise<void> {
 		const environment = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
 		const created = await this.runner.run(
 			[
@@ -70,11 +84,21 @@ export class SessionProcess {
 		if (created.exitCode !== 0) throw fail(`Could not start tmux session ${session.id}`, created);
 		const paneId = created.stdout.trim();
 		if (!/^%\d+$/.test(paneId)) throw new Error(`Could not determine tmux pane for session ${session.id}.`);
-		return paneId;
+		for (const [option, value] of [
+			[PANE_OPTION_ROOT, this.rootDir],
+			[PANE_OPTION_TASK, session.taskId],
+			[PANE_OPTION_SESSION, session.id],
+			[PANE_OPTION_ROLE, "agent"],
+		] as const) {
+			const tagged = await this.runner.run(["tmux", "set-option", "-p", "-t", paneId, option, value]);
+			if (tagged.exitCode !== 0) throw fail(`Could not tag tmux session ${session.id}`, tagged);
+		}
+		const titled = await this.runner.run(["tmux", "select-pane", "-t", paneId, "-T", `${session.taskId} agent`]);
+		if (titled.exitCode !== 0) throw fail(`Could not title tmux session ${session.id}`, titled);
 	}
 
 	async preparePane(session: AgentSession): Promise<void> {
-		const paneId = this.paneId(session);
+		const paneId = await this.paneId(session);
 		for (const args of [
 			["tmux", "set-option", "-t", session.tmuxName, "remain-on-exit", "on"],
 			["tmux", "pipe-pane", "-o", "-t", paneId, `cat >> ${quote(session.outputPath)}`],
@@ -85,7 +109,7 @@ export class SessionProcess {
 	}
 
 	async launch(session: AgentSession, preset: AgentPreset): Promise<void> {
-		const paneId = this.paneId(session);
+		const paneId = await this.paneId(session);
 		const launched = await this.runner.run([
 			"tmux",
 			"respawn-pane",
@@ -111,18 +135,21 @@ export class SessionProcess {
 	}
 
 	async kill(session: AgentSession): Promise<void> {
-		const result = await this.runner.run(["tmux", "kill-pane", "-t", this.paneId(session)]);
+		const paneId = await this.findPane(session, { includeDead: true });
+		if (!paneId) return;
+		const result = await this.runner.run(["tmux", "kill-pane", "-t", paneId]);
 		if (result.exitCode !== 0 && !/no server running|can't find pane/i.test(result.stderr))
 			throw fail(`Could not stop session ${session.id}`, result);
 	}
 	async attach(session: AgentSession): Promise<void> {
 		const command = process.env.TMUX ? "switch-client" : "attach-session";
-		const result = await this.runner.run(["tmux", command, "-t", this.paneId(session)], { inherit: true });
+		const result = await this.runner.run(["tmux", command, "-t", await this.paneId(session)], { inherit: true });
 		if (result.exitCode !== 0) throw fail(`Could not attach to session ${session.id}`, result);
 	}
 
 	async alive(session: AgentSession) {
-		const paneId = this.paneId(session);
+		const paneId = await this.findPane(session, { includeDead: true });
+		if (!paneId) return { exitCode: 1, stdout: "", stderr: `tmux pane for session ${session.id} not found` };
 		const result = await this.runner.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_id} #{pane_dead}"]);
 		if (result.exitCode !== 0) return result;
 		const [actualPaneId, paneDead] = result.stdout.trim().split(/\s+/);
@@ -131,8 +158,31 @@ export class SessionProcess {
 		return { ...result, stdout: `${paneDead}\n` };
 	}
 
-	private paneId(session: AgentSession): string {
-		if (!session.paneId) throw new Error(`Agent session ${session.id} has no tmux pane ID.`);
-		return session.paneId;
+	private async paneId(session: AgentSession): Promise<string> {
+		const paneId = await this.findPane(session);
+		if (!paneId) throw new Error(`Agent pane for session ${session.id} no longer exists`);
+		return paneId;
+	}
+
+	private async findPane(session: AgentSession, options: { includeDead?: boolean } = {}): Promise<string | undefined> {
+		const listed = await this.runner.run(["tmux", "list-panes", "-a", "-F", PANE_METADATA_FORMAT]);
+		if (listed.exitCode !== 0) {
+			if (/no server running/i.test(listed.stderr)) return undefined;
+			throw fail(`Could not find tmux pane for session ${session.id}`, listed);
+		}
+		const matches = listed.stdout
+			.split("\n")
+			.map((line) => line.split("\t"))
+			.filter(
+				([paneId, dead, root, taskId, sessionId, role]) =>
+					paneId?.startsWith("%") &&
+					(options.includeDead || dead !== "1") &&
+					root === this.rootDir &&
+					taskId === session.taskId &&
+					sessionId === session.id &&
+					role === "agent",
+			);
+		if (matches.length > 1) throw new Error(`Multiple tmux panes match agent session ${session.id}.`);
+		return matches[0]?.[0];
 	}
 }

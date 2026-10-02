@@ -74,7 +74,9 @@ interactive(
 			expect(state.sessions[0].status).toBe("handed-off");
 			expect(state.activeSessionId).toBe(state.sessions[1].id);
 			expect((await core.loadTaskById(task.id))?.description).toBe("Next: verify continuity.");
-			expect((await tmux("list-panes", "-a", "-F", "#{pane_id}")).split("\n")).not.toContain(first.paneId);
+			expect((await tmux("list-panes", "-a", "-F", "#{@backlog_session}:#{pane_dead}")).split("\n")).not.toContain(
+				`${first.id}:0`,
+			);
 
 			const script = join(root, "client.expect");
 			const launch = [...getTestCliCommand(), "workspace"]
