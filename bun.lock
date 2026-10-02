@@ -6,6 +6,7 @@
       "name": "backlog.md",
       "dependencies": {
         "elysia": "^1.4.30",
+        "libtmux": "^0.1.0-alpha.12",
       },
       "devDependencies": {
         "@biomejs/biome": "2.5.3",
@@ -783,6 +784,8 @@
     "kind-of": ["kind-of@6.0.3", "", {}, "sha512-dcS1ul+9tmeD95T+x28/ehLgd9mENa3LsvDTtzm3vyBEO7RPptvAD+t44WVXaUjTBRcrpFeFlC8WCruUR456hw=="],
 
     "layout-base": ["layout-base@1.0.2", "", {}, "sha512-8h2oVEZNktL4BH2JCOI90iD1yXwL6iNW7KcCKT2QZgQJR2vbqDsldCTPRU9NifTCqHZci57XvQQ15YTu+sTYPg=="],
+
+    "libtmux": ["libtmux@0.1.0-alpha.12", "", {}, "sha512-vMGaVZYfWSrHkzvMI7rVLIEe/sDQBvAfWPAkx6MniubFn7vI0PA1i0wsDLikOaUxfWJEdRK32ed420+fIbLfBg=="],
 
     "lint-staged": ["lint-staged@17.0.8", "", { "dependencies": { "listr2": "^10.2.1", "picomatch": "^4.0.4", "string-argv": "^0.3.2", "tinyexec": "^1.2.4" }, "optionalDependencies": { "yaml": "^2.9.0" }, "bin": { "lint-staged": "bin/lint-staged.js" } }, "sha512-B2P/d+jVW0UXOQ0MVMLrB/9ydA1P+zz6jYfdrbbEd9ur3S2rcbduFWKiUCC02Sm5hbC8nrm7y24WuYMG54HfxA=="],
 
