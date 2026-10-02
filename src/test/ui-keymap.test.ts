@@ -124,6 +124,7 @@ describe("TUI keymap", () => {
 				screen,
 				service: {
 					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {},
 					preview: async () => "",
 				} as unknown as AgentSessionService,
 				taskComposer: async () => {
@@ -138,12 +139,13 @@ describe("TUI keymap", () => {
 			await waitUntil(() => composerCalls === 1);
 			const footer = screen.children.map((child) => child.getContent?.() ?? child.content ?? "").join("\n");
 			expect(footer).toContain("[X] New");
-			press(screen, "q", "q");
+			screen.destroy();
 			await workspace;
+			workspace = undefined;
 		} finally {
 			keymap.workspace.newTask = original;
 			if (workspace) {
-				press(screen, "q", "q");
+				screen.destroy();
 				await workspace;
 			}
 			screen.destroy();

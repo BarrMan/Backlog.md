@@ -122,7 +122,13 @@ export class SessionProcess {
 	}
 
 	async alive(session: AgentSession) {
-		return await this.runner.run(["tmux", "display-message", "-p", "-t", this.paneId(session), "#{pane_dead}"]);
+		const paneId = this.paneId(session);
+		const result = await this.runner.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_id} #{pane_dead}"]);
+		if (result.exitCode !== 0) return result;
+		const [actualPaneId, paneDead] = result.stdout.trim().split(/\s+/);
+		if (actualPaneId !== paneId || (paneDead !== "0" && paneDead !== "1"))
+			return { exitCode: 1, stdout: "", stderr: result.stderr || `tmux pane ${paneId} not found` };
+		return { ...result, stdout: `${paneDead}\n` };
 	}
 
 	private paneId(session: AgentSession): string {

@@ -8,6 +8,8 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 	readonly calls: string[][] = [];
 	readonly options = new Map<string, string>();
 	readonly paneHeights = new Map<string, number>();
+	readonly deadPanes = new Set<string>();
+	readonly missingPanes = new Set<string>();
 	clients = "";
 	#nextPane = 3;
 	#locks = new Set<string>();
@@ -66,13 +68,23 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 		if (args[1] === "display-message") {
 			const target = args[args.indexOf("-t") + 1];
 			const format = args.at(-1);
+			if (target && this.missingPanes.has(target)) return { exitCode: 0, stdout: "\n", stderr: "" };
 			if (format === "#{pane_id}")
 				return { exitCode: 0, stdout: target?.startsWith("%") ? `${target}\n` : "%9\n", stderr: "" };
+			if (format === "#{pane_id} #{pane_dead}")
+				return {
+					exitCode: 0,
+					stdout: `${target} ${this.deadPanes.has(target ?? "") ? "1" : "0"}\n`,
+					stderr: "",
+				};
 			if (format === "#{pane_height}")
 				return { exitCode: 0, stdout: `${this.paneHeights.get(target ?? "") ?? 0}\n`, stderr: "" };
+			if (format === "#{pane_dead}")
+				return { exitCode: 0, stdout: this.deadPanes.has(target ?? "") ? "1\n" : "0\n", stderr: "" };
 			return { exitCode: 0, stdout: "0\n", stderr: "" };
 		}
 		const pane = args[args.indexOf("-t") + 1];
+		if (args[1] === "respawn-pane" && pane) this.deadPanes.delete(pane);
 		if (args[1] === "resize-pane" && pane) this.paneHeights.set(pane, Number(args.at(-1)));
 		if (args[1] === "list-clients") return { exitCode: 0, stdout: this.clients, stderr: "" };
 		return { exitCode: 0, stdout: "", stderr: "" };
@@ -85,6 +97,9 @@ describe("TmuxWorkspace", () => {
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showBoard();
 		const commands = runner.calls.map((args) => args.join(" "));
+		const returnBinding = commands.find((command) => command.includes("bind-key") && command.includes(" C-q "));
+		expect(returnBinding).toContain("select-pane -t %4");
+		expect(returnBinding).not.toContain("select-pane -t %2");
 		expect(
 			commands.some((command) =>
 				command.includes(
@@ -134,9 +149,9 @@ describe("TmuxWorkspace", () => {
 		await workspace.showAgent("%43");
 		const swaps = runner.calls.filter((args) => args[1] === "swap-pane");
 		expect(swaps).toEqual([
-			["tmux", "swap-pane", "-s", "%42", "-t", "%6"],
-			["tmux", "swap-pane", "-s", "%42", "-t", "%6"],
-			["tmux", "swap-pane", "-s", "%43", "-t", "%6"],
+			["tmux", "swap-pane", "-d", "-s", "%42", "-t", "%6"],
+			["tmux", "swap-pane", "-d", "-s", "%42", "-t", "%6"],
+			["tmux", "swap-pane", "-d", "-s", "%43", "-t", "%6"],
 		]);
 	});
 
@@ -165,6 +180,45 @@ describe("TmuxWorkspace", () => {
 		runner.calls.length = 0;
 		await workspace.resizeFooter(2);
 		expect(runner.calls).toContainEqual(["tmux", "resize-pane", "-t", "%3", "-y", "2"]);
+	});
+
+	it("respawns the footer before focusing workspace search", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.deadPanes.add("%3");
+		runner.calls.length = 0;
+		await workspace.focusSearch();
+		const respawn = runner.calls.findIndex((args) => args[1] === "respawn-pane" && args.includes("%3"));
+		const select = runner.calls.findIndex((args) => args[1] === "select-pane" && args.includes("%3"));
+		expect(respawn).toBeGreaterThanOrEqual(0);
+		expect(select).toBeGreaterThan(respawn);
+		expect(runner.calls).toContainEqual(["tmux", "send-keys", "-t", "%3", "/"]);
+	});
+
+	it("rebuilds a stale footer before focusing workspace search", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.missingPanes.add("%3");
+		runner.calls.length = 0;
+		await workspace.focusSearch();
+		expect(runner.calls).toContainEqual(["tmux", "kill-window", "-t", "@2"]);
+		expect(runner.calls).toContainEqual(["tmux", "select-pane", "-t", "%7"]);
+		expect(runner.calls).toContainEqual(["tmux", "send-keys", "-t", "%7", "/"]);
+		expect(runner.calls).not.toContainEqual(["tmux", "select-pane", "-t", "%3"]);
+	});
+
+	it("rebuilds a stale footer before showing the workspace", async () => {
+		const runner = new RecordingRunner();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.missingPanes.add("%3");
+		runner.calls.length = 0;
+		await workspace.showWorkspace();
+		expect(runner.calls).toContainEqual(["tmux", "kill-window", "-t", "@2"]);
+		expect(runner.calls).toContainEqual(["tmux", "select-pane", "-t", "%8"]);
+		expect(runner.calls).not.toContainEqual(["tmux", "respawn-pane", "-k", "-t", "%3"]);
 	});
 
 	it("rejects invalid workspace region heights", async () => {
@@ -287,13 +341,25 @@ describe("TmuxWorkspace", () => {
 		await workspace.showWorkspace();
 		expect(runner.calls).toContainEqual(["tmux", "kill-window", "-t", "@2"]);
 		expect(runner.calls.filter((args) => args[1] === "split-window")).toHaveLength(4);
+		expect(runner.calls).toContainEqual([
+			"tmux",
+			"bind-key",
+			"-T",
+			`backlog-workspace-${workspace.sessionName.split("-").at(-1)}`,
+			"C-q",
+			"if-shell",
+			"-F",
+			"#{==:#{window_id},@2}",
+			"if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z; select-pane -t %8' 'select-pane -t %8'",
+			"",
+		]);
 	});
 
 	it("detaches the client from either owned UI pane", async () => {
 		const runner = new RecordingRunner();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showBoard();
-		for (const pane of ["%1", "%2"]) {
+		for (const pane of ["%1", "%2", "%3", "%4", "%5"]) {
 			runner.calls.length = 0;
 			runner.clients = `/dev/ttys001|${pane}\n`;
 			await workspace.detach();
@@ -456,6 +522,28 @@ describe("TmuxWorkspace real tmux", () => {
 				const current = await runner.run(["tmux", "display-message", "-p", "-t", host.sessionName, "#{window_name}"]);
 				expect(current.stdout.trim()).toBe("Board");
 				await host.showWorkspace();
+				const tasks = (
+					await runner.run(["tmux", "show-options", "-qv", "-t", host.sessionName, "@backlog_workspace_tasks_pane"])
+				).stdout.trim();
+				const selectedWorkspacePane = async () =>
+					(
+						await runner.run([
+							"tmux",
+							"list-panes",
+							"-t",
+							`${host.sessionName}:Workspace`,
+							"-F",
+							"#{pane_id}:#{pane_active}",
+						])
+					).stdout
+						.split("\n")
+						.find((pane) => pane.endsWith(":1"))
+						?.slice(0, -2);
+				expect(await selectedWorkspacePane()).toBe(tasks);
+				await host.showAgent(b);
+				expect(await selectedWorkspacePane()).toBe(tasks);
+				await host.showAgent(a);
+				expect(await selectedWorkspacePane()).toBe(tasks);
 				await host.focusAgent(true);
 				await host.focusAgent(false);
 				const selected = await runner.run(["tmux", "display-message", "-p", "-t", host.sessionName, "#{pane_id}"]);

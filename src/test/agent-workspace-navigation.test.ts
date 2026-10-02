@@ -82,7 +82,10 @@ describe("agent workspace native tmux presentation", () => {
 					takeTaskRequest: async () => undefined,
 					detach: async () => {},
 				},
-				service: { list: async (taskId: string) => ({ taskId, sessions: [] }) } as unknown as AgentSessionService,
+				service: {
+					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {},
+				} as unknown as AgentSessionService,
 			}).run();
 			await waitUntil(() => state.selectedTaskId !== undefined, "initial task selection");
 			const details = screen.children.find((child) => child.options?.label === " Details ") as Widget;
@@ -132,7 +135,10 @@ describe("agent workspace native tmux presentation", () => {
 					takeTaskRequest: async () => undefined,
 					detach: async () => {},
 				},
-				service: { list: async (taskId: string) => ({ taskId, sessions: [] }) } as unknown as AgentSessionService,
+				service: {
+					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {},
+				} as unknown as AgentSessionService,
 			}).run();
 			await waitUntil(() => state.selectedTaskId !== undefined, "initial task selection");
 			press(screen, "right");
@@ -177,7 +183,10 @@ describe("agent workspace native tmux presentation", () => {
 					},
 					detach: async () => {},
 				},
-				service: { list: async (taskId: string) => ({ taskId, sessions: [] }) } as unknown as AgentSessionService,
+				service: {
+					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {},
+				} as unknown as AgentSessionService,
 			}).run();
 			await waitUntil(() => state.selectedTaskId === task.id, "handoff task selection");
 			expect(state.filters.search).toBe("");
@@ -227,6 +236,7 @@ describe("agent workspace native tmux presentation", () => {
 				},
 				service: {
 					list: async (taskId: string) => sessions[taskId] ?? { taskId, sessions: [] },
+					recover: async () => {},
 					start: async () => await started,
 				} as unknown as AgentSessionService,
 			}).run();
@@ -237,6 +247,70 @@ describe("agent workspace native tmux presentation", () => {
 			await Bun.sleep(30);
 			expect(calls).not.toContain("show:%99");
 			expect(calls).not.toContain("focus");
+			press(screen, "q", "q");
+			screen.destroy();
+			await workspace;
+		} finally {
+			screen.destroy();
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			await safeCleanup(directory);
+		}
+	});
+
+	it("recovers selected task sessions before showing native previews", async () => {
+		const directory = createUniqueTestDir("workspace-stale-preview-recovery");
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void };
+		const state = createWorkspaceViewState();
+		const events: string[] = [];
+		const shown: string[] = [];
+		const recovered = new Set<string>();
+		const staleByTask = new Map<string, AgentSession>();
+		try {
+			await mkdir(directory, { recursive: true });
+			const core = new Core(directory);
+			await initializeTestProject(core, "Workspace stale preview recovery");
+			const { task: first } = await core.createTaskFromInput({ title: "First", status: "To Do" }, false);
+			const { task: second } = await core.createTaskFromInput({ title: "Second", status: "To Do" }, false);
+			staleByTask.set(first.id, { ...session("stale-first", "%91"), taskId: first.id });
+			staleByTask.set(second.id, { ...session("stale-second", "%92"), taskId: second.id });
+			const workspace = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				state,
+				host: {
+					showBoard: async () => {},
+					showAgent: async (pane) => {
+						shown.push(`show:${pane}`);
+					},
+					focusAgent: async () => {},
+					takeTaskRequest: async () => undefined,
+					detach: async () => {},
+				},
+				service: {
+					recover: async (taskId: string) => {
+						events.push(`recover:${taskId}`);
+						recovered.add(taskId);
+					},
+					list: async (taskId: string) => {
+						const status = recovered.has(taskId) ? "recovered" : "stale";
+						events.push(`list:${taskId}:${status}`);
+						const stale = staleByTask.get(taskId);
+						return recovered.has(taskId) || !stale
+							? { taskId, sessions: [] }
+							: { taskId, activeSessionId: stale.id, sessions: [stale] };
+					},
+				} as unknown as AgentSessionService,
+			}).run();
+			await waitUntil(() => events.includes(`list:${first.id}:recovered`), "initial recovered session list");
+			expect(events.indexOf(`recover:${first.id}`)).toBeLessThan(events.indexOf(`list:${first.id}:recovered`));
+			expect(shown).not.toContain("show:%91");
+			press(screen, "down");
+			await waitUntil(() => state.selectedTaskId === second.id, "second task selection");
+			await waitUntil(() => events.includes(`list:${second.id}:recovered`), "second recovered session list");
+			expect(events.indexOf(`recover:${second.id}`)).toBeLessThan(events.indexOf(`list:${second.id}:recovered`));
+			expect(shown).not.toContain("show:%92");
 			press(screen, "q", "q");
 			screen.destroy();
 			await workspace;
@@ -279,7 +353,11 @@ describe("agent workspace native tmux presentation", () => {
 			const workspace = new AgentWorkspaceController(core, {
 				screen: screen as never,
 				host,
-				service: { list: async () => sessions, start: async () => active } as unknown as AgentSessionService,
+				service: {
+					list: async () => sessions,
+					recover: async () => {},
+					start: async () => active,
+				} as unknown as AgentSessionService,
 			}).run();
 			await waitUntil(() => calls.includes("show:%42"), "initial pane selection");
 			press(screen, "enter", "\r");
@@ -292,6 +370,43 @@ describe("agent workspace native tmux presentation", () => {
 			await Bun.sleep(20);
 			expect(screen.children.length).toBeGreaterThan(0);
 			expect(calls).toContain("detach");
+			screen.destroy();
+			await workspace;
+		} finally {
+			screen.destroy();
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			await safeCleanup(directory);
+		}
+	});
+
+	it("detaches instead of closing the native navigation region on q", async () => {
+		const directory = createUniqueTestDir("workspace-nav-detach");
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void };
+		const calls: string[] = [];
+		const host: Host = {
+			showBoard: async () => {},
+			showAgent: async () => {},
+			focusAgent: async () => {},
+			takeTaskRequest: async () => undefined,
+			detach: async () => {
+				calls.push("detach");
+			},
+		};
+		try {
+			await mkdir(directory, { recursive: true });
+			const core = new Core(directory);
+			await initializeTestProject(core, "Workspace nav detach");
+			const workspace = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				host,
+				region: "workspace-nav",
+			}).run();
+			await waitUntil(() => Boolean(screen.children?.length), "navigation region render");
+			press(screen, "q", "q");
+			await waitUntil(() => calls.includes("detach"), "navigation detach");
 			screen.destroy();
 			await workspace;
 		} finally {
@@ -328,6 +443,7 @@ describe("agent workspace native tmux presentation", () => {
 				host,
 				service: {
 					list: async () => ({ taskId: "TASK-1", activeSessionId: current.id, sessions: [current] }),
+					recover: async () => {},
 				} as unknown as AgentSessionService,
 			}).run();
 			await waitUntil(() => calls.includes("null"), "empty display placeholder");

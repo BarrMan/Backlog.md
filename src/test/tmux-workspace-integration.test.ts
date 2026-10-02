@@ -690,9 +690,9 @@ while {1} {
 							requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{window_zoomed_flag}"),
 							selectedPane(`${host}:Workspace`),
 						]);
-						return zoomed === "0" && selected === navigationId;
+						return zoomed === "0" && selected === taskId;
 					},
-					"native fullscreen return with Workspace navigation selected",
+					"native fullscreen return with Workspace task list selected",
 					routingDiagnostics,
 				);
 				expect((await panes(`${host}:Workspace`)).join("\n")).toContain(agent);
@@ -720,8 +720,8 @@ while {1} {
 				await waitFor(
 					async () =>
 						(await requireTmux("display-message", "-p", "-t", `${host}:Workspace`, "#{window_zoomed_flag}")) === "0" &&
-						(await selectedPane(`${host}:Workspace`)) === navigationId,
-					"return to Workspace navigation before footer search",
+						(await selectedPane(`${host}:Workspace`)) === taskId,
+					"return to Workspace task list before footer search",
 					routingDiagnostics,
 				);
 				await requireTmux("resize-window", "-t", `${host}:Workspace`, "-x", "100", "-y", "30");

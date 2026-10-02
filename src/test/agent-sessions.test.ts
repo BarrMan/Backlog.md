@@ -17,6 +17,7 @@ class FakeTmux implements AgentSessionRunner {
 	failStop = false;
 	prepareDelay = 0;
 	panes = 0;
+	missingPanes = new Set<string>();
 
 	async run(
 		args: string[],
@@ -35,8 +36,13 @@ class FakeTmux implements AgentSessionRunner {
 		if (args[0] === "git" && args[1] === "rev-parse") return { exitCode: 0, stdout: ".git\n", stderr: "" };
 		if (args[0] === "tmux" && args[1] === "new-session")
 			return { exitCode: 0, stdout: `%${++this.panes}\n`, stderr: "" };
-		if (args[0] === "tmux" && args[1] === "display-message")
-			return { exitCode: 0, stdout: args.at(-1) === "#{cursor_y}" ? "0\n" : "0 0\n", stderr: "" };
+		if (args[0] === "tmux" && args[1] === "display-message") {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			const format = args.at(-1);
+			if (this.missingPanes.has(target)) return { exitCode: 0, stdout: "\n", stderr: "" };
+			if (format === "#{pane_id} #{pane_dead}") return { exitCode: 0, stdout: `${target} 0\n`, stderr: "" };
+			return { exitCode: 0, stdout: format === "#{cursor_y}" ? "0\n" : "0 0\n", stderr: "" };
+		}
 		if (args[0] === "tmux" && args[1] === "capture-pane") return { exitCode: 0, stdout: ">\n", stderr: "" };
 		return { exitCode: 0, stdout: "", stderr: "" };
 	}
@@ -187,6 +193,18 @@ describe("AgentSessionService", () => {
 		const stopped = runner.commands.findIndex((args) => args[1] === "kill-pane" && args[3] === "%1");
 		expect(launched).toBeGreaterThan(-1);
 		expect(stopped).toBeGreaterThan(launched);
+	});
+
+	it("recovers a running session whose tmux pane target resolves to no pane", async () => {
+		const service = new AgentSessionService(core, { runner });
+		const session = await service.start("task-1");
+		runner.missingPanes.add(session.paneId ?? "");
+
+		await service.recover("task-1");
+
+		const recovered = await service.list("task-1");
+		expect(recovered.sessions[0]?.status).toBe("stopped");
+		expect(recovered.activeSessionId).toBeUndefined();
 	});
 
 	it("reconstructs a failed replacement handoff without duplicate active sessions", async () => {

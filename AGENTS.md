@@ -38,6 +38,10 @@ is necessary to prevent misunderstanding or error, and never use it to restate t
 
 ### Development
 
+- In this source checkout, use `bun run cli` in place of the global `backlog` command,
+  including for task operations below. The installed binary can use an older task
+  format even when its package version matches, and editing tasks with it can
+  discard structured fields and prevent the current CLI from loading tasks.
 - `bun i` - Install dependencies
 - `bunx tsc --noEmit` - Type-check code
 - `bun run check .` - Run all Biome checks (format + lint)

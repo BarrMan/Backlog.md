@@ -268,6 +268,10 @@ export class AgentWorkspaceController {
 			let displayedPaneId: string | null | undefined;
 			let presentation = Promise.resolve();
 			const active = () => taskSessions?.sessions.find((item) => item.id === taskSessions?.activeSessionId);
+			const listRecoveredSessions = async (taskId: string) => {
+				await service.recover(taskId);
+				return service.list(taskId);
+			};
 			const focusedTask = () =>
 				entries[selected]?.kind === "task"
 					? (entries[selected] as Extract<WorkspaceEntry, { kind: "task" }>).task
@@ -378,7 +382,7 @@ export class AgentWorkspaceController {
 					await showAgent(undefined, generation);
 				}
 				showDetails();
-				const sessions = await service.list(task.id);
+				const sessions = await listRecoveredSessions(task.id);
 				if (closed || generation !== selectionGeneration || selectedTask?.id !== task.id) return;
 				taskSessions = sessions;
 				if (!unchanged) detailsViewport.setScroll(state.scrolls.get(task.id) ?? 0);
@@ -433,7 +437,7 @@ export class AgentWorkspaceController {
 						else {
 							const generation = selectionGeneration;
 							selectedTask = current.task;
-							const sessions = await service.list(current.task.id);
+							const sessions = await listRecoveredSessions(current.task.id);
 							if (generation === selectionGeneration && selectedTask?.id === current.task.id) {
 								taskSessions = sessions;
 								if (mode === "history") {
@@ -885,10 +889,9 @@ export class AgentWorkspaceController {
 					});
 					return;
 				}
-				if (
-					matchesKey([...keymapKeys("workspace", "details"), ...keymapKeys("workspace", "focusDetails")], key) &&
-					focusedTask()
-				) {
+				const toggleDetails = matchesKey(keymapKeys("workspace", "details"), key);
+				const focusDetails = matchesKey(keymapKeys("workspace", "focusDetails"), key);
+				if ((toggleDetails || focusDetails) && focusedTask()) {
 					if (tasksOnly) {
 						run(async () => {
 							await host.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({
@@ -899,10 +902,15 @@ export class AgentWorkspaceController {
 						});
 						return;
 					}
-					state.detailsVisible = true;
-					layout();
-					mode = "details";
-					details.focus();
+					if (toggleDetails) {
+						state.detailsVisible = !state.detailsVisible;
+						layout();
+					} else {
+						state.detailsVisible = true;
+						layout();
+						mode = "details";
+						details.focus();
+					}
 					updateFooter();
 					render();
 					return;
@@ -1029,10 +1037,7 @@ export class AgentWorkspaceController {
 						try {
 							const requested = detailsOnly ? undefined : await host.takeTaskRequest();
 							if (requested) await selectRequestedTask(requested);
-							else {
-								if (selectedTask) await service.recover(selectedTask.id);
-								await reload(false);
-							}
+							else await reload(false);
 						} finally {
 							refreshRunning = false;
 						}
@@ -1124,7 +1129,10 @@ export class AgentWorkspaceController {
 					if (closed) await dispose();
 					else unsubscribeState = dispose;
 				}
-				screen.key(["q", "C-c"], close);
+				screen.key(["q", "C-c"], () => {
+					void host.detach();
+					return false;
+				});
 				screen.on("destroy", close);
 				screen.render();
 			})().catch(close);
