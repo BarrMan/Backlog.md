@@ -207,6 +207,12 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 		.action(async (taskId) => {
 			await new AgentSessionService(await getCore.project()).recover(taskId);
 		});
+	sessions
+		.command("reset <taskId>")
+		.description("reset persisted task session state")
+		.action(async (taskId) => {
+			await new AgentSessionService(await getCore.project()).reset(taskId);
+		});
 
 	const config = addHelpSchema(program.command("agent-config"), {
 		reads: "Scoped agent workspace configuration",

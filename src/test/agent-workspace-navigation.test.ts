@@ -23,6 +23,7 @@ type Host = {
 	focusAgent(zoom: boolean): Promise<void>;
 	takeTaskRequest(): Promise<string | undefined>;
 	detach(): Promise<void>;
+	setDetailsVisible?(visible: boolean): Promise<void>;
 };
 
 function press(screen: Widget, name: string, character = "", ctrl = false): void {
@@ -45,10 +46,15 @@ function session(id: string): AgentSession {
 		bootstrapPath: "/tmp/bootstrap",
 	} as AgentSession;
 }
+async function nextTurn(): Promise<void> {
+	await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
-	for (let attempt = 0; attempt < 300; attempt += 1) {
+	const deadline = Date.now() + 5_000;
+	while (Date.now() < deadline) {
 		if (predicate()) return;
-		await Bun.sleep(10);
+		await nextTurn();
 	}
 	throw new Error(`Timed out waiting for ${message}`);
 }
@@ -103,6 +109,111 @@ describe("agent workspace native tmux presentation", () => {
 			press(screen, "/", "/");
 			expect(calls).toContain("search");
 			press(screen, "escape", "\u001b");
+			screen.destroy();
+			await workspace;
+		} finally {
+			screen.destroy();
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			await safeCleanup(directory);
+		}
+	});
+
+	it("hides the native details pane when space is pressed on a task", async () => {
+		const directory = createUniqueTestDir("workspace-native-details-toggle");
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void; children: Widget[] };
+		const detailsVisibility: boolean[] = [];
+		let shared = createWorkspaceViewState();
+		try {
+			await mkdir(directory, { recursive: true });
+			const core = new Core(directory);
+			await initializeTestProject(core, "Workspace native details toggle");
+			await core.createTaskFromInput({ title: "Task", status: "To Do" }, false);
+			const workspace = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				region: "workspace-tasks",
+				host: {
+					showBoard: async () => {},
+					showAgentSession: async () => {},
+					focusAgent: async () => {},
+					takeTaskRequest: async () => undefined,
+					detach: async () => {},
+					setDetailsVisible: async (visible) => {
+						detailsVisibility.push(visible);
+					},
+					workspaceState: async <T extends object>() => shared as T,
+					updateWorkspaceState: async <T extends object>(update: (state: T) => T) => {
+						shared = update(shared as T) as typeof shared;
+					},
+				},
+				service: {
+					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {},
+				} as unknown as AgentSessionService,
+			}).run();
+			await waitUntil(() => shared.selectedTaskId !== undefined, "native task selection");
+			press(screen, "space", " ");
+			await waitUntil(() => detailsVisibility.includes(false), "native details hide");
+			expect(shared.detailsVisible).toBe(false);
+			press(screen, "right");
+			await nextTurn();
+			expect(detailsVisibility).not.toContain(true);
+			expect(shared.detailsVisible).toBe(false);
+			press(screen, "space", " ");
+			await waitUntil(() => detailsVisibility.includes(true), "native details show");
+			expect(shared.detailsVisible).toBe(true);
+			screen.destroy();
+			await workspace;
+		} finally {
+			screen.destroy();
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			await safeCleanup(directory);
+		}
+	});
+
+	it("routes native pane errors to the shared footer", async () => {
+		const directory = createUniqueTestDir("workspace-footer-error");
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void; children: Widget[] };
+		let footerMessage: string | undefined;
+		try {
+			await mkdir(directory, { recursive: true });
+			const core = new Core(directory);
+			await initializeTestProject(core, "Workspace footer error");
+			await core.createTaskFromInput({ title: "Broken session", status: "To Do" }, false);
+			const workspace = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				region: "workspace-tasks",
+				host: {
+					showBoard: async () => {},
+					showAgentSession: async () => {},
+					focusAgent: async () => {},
+					takeTaskRequest: async () => undefined,
+					detach: async () => {},
+					updateWorkspaceState: async <T extends object>(update: (state: T) => T) => {
+						footerMessage = (update({ footerMessage } as T) as { footerMessage?: string }).footerMessage;
+					},
+				},
+				service: {
+					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {
+						throw new Error(
+							"Invalid agent session state for TASK-1. Reset it with: backlog agent-session reset TASK-1",
+						);
+					},
+				} as unknown as AgentSessionService,
+			}).run();
+			await waitUntil(() => footerMessage !== undefined, "footer error message");
+			expect(footerMessage).toBe(
+				"Invalid agent session state for TASK-1. Reset it with: backlog agent-session reset TASK-1",
+			);
+			expect(screen.children.some((child) => child.getContent?.()?.includes("Invalid agent session state"))).toBe(
+				false,
+			);
 			screen.destroy();
 			await workspace;
 		} finally {
@@ -208,6 +319,7 @@ describe("agent workspace native tmux presentation", () => {
 		const state = createWorkspaceViewState();
 		const calls: string[] = [];
 		let resolveStart: ((session: AgentSession) => void) | undefined;
+		let startReturned = false;
 		const started = new Promise<AgentSession>((resolve) => {
 			resolveStart = resolve;
 		});
@@ -238,14 +350,18 @@ describe("agent workspace native tmux presentation", () => {
 				service: {
 					list: async (taskId: string) => sessions[taskId] ?? { taskId, sessions: [] },
 					recover: async () => {},
-					start: async () => await started,
+					start: async () => {
+						const result = await started;
+						startReturned = true;
+						return result;
+					},
 				} as unknown as AgentSessionService,
 			}).run();
 			await waitUntil(() => state.selectedTaskId === "TASK-1", "initial task selection");
 			press(screen, "enter", "\r");
 			press(screen, "down");
 			resolveStart?.(session("late"));
-			await Bun.sleep(30);
+			await waitUntil(() => startReturned, "delayed start completion");
 			expect(calls).not.toContain("show:TASK-1:late");
 			expect(calls).not.toContain("focus");
 			press(screen, "q", "q");
@@ -369,7 +485,7 @@ describe("agent workspace native tmux presentation", () => {
 			screen.emit("keypress", "B", { name: "b", full: "S-b", shift: true });
 			await waitUntil(() => calls.includes("board"), "board selection");
 			press(screen, "q", "q");
-			await Bun.sleep(20);
+			await waitUntil(() => calls.includes("detach"), "workspace detach");
 			expect(screen.children.length).toBeGreaterThan(0);
 			expect(calls).toContain("detach");
 			screen.destroy();
@@ -454,7 +570,7 @@ describe("agent workspace native tmux presentation", () => {
 			}).run();
 			await waitUntil(() => calls.includes("TASK-1:active"), "running session display");
 			press(screen, "enter", "\r");
-			await Bun.sleep(20);
+			await waitUntil(() => calls.includes("undefined:undefined"), "preview refresh before focus");
 			expect(calls).toContain("undefined:undefined");
 			expect(calls).toContain("TASK-1:active");
 			expect(touches).toContain("TASK-1:active");

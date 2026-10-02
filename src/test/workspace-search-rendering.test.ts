@@ -25,9 +25,19 @@ async function waitFor(predicate: () => Promise<boolean>, diagnostics: () => Pro
 	const deadline = Date.now() + 15_000;
 	while (Date.now() < deadline) {
 		if (await predicate()) return;
-		await Bun.sleep(25);
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	throw new Error(`Timed out waiting for workspace rendering.\n${await diagnostics()}`);
+}
+
+function timeoutSignal(ms: number, onTimeout: () => void): Promise<never> {
+	const signal = AbortSignal.timeout(ms);
+	return new Promise((_, reject) => {
+		signal.addEventListener("abort", () => {
+			onTimeout();
+			reject(new Error("Timed out waiting for interactive workspace client."));
+		});
+	});
 }
 
 describe("workspace footer search rendering", () => {
@@ -111,8 +121,9 @@ describe("workspace footer search rendering", () => {
 				const initialRows = workspaceRows(
 					buildWorkspaceEntries([task], ["To Do", "In Progress", "Done"], "All", new Set()),
 				);
-				expect(initialRows.filter((row) => row.includes("Done")).length).toBe(2);
+				expect(initialRows.filter((row) => row.includes("Done")).length).toBe(1);
 				expect(initialRows.filter((row) => row.includes("Done") && row.includes("(1)")).length).toBe(1);
+				expect(initialRows).toContain("  {bold}TASK-2{/bold} - Completed task");
 
 				const script = join(directory, "workspace.expect");
 				await writeFile(
@@ -358,10 +369,7 @@ while {1} {
 				await requestClientKey("q");
 				const exitCode = await Promise.race([
 					runningClient.exited,
-					Bun.sleep(15_000).then(() => {
-						runningClient.kill();
-						return -1;
-					}),
+					timeoutSignal(15_000, () => runningClient.kill()).catch(() => -1),
 				]);
 				if (exitCode !== 0) {
 					const stderr = runningClient.stderr ? await new Response(runningClient.stderr).text() : "";
@@ -370,7 +378,7 @@ while {1} {
 			} finally {
 				if (client?.exitCode === null) {
 					client.kill();
-					await Promise.race([client.exited, Bun.sleep(1_000)]);
+					await Promise.race([client.exited, timeoutSignal(1_000, () => {})]).catch(() => undefined);
 				}
 				await tmux("kill-server");
 				await safeCleanup(directory);

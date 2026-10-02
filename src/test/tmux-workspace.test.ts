@@ -4,6 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isTmuxWorkspace, TmuxWorkspace, type TmuxWorkspaceRunner } from "../agent-workspace/tmux-workspace.ts";
 
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		if (predicate()) return;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error(`Timed out waiting for ${message}`);
+}
+
 class RecordingRunner implements TmuxWorkspaceRunner {
 	readonly calls: string[][] = [];
 	readonly options = new Map<string, string>();
@@ -12,6 +20,7 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 	readonly deadPanes = new Set<string>();
 	readonly missingPanes = new Set<string>();
 	readonly paneMetadata = new Map<string, Record<string, string>>();
+	readonly paneWindows = new Map<string, string>();
 	clients = "";
 	#nextPane = 3;
 	#locks = new Set<string>();
@@ -53,19 +62,30 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 			}
 			return { exitCode: 0, stdout: "", stderr: "" };
 		}
-		if (args[1] === "new-session") return { exitCode: 0, stdout: "@1|%1\n", stderr: "" };
-		if (args[1] === "new-window") return { exitCode: 0, stdout: "@2|%2\n", stderr: "" };
+		if (args[1] === "new-session") {
+			this.paneWindows.set("%1", "@1");
+			return { exitCode: 0, stdout: "@1|%1\n", stderr: "" };
+		}
+		if (args[1] === "new-window") {
+			this.paneWindows.set("%2", "@2");
+			return { exitCode: 0, stdout: "@2|%2\n", stderr: "" };
+		}
 		if (args[1] === "list-windows") return { exitCode: 0, stdout: "@1\n@2\n", stderr: "" };
-		if (args[1] === "split-window") return { exitCode: 0, stdout: `%${this.#nextPane++}\n`, stderr: "" };
+		if (args[1] === "split-window") {
+			const pane = `%${this.#nextPane++}`;
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			this.paneWindows.set(pane, this.paneWindows.get(target) ?? "@2");
+			return { exitCode: 0, stdout: `${pane}\n`, stderr: "" };
+		}
 		if (args[1] === "has-session") return { exitCode: this.options.has("session") ? 0 : 1, stdout: "", stderr: "" };
 		if (args[1] === "list-panes") {
 			const rows = [...this.paneMetadata.entries()].map(([pane, metadata]) =>
 				[
 					pane,
 					this.deadPanes.has(pane) ? "1" : "0",
+					this.paneWindows.get(pane) ?? "@agent",
 					metadata["@backlog_root"] ?? "",
 					metadata["@backlog_task"] ?? "",
-					metadata["@backlog_session"] ?? "",
 					metadata["@backlog_role"] ?? "",
 				].join("\t"),
 			);
@@ -103,6 +123,8 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 					stdout: `${this.paneWidths.get(target ?? "") ?? 80} ${this.paneHeights.get(target ?? "") ?? 24}\n`,
 					stderr: "",
 				};
+			if (format === "#{window_id}")
+				return { exitCode: 0, stdout: `${this.paneWindows.get(target ?? "") ?? "@2"}\n`, stderr: "" };
 			if (format === "#{pane_height}")
 				return { exitCode: 0, stdout: `${this.paneHeights.get(target ?? "") ?? 0}\n`, stderr: "" };
 			if (format === "#{pane_dead}")
@@ -110,8 +132,24 @@ class RecordingRunner implements TmuxWorkspaceRunner {
 			return { exitCode: 0, stdout: "0\n", stderr: "" };
 		}
 		const pane = args[args.indexOf("-t") + 1];
+		if (args[1] === "swap-pane") {
+			const source = args[args.indexOf("-s") + 1] ?? "";
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			const sourceWindow = this.paneWindows.get(source);
+			const targetWindow = this.paneWindows.get(target);
+			if (sourceWindow) this.paneWindows.set(target, sourceWindow);
+			if (targetWindow) this.paneWindows.set(source, targetWindow);
+		}
+		if (args[1] === "break-pane") {
+			const source = args[args.indexOf("-s") + 1] ?? "";
+			if (source) this.paneWindows.set(source, "@parked");
+		}
 		if (args[1] === "respawn-pane" && pane) this.deadPanes.delete(pane);
 		if (args[1] === "resize-pane" && pane) this.paneHeights.set(pane, Number(args.at(-1)));
+		if (args[1] === "resize-window" && pane?.startsWith("%")) {
+			this.paneWidths.set(pane, Number(args[args.indexOf("-x") + 1]));
+			this.paneHeights.set(pane, Number(args[args.indexOf("-y") + 1]));
+		}
 		if (args[1] === "list-clients") return { exitCode: 0, stdout: this.clients, stderr: "" };
 		return { exitCode: 0, stdout: "", stderr: "" };
 	}
@@ -129,7 +167,7 @@ describe("TmuxWorkspace", () => {
 		expect(
 			commands.some((command) =>
 				command.includes(
-					`new-session -d -x 120 -y 40 -P -F #{window_id}|#{pane_id} -s ${workspace.sessionName} -c ${workspace.rootPath}`,
+					`new-session -d -P -F #{window_id}|#{pane_id} -s ${workspace.sessionName} -c ${workspace.rootPath}`,
 				),
 			),
 		).toBe(true);
@@ -168,36 +206,43 @@ describe("TmuxWorkspace", () => {
 		]);
 	});
 
-	it("returns the displayed agent to its backing slot before showing another metadata-selected agent", async () => {
+	it("discovers live-preview panes by task and preserves the display backing slot", async () => {
 		const runner = new RecordingRunner();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		runner.paneMetadata.set("%42", {
 			"@backlog_root": workspace.rootPath,
 			"@backlog_task": "TASK-1",
-			"@backlog_session": "session-1",
-			"@backlog_role": "agent",
+			"@backlog_role": "live-preview",
 		});
 		runner.paneMetadata.set("%43", {
 			"@backlog_root": workspace.rootPath,
 			"@backlog_task": "TASK-2",
-			"@backlog_session": "session-2",
-			"@backlog_role": "agent",
+			"@backlog_role": "live-preview",
 		});
+		runner.paneMetadata.set("%44", {
+			"@backlog_root": workspace.rootPath,
+			"@backlog_task": "TASK-3",
+			"@backlog_role": "live-preview",
+		});
+		runner.deadPanes.add("%44");
+		runner.paneWindows.set("%42", "@agent");
+		runner.paneWindows.set("%43", "@agent");
+		runner.paneWindows.set("%44", "@agent");
 		runner.paneWidths.set("%6", 100);
 		runner.paneHeights.set("%6", 12);
 		await workspace.showAgentSession("TASK-1", "session-1");
+		await expect(workspace.showAgentSession("TASK-3", "session-3")).rejects.toThrow("no longer exists");
 		await workspace.showAgentSession("TASK-2", "session-2");
-		const resizes = runner.calls.filter((args) => args[1] === "resize-window");
-		expect(resizes).toEqual([
-			["tmux", "resize-window", "-t", "%42", "-x", "100", "-y", "12"],
-			["tmux", "resize-window", "-t", "%43", "-x", "100", "-y", "12"],
-		]);
+		expect(runner.calls.some((args) => args[1] === "resize-window")).toBe(false);
 		const swaps = runner.calls.filter((args) => args[1] === "swap-pane");
 		expect(swaps).toEqual([
 			["tmux", "swap-pane", "-d", "-s", "%42", "-t", "%6"],
-			["tmux", "swap-pane", "-d", "-s", "%42", "-t", "%6"],
-			["tmux", "swap-pane", "-d", "-s", "%43", "-t", "%6"],
+			["tmux", "swap-pane", "-d", "-s", "%43", "-t", "%42"],
 		]);
+		expect(runner.calls.some((args) => args[1] === "break-pane")).toBe(false);
+		expect(swaps.some((command) => command.includes("%44"))).toBe(false);
+		expect(runner.options.get("@backlog_workspace_active_return_42")).toBeUndefined();
+		expect(runner.options.get("@backlog_workspace_active_return_43")).toBeUndefined();
 	});
 
 	it("focuses tasks and resizes measured header and footer without repeated tmux resizes", async () => {
@@ -326,12 +371,12 @@ describe("TmuxWorkspace", () => {
 		expect(runner.calls.filter((args) => args[1] === "wait-for" && args[2] === "-S")).toEqual([
 			["tmux", "wait-for", "-S", expect.any(String), ";", "wait-for", "-S", expect.any(String)],
 		]);
-		await Bun.sleep(0);
+		await waitUntil(() => first.includes("latest") && second.includes("latest"), "state subscribers");
 		expect(first).toEqual(["", "latest"]);
 		expect(second).toEqual(["", "latest"]);
 		await stopFirst();
 		await workspace.updateWorkspaceState((state: { search?: string }) => ({ ...state, search: "next" }));
-		await Bun.sleep(0);
+		await waitUntil(() => second.includes("next"), "remaining state subscriber");
 		expect(first).toEqual(["", "latest"]);
 		expect(second).toEqual(["", "latest", "next"]);
 		await stopSecond();
@@ -556,15 +601,14 @@ describe("TmuxWorkspace real tmux", () => {
 			try {
 				await host.showBoard();
 				const placeholderCommand = "exec sleep 60";
-				const agent = async (name: string, taskId: string, sessionId: string, rootPath = host.rootPath) => {
+				const agent = async (name: string, taskId: string, _sessionId: string, rootPath = host.rootPath) => {
 					const pane = (
 						await runner.run(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, placeholderCommand])
 					).stdout.trim();
 					for (const [option, value] of [
 						["@backlog_root", rootPath],
 						["@backlog_task", taskId],
-						["@backlog_session", sessionId],
-						["@backlog_role", "agent"],
+						["@backlog_role", "live-preview"],
 					] as const)
 						await runner.run(["tmux", "set-option", "-p", "-t", pane, option, value]);
 					return pane;

@@ -35,9 +35,7 @@ class BunTmuxWorkspaceRunner implements TmuxWorkspaceRunner {
 
 const OWNER = "@backlog_workspace_owner";
 const READY = "@backlog_workspace_ready";
-const ACTIVE = "@backlog_workspace_active";
 const ACTIVE_TASK = "@backlog_workspace_active_task";
-const ACTIVE_SESSION = "@backlog_workspace_active_session";
 const MAILBOX = "@backlog_workspace_task_request";
 const BOARD_WINDOW = "@backlog_workspace_board_window";
 const BOARD_PANE = "@backlog_workspace_board_pane";
@@ -54,8 +52,6 @@ const VIEW_STATE_LISTENERS = "@backlog_workspace_view_state_listeners";
 const BOOTSTRAP_LOCK_STALE_MS = 2_000;
 const BOOTSTRAP_LOCK_RETRY_DELAY_MS = 25;
 const BOOTSTRAP_LOCK_RETRIES = 200;
-const PANE_METADATA_FORMAT =
-	"#{pane_id}\t#{pane_dead}\t#{@backlog_root}\t#{@backlog_task}\t#{@backlog_session}\t#{@backlog_role}";
 
 function quote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -87,15 +83,6 @@ function idPair(output: string): [string, string] {
 	if (!window?.startsWith("@") || !pane?.startsWith("%")) throw new Error("tmux did not return workspace resource IDs");
 	return [window, pane];
 }
-function terminalSize(): { columns: number; rows: number } {
-	const dimension = (value: number | undefined, fallback: number) =>
-		Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : fallback;
-	return {
-		columns: dimension(process.stdout.columns ?? Number(process.env.COLUMNS), 120),
-		rows: dimension(process.stdout.rows ?? Number(process.env.LINES), 40),
-	};
-}
-
 export function isTmuxWorkspace(): boolean {
 	return Boolean(process.env.BACKLOG_TMUX_WORKSPACE?.trim());
 }
@@ -122,7 +109,6 @@ export class TmuxWorkspace {
 		if (taskId) await this.showWorkspace(taskId);
 		else if (view === "board") await this.showBoard();
 		else await this.showWorkspace();
-		await this.resizeWindows();
 		await this.require(
 			["tmux", process.env.TMUX ? "switch-client" : "attach-session", "-t", this.sessionName],
 			"Could not enter tmux workspace",
@@ -149,23 +135,20 @@ export class TmuxWorkspace {
 	async showAgentSession(taskId: string | undefined, sessionId?: string): Promise<void> {
 		await this.ensureHost(false);
 		if (!taskId || !sessionId) {
-			await this.showAgentPane(null);
+			await this.showAgentPane(null, null);
 			await this.unset(ACTIVE_TASK);
-			await this.unset(ACTIVE_SESSION);
 			return;
 		}
-		const paneId = await this.findAgentPane(taskId, sessionId);
-		if (!paneId) throw new Error(`Agent pane for session ${sessionId} no longer exists`);
-		await this.showAgentPane(paneId);
+		const paneId = await this.findLivePreviewPane(taskId);
+		if (!paneId) throw new Error(`Live preview pane for task ${taskId} no longer exists`);
+		await this.showAgentPane(taskId, paneId);
 		await this.set(ACTIVE_TASK, taskId);
-		await this.set(ACTIVE_SESSION, sessionId);
 	}
 
 	async focusAgent(zoom: boolean): Promise<void> {
 		await this.ensureHost(false);
 		const taskId = await this.option(ACTIVE_TASK);
-		const sessionId = await this.option(ACTIVE_SESSION);
-		const active = taskId && sessionId ? await this.findAgentPane(taskId, sessionId) : undefined;
+		const active = taskId ? await this.findLivePreviewPane(taskId) : undefined;
 		if (!active) return;
 		if (!zoom && (await this.zoomed()))
 			await this.require(["tmux", "resize-pane", "-Z", "-t", active], "Could not unzoom agent pane");
@@ -186,6 +169,24 @@ export class TmuxWorkspace {
 	async focusDetails(): Promise<void> {
 		await this.ensureHost(false);
 		await this.require(["tmux", "select-pane", "-t", await this.id(DETAILS_PANE)], "Could not focus workspace details");
+	}
+	async setDetailsVisible(visible: boolean): Promise<void> {
+		await this.ensureHost(false);
+		const details = await this.id(DETAILS_PANE);
+		const activeTask = await this.option(ACTIVE_TASK);
+		const display =
+			(activeTask ? await this.findLivePreviewPane(activeTask) : undefined) ?? (await this.id(DISPLAY_PANE));
+		const measured = await this.runner.run(["tmux", "display-message", "-p", "-t", details, "#{pane_height}"]);
+		const displayMeasured = await this.runner.run(["tmux", "display-message", "-p", "-t", display, "#{pane_height}"]);
+		const detailsHeight = Number(measured.stdout.trim());
+		const displayHeight = Number(displayMeasured.stdout.trim());
+		if (!Number.isFinite(detailsHeight) || !Number.isFinite(displayHeight)) return;
+		const total = Math.max(2, detailsHeight + displayHeight);
+		const rows = visible ? Math.max(3, Math.floor(total * 0.44)) : 1;
+		await this.require(
+			["tmux", "resize-pane", "-t", details, "-y", String(rows)],
+			"Could not resize workspace details",
+		);
 	}
 	async resizeNavigation(height: number): Promise<void> {
 		await this.ensureHost(false);
@@ -364,15 +365,10 @@ export class TmuxWorkspace {
 			});
 			return;
 		}
-		const size = terminalSize();
 		const board = await this.runner.run([
 			"tmux",
 			"new-session",
 			"-d",
-			"-x",
-			String(size.columns),
-			"-y",
-			String(size.rows),
 			"-P",
 			"-F",
 			"#{window_id}|#{pane_id}",
@@ -497,8 +493,9 @@ export class TmuxWorkspace {
 		] as const)
 			await this.respawnUi(key, view);
 		const display = await this.option(DISPLAY_PANE);
-		if (display && (await this.paneLive(display))) return;
-		if (display && (await this.paneExists(display))) {
+		const activeTask = await this.option(ACTIVE_TASK);
+		if (display && (await this.paneLive(display)) && (await this.paneInWorkspace(display))) return;
+		if (display && (await this.paneExists(display)) && (await this.paneInWorkspace(display))) {
 			await this.launchPlaceholder(display);
 			await this.set(DISPLAY_PANE, display);
 		} else {
@@ -511,24 +508,26 @@ export class TmuxWorkspace {
 			if (!pane.startsWith("%")) throw new Error("tmux did not return recovered display pane ID");
 			await this.set(DISPLAY_PANE, pane);
 		}
-		const active = await this.option(ACTIVE);
-		if (active) {
-			await this.unset(`${ACTIVE}_return_${active.slice(1)}`);
-			await this.unset(ACTIVE);
-			await this.unset(ACTIVE_TASK);
-			await this.unset(ACTIVE_SESSION);
-		}
+		if (activeTask && !(await this.findLivePreviewPane(activeTask))) await this.unset(ACTIVE_TASK);
 	}
 	private async rebuildTopology(): Promise<void> {
 		const workspace = await this.id(WORKSPACE_WINDOW);
-		const active = await this.option(ACTIVE);
-		let parkedActive: string | undefined;
-		if (active) {
-			const agentWindow = await this.runner.run(["tmux", "display-message", "-p", "-t", active, "#{window_id}"]);
-			if (agentWindow.exitCode === 0 && agentWindow.stdout.trim() === workspace) {
-				await this.require(["tmux", "break-pane", "-d", "-t", active], "Could not park active agent pane");
-				parkedActive = active;
-			}
+		const activeTask = await this.option(ACTIVE_TASK);
+		const activePane = activeTask ? await this.findLivePreviewPane(activeTask) : undefined;
+		if (activePane) {
+			const display = await this.option(DISPLAY_PANE);
+			const agentWindow = await this.runner.run(["tmux", "display-message", "-p", "-t", activePane, "#{window_id}"]);
+			if (
+				display &&
+				display !== activePane &&
+				(await this.paneLive(display)) &&
+				agentWindow.exitCode === 0 &&
+				agentWindow.stdout.trim() === workspace
+			)
+				await this.require(
+					["tmux", "swap-pane", "-d", "-s", activePane, "-t", display],
+					"Could not park active live preview pane",
+				);
 		}
 		if (await this.windowInSession(workspace))
 			await this.require(["tmux", "kill-window", "-t", workspace], "Could not remove obsolete Workspace window");
@@ -596,19 +595,7 @@ export class TmuxWorkspace {
 			Number.isFinite(footerHeight) && footerHeight > 0 ? footerHeight : 1,
 			"Could not resize workspace footer",
 		);
-		if (parkedActive && (await this.paneExists(parkedActive))) {
-			await this.require(
-				["tmux", "swap-pane", "-d", "-s", parkedActive, "-t", displayPane],
-				"Could not restore active agent pane",
-			);
-			await this.set(`${ACTIVE}_return_${parkedActive.slice(1)}`, displayPane);
-			await this.set(ACTIVE, parkedActive);
-			await this.set(DISPLAY_PANE, parkedActive);
-		} else {
-			await this.unset(ACTIVE);
-			await this.unset(ACTIVE_TASK);
-			await this.unset(ACTIVE_SESSION);
-		}
+		await this.unset(ACTIVE_TASK);
 		await this.require(["tmux", "rename-window", "-t", window, "Workspace"], "Could not name rebuilt Workspace window");
 		await this.require(
 			["tmux", "set-option", "-w", "-t", window, "remain-on-exit", "on"],
@@ -624,59 +611,61 @@ export class TmuxWorkspace {
 		await this.set(READY, "1");
 	}
 
-	private async showAgentPane(paneId: string | null): Promise<void> {
-		const active = await this.option(ACTIVE);
-		if (active === paneId) return;
-		if (active) await this.returnAgent(active);
-		if (!paneId) return;
-		if (!(await this.paneExists(paneId))) throw new Error(`Agent pane ${paneId} no longer exists`);
-		let display = await this.displayPane();
-		await this.fitPaneToDisplay(paneId, display);
-		let swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", paneId, "-t", display]);
-		if (swapped.exitCode !== 0 && /can't find pane/i.test(swapped.stderr)) {
-			await this.unset(DISPLAY_PANE);
-			await this.heal();
-			display = await this.displayPane();
-			await this.fitPaneToDisplay(paneId, display);
-			swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", paneId, "-t", display]);
+	private async showAgentPane(taskId: string | null, paneId: string | null): Promise<void> {
+		const visible = await this.visibleLivePreviewPanes();
+		if (!taskId || !paneId) {
+			const current = visible[0]?.paneId;
+			const display = await this.option(DISPLAY_PANE);
+			if (current && display && current !== display && (await this.paneLive(display)))
+				await this.require(
+					["tmux", "swap-pane", "-d", "-s", current, "-t", display],
+					"Could not hide live preview pane",
+				);
+			await this.unset(ACTIVE_TASK);
+			return;
 		}
-		if (swapped.exitCode !== 0) throw this.error("Could not show agent pane", swapped);
-		await this.set(`${ACTIVE}_return_${paneId.slice(1)}`, display);
-		await this.set(ACTIVE, paneId);
-		await this.set(DISPLAY_PANE, paneId);
-	}
-
-	private async fitPaneToDisplay(paneId: string, display: string): Promise<void> {
-		const size = await this.command(
-			["tmux", "display-message", "-p", "-t", display, "#{pane_width} #{pane_height}"],
-			"Could not read workspace display size",
-		);
-		const parts = size.stdout.trim().split(/\s+/, 2).map(Number);
-		const width = parts[0];
-		const height = parts[1];
-		if (width === undefined || height === undefined) return;
-		if (!Number.isFinite(width) || width < 1 || !Number.isFinite(height) || height < 1) return;
-		await this.require(
-			["tmux", "resize-window", "-t", paneId, "-x", String(width), "-y", String(height)],
-			"Could not pre-size agent pane",
-		);
-	}
-
-	private async returnAgent(agent: string): Promise<void> {
-		const slot = await this.option(`${ACTIVE}_return_${agent.slice(1)}`);
-		if (slot && (await this.paneExists(agent)) && (await this.paneExists(slot))) {
-			const swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", agent, "-t", slot]);
-			if (swapped.exitCode === 0) await this.set(DISPLAY_PANE, slot);
+		if (!(await this.paneExists(paneId))) throw new Error(`Live preview pane ${paneId} no longer exists`);
+		if (!(await this.paneInWorkspace(paneId))) {
+			const target = visible.find((pane) => pane.taskId !== taskId)?.paneId ?? (await this.displayPane());
+			let swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", paneId, "-t", target]);
+			if (swapped.exitCode !== 0 && /can't find pane/i.test(swapped.stderr)) {
+				await this.unset(DISPLAY_PANE);
+				await this.heal();
+				swapped = await this.runner.run(["tmux", "swap-pane", "-d", "-s", paneId, "-t", await this.displayPane()]);
+			}
+			if (swapped.exitCode !== 0) throw this.error("Could not show live preview pane", swapped);
 		}
-		await this.unset(`${ACTIVE}_return_${agent.slice(1)}`);
-		await this.unset(ACTIVE);
-		await this.heal();
+		await this.set(ACTIVE_TASK, taskId);
 	}
 	private async displayPane(): Promise<string> {
 		const pane = await this.id(DISPLAY_PANE);
-		if (!(await this.paneLive(pane))) {
+		if (!(await this.paneLive(pane)) || !(await this.paneInWorkspace(pane))) {
 			await this.heal();
-			return await this.id(DISPLAY_PANE);
+			const recovered = await this.id(DISPLAY_PANE);
+			if (!(await this.paneLive(recovered)) || !(await this.paneInWorkspace(recovered))) {
+				const created = await this.command(
+					[
+						"tmux",
+						"split-window",
+						"-v",
+						"-d",
+						"-p",
+						"56",
+						"-P",
+						"-F",
+						"#{pane_id}",
+						"-t",
+						await this.id(DETAILS_PANE),
+						placeholder(),
+					],
+					"Could not recover workspace display pane",
+				);
+				const display = created.stdout.trim();
+				if (!display.startsWith("%")) throw new Error("tmux did not return recovered display pane ID");
+				await this.set(DISPLAY_PANE, display);
+				return display;
+			}
+			return recovered;
 		}
 		return pane;
 	}
@@ -741,14 +730,6 @@ export class TmuxWorkspace {
 	private async selectWindow(window: string): Promise<void> {
 		await this.require(["tmux", "select-window", "-t", window], "Could not select workspace window");
 	}
-	private async resizeWindows(): Promise<void> {
-		const { columns, rows } = terminalSize();
-		for (const window of [await this.id(BOARD_WINDOW), await this.id(WORKSPACE_WINDOW)])
-			await this.require(
-				["tmux", "resize-window", "-t", window, "-x", String(columns), "-y", String(rows)],
-				"Could not resize tmux workspace window",
-			);
-	}
 	private async zoomed(): Promise<boolean> {
 		const result = await this.runner.run([
 			"tmux",
@@ -760,26 +741,43 @@ export class TmuxWorkspace {
 		]);
 		return result.exitCode === 0 && result.stdout.trim() === "1";
 	}
-	private async findAgentPane(taskId: string, sessionId: string): Promise<string | undefined> {
-		const listed = await this.runner.run(["tmux", "list-panes", "-a", "-F", PANE_METADATA_FORMAT]);
+	private async findLivePreviewPane(taskId: string): Promise<string | undefined> {
+		const matches = (await this.livePreviewPanes()).filter((pane) => pane.taskId === taskId);
+		if (matches.length > 1) throw new Error(`Multiple tmux live preview panes match task ${taskId}.`);
+		return matches[0]?.paneId;
+	}
+	private async livePreviewPanes(): Promise<Array<{ paneId: string; taskId: string; windowId: string }>> {
+		const listed = await this.runner.run([
+			"tmux",
+			"list-panes",
+			"-a",
+			"-F",
+			"#{pane_id}\t#{pane_dead}\t#{window_id}\t#{@backlog_root}\t#{@backlog_task}\t#{@backlog_role}",
+		]);
 		if (listed.exitCode !== 0) {
-			if (/no server running/i.test(listed.stderr)) return undefined;
-			throw this.error("Could not inspect agent panes", listed);
+			if (/no server running/i.test(listed.stderr)) return [];
+			throw this.error("Could not inspect live preview panes", listed);
 		}
-		const matches = listed.stdout
-			.split("\n")
-			.map((line) => line.split("\t"))
-			.filter(
-				([paneId, dead, root, task, session, role]) =>
-					paneId?.startsWith("%") &&
-					dead !== "1" &&
-					root === this.rootPath &&
-					task === taskId &&
-					session === sessionId &&
-					role === "agent",
-			);
-		if (matches.length > 1) throw new Error(`Multiple tmux panes match agent session ${sessionId}.`);
-		return matches[0]?.[0];
+		const panes: Array<{ paneId: string; taskId: string; windowId: string }> = [];
+		for (const line of listed.stdout.split("\n")) {
+			const [paneId, dead, windowId, root, taskId, role] = line.split("\t");
+			if (
+				paneId?.startsWith("%") &&
+				dead !== "1" &&
+				windowId &&
+				root === this.rootPath &&
+				taskId &&
+				role === "live-preview"
+			)
+				panes.push({ paneId, taskId, windowId });
+		}
+		return panes;
+	}
+	private async visibleLivePreviewPanes(): Promise<Array<{ paneId: string; taskId: string }>> {
+		const workspace = await this.id(WORKSPACE_WINDOW);
+		return (await this.livePreviewPanes())
+			.filter((pane) => pane.windowId === workspace)
+			.map(({ paneId, taskId }) => ({ paneId, taskId }));
 	}
 
 	private async paneExists(pane: string): Promise<boolean> {
@@ -791,6 +789,10 @@ export class TmuxWorkspace {
 		if (result.exitCode !== 0) return false;
 		const [actualPaneId, paneDead] = result.stdout.trim().split(/\s+/);
 		return actualPaneId === pane && paneDead !== "1";
+	}
+	private async paneInWorkspace(pane: string): Promise<boolean> {
+		const result = await this.runner.run(["tmux", "display-message", "-p", "-t", pane, "#{window_id}"]);
+		return result.exitCode === 0 && result.stdout.trim() === (await this.id(WORKSPACE_WINDOW));
 	}
 	private async prefix(): Promise<string> {
 		const result = await this.runner.run(["tmux", "show-options", "-gv", "prefix"]);

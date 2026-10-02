@@ -3,7 +3,7 @@ import { delimiter, join } from "node:path";
 import { DEFAULT_IN_PROGRESS_STATUS, DEFAULT_STATUSES } from "../constants/index.ts";
 import type { Core } from "../core/backlog.ts";
 import { TASK_SOURCE } from "../types/index.ts";
-import { renderSessionBootstrap } from "./bootstrap.ts";
+import { nativeSessionIdForLaunch, renderSessionBootstrap } from "./bootstrap.ts";
 import { resolveAgentConfiguration } from "./config.ts";
 import { type AgentSessionRunner, BunRunner, SessionProcess } from "./session-process.ts";
 import { type SessionState, SessionStore } from "./session-store.ts";
@@ -52,6 +52,11 @@ export class AgentSessionService {
 		return await this.store.read(task.id);
 	}
 
+	async reset(taskId: string): Promise<void> {
+		const task = await this.requireTask(taskId);
+		await this.store.reset(task.id);
+	}
+
 	async start(
 		taskId: string,
 		options: { preset?: string; predecessorId?: string; maxRunningSessions?: number } = {},
@@ -93,6 +98,7 @@ export class AgentSessionService {
 				options.cwd ??
 				(preset.worktree ? (state.worktreePath ?? join(paths.taskDir, "worktree")) : this.core.filesystem.rootDir);
 			if (preset.worktree) state.worktreePath = cwd;
+			const nativeSessionId = nativeSessionIdForLaunch(preset, id);
 			const next: AgentSession = {
 				id,
 				taskId: task.id,
@@ -100,6 +106,7 @@ export class AgentSessionService {
 				presetSnapshot: structuredClone(preset),
 				configScope,
 				tmuxName: `backlog-${slug(task.id)}-${id.slice(0, 8)}`,
+				...(nativeSessionId && { nativeSessionId }),
 				cwd,
 				createdAt: timestamp(),
 				status: AGENT_SESSION_STATUS.STARTING,
@@ -238,7 +245,9 @@ export class AgentSessionService {
 		});
 		if (!predecessor) return null;
 		const oldSession = predecessor;
+		let replacementStarted = false;
 		try {
+			await this.process.demote(oldSession);
 			const preset = oldSession.presetSnapshot ?? (await this.presetForLegacySession(task.id, oldSession.preset));
 			const existing = (await this.store.read(task.id)).sessions.find(
 				(candidate) => candidate.predecessorId === oldSession.id && candidate.status === AGENT_SESSION_STATUS.RUNNING,
@@ -249,7 +258,8 @@ export class AgentSessionService {
 					predecessorId: oldSession.id,
 					cwd: oldSession.cwd,
 				}));
-			await this.process.kill(oldSession);
+			replacementStarted = true;
+			await this.process.killRetired(oldSession);
 			await this.store.mutate(task.id, async (state) => {
 				const old = this.session(state, oldSession.id);
 				old.status = AGENT_SESSION_STATUS.HANDED_OFF;
@@ -261,6 +271,7 @@ export class AgentSessionService {
 			});
 			return replacement;
 		} catch (error) {
+			if (!replacementStarted) await this.process.promote(oldSession).catch(() => undefined);
 			await this.store.mutate(task.id, async (state) => {
 				if (state.handoff) {
 					state.handoff.status = HANDOFF_STATUS.FAILED;
@@ -290,18 +301,36 @@ export class AgentSessionService {
 		)) {
 			if (session.status === AGENT_SESSION_STATUS.STARTING && this.ownerIsAlive(session.ownerPid)) continue;
 			const alive = await this.process.alive(session);
-			const dead = alive;
-			if (alive.exitCode === 0 && dead.stdout.trim() !== "1" && session.status === AGENT_SESSION_STATUS.RUNNING)
-				continue;
+			const paneDead = alive.exitCode === 0 && alive.stdout.trim() === "1";
+			const paneMissing = alive.exitCode !== 0;
+			if (!paneDead && !paneMissing && session.status === AGENT_SESSION_STATUS.RUNNING) continue;
+			if (session.status === AGENT_SESSION_STATUS.RUNNING && state.activeSessionId === session.id) {
+				try {
+					await this.resumeActiveSession(task.id, session, { paneMissing, paneDead });
+					continue;
+				} catch (error) {
+					await this.process.kill(session);
+					await this.store.mutate(task.id, async (current) => {
+						const target = this.session(current, session.id);
+						target.error = error instanceof Error ? error.message : String(error);
+					});
+				}
+			}
 			// An abandoned launch must not reserve the task forever, even if its placeholder pane survived.
 			if (session.status === AGENT_SESSION_STATUS.STARTING && alive.exitCode === 0) await this.process.kill(session);
 			await this.store.mutate(task.id, async (current) => {
 				const target = this.session(current, session.id);
+				const wasActive = current.activeSessionId === target.id;
 				target.status =
 					target.status === AGENT_SESSION_STATUS.STARTING ? AGENT_SESSION_STATUS.FAILED : AGENT_SESSION_STATUS.STOPPED;
 				target.endedAt = timestamp();
-				target.error = target.status === AGENT_SESSION_STATUS.FAILED ? "Session launch did not complete." : undefined;
-				if (current.activeSessionId === target.id) delete current.activeSessionId;
+				target.error =
+					target.status === AGENT_SESSION_STATUS.FAILED
+						? "Session launch did not complete."
+						: wasActive
+							? target.error
+							: undefined;
+				if (wasActive) delete current.activeSessionId;
 			});
 		}
 		await this.store.mutate(task.id, async (current) => {
@@ -314,6 +343,30 @@ export class AgentSessionService {
 		if (recovered.handoff?.status === HANDOFF_STATUS.READY) {
 			await this.continueHandoff(task.id);
 		}
+	}
+
+	private async resumeActiveSession(
+		taskId: string,
+		session: AgentSession,
+		pane: { paneMissing: boolean; paneDead: boolean },
+	): Promise<void> {
+		const preset = session.presetSnapshot;
+		if (!preset) throw new Error(`Agent session ${session.id} has no preset snapshot for native resume.`);
+		const env = this.environment(session, preset.env);
+		if (preset.worktree) await ensureSessionWorktree(this.runner, this.core.filesystem.rootDir, taskId, session.cwd);
+		if (pane.paneMissing) await this.process.create(session, env);
+		if (preset.prepare) await this.process.prepare(preset.prepare, session.cwd, env);
+		await this.process.preparePane(session, { includeDead: pane.paneDead });
+		await this.process.resume(session, preset, { includeDead: pane.paneDead });
+		await this.store.mutate(taskId, async (state) => {
+			const current = this.session(state, session.id);
+			current.status = AGENT_SESSION_STATUS.RUNNING;
+			current.ownerPid = undefined;
+			current.endedAt = undefined;
+			current.error = undefined;
+			this.touch(current, timestamp());
+			state.activeSessionId = current.id;
+		});
 	}
 
 	private async enforceRunningLimit(current: AgentSession, max: number): Promise<void> {

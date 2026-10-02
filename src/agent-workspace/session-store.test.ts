@@ -53,22 +53,39 @@ describe("SessionStore", () => {
 
 		const { statePath } = await store.paths("TASK-1");
 		await writeFile(statePath, "{}");
-		await expect(store.read("TASK-1")).rejects.toThrow("Could not read session state for TASK-1: invalid state");
+		await expect(store.read("TASK-1")).rejects.toThrow(
+			"Invalid agent session state for TASK-1. Reset it with: backlog agent-session reset TASK-1",
+		);
 
 		await writeFile(
 			statePath,
 			JSON.stringify({ version: 1, taskId: "TASK-1", activeSessionId: "missing", sessions: [{ id: "bad" }] }),
 		);
-		await expect(store.read("TASK-1")).rejects.toThrow("Could not read session state for TASK-1: invalid state");
+		await expect(store.read("TASK-1")).rejects.toThrow(
+			"Invalid agent session state for TASK-1. Reset it with: backlog agent-session reset TASK-1",
+		);
 
-		const paneFree = session("pane-free");
-		await writeFile(statePath, JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [paneFree] }));
-		expect((await store.read("TASK-1")).sessions[0]?.id).toBe("pane-free");
+		const validSession = { ...session("valid-session"), nativeSessionId: "native-session" };
+		await writeFile(statePath, JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [validSession] }));
+		expect((await store.read("TASK-1")).sessions[0]?.nativeSessionId).toBe("native-session");
 
 		await writeFile(
 			statePath,
-			JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [{ ...paneFree, paneId: "%1" }] }),
+			JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [{ ...validSession, nativeSessionId: 123 }] }),
 		);
-		await expect(store.read("TASK-1")).rejects.toThrow("Could not read session state for TASK-1: invalid state");
+		await expect(store.read("TASK-1")).rejects.toThrow(
+			"Invalid agent session state for TASK-1. Reset it with: backlog agent-session reset TASK-1",
+		);
+
+		await writeFile(
+			statePath,
+			JSON.stringify({ version: 1, taskId: "TASK-1", sessions: [{ ...validSession, extra: "field" }] }),
+		);
+		await expect(store.read("TASK-1")).rejects.toThrow(
+			"Invalid agent session state for TASK-1. Reset it with: backlog agent-session reset TASK-1",
+		);
+
+		await store.reset("TASK-1");
+		expect(await store.read("TASK-1")).toEqual({ version: 1, taskId: "TASK-1", sessions: [] });
 	});
 });

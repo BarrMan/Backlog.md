@@ -51,6 +51,8 @@ export interface AgentSession {
 	configScope: AgentConfigScope;
 	/** Name of the temporary backing tmux session created during launch. */
 	tmuxName: string;
+	/** Native agent conversation/session id, when the CLI supports exact resume identity. */
+	nativeSessionId?: string;
 	cwd: string;
 	createdAt: string;
 	endedAt?: string;

@@ -58,6 +58,7 @@ type WorkspaceHost = Pick<
 			| "focusSearch"
 			| "focusTasks"
 			| "focusDetails"
+			| "setDetailsVisible"
 			| "resizeNavigation"
 			| "resizeFooter"
 			| "workspaceState"
@@ -80,9 +81,10 @@ export type WorkspaceViewState = {
 	detailsVisible: boolean;
 	selectedTaskId?: string;
 };
-type SharedWorkspaceState = Pick<WorkspaceViewState, "filters" | "selectedTaskId"> & {
+type SharedWorkspaceState = Pick<WorkspaceViewState, "filters" | "selectedTaskId" | "detailsVisible"> & {
 	footerEditing?: boolean;
 	footerContext?: "tasks" | "details" | "history" | "output";
+	footerMessage?: string;
 };
 
 export type AgentWorkspaceOptions = {
@@ -164,7 +166,8 @@ function detailsText(
 ): string {
 	const { headerContent, bodyContent } = generateDetailContent(taskWithWorkspaceDraft(task, draft));
 	return [
-		...headerContent,
+		` {bold}{blue-fg}${task.id}{/blue-fg}{/bold} - ${task.title}`,
+		...headerContent.slice(1),
 		"",
 		`{bold}Session:{/bold} ${sessionLabel(session)}`,
 		handoff?.error ? `{bold}Handoff:{/bold} {yellow-fg}${handoff.error}{/}` : "",
@@ -283,8 +286,20 @@ export class AgentWorkspaceController {
 			let selectionGeneration = 0;
 			let displayedAgent: { taskId?: string; sessionId?: string } | undefined;
 			let presentation = Promise.resolve();
+			const sessionLoadErrors = new Set<string>();
 			const active = () => (taskSessions ? activeSessionOf(taskSessions) : undefined);
 			const listRecoveredSessions = async (taskId: string) => await workspaceState.sessionState(taskId);
+			const safeListRecoveredSessions = async (taskId: string): Promise<TaskSessions> => {
+				try {
+					const sessions = await listRecoveredSessions(taskId);
+					sessionLoadErrors.delete(taskId);
+					return sessions;
+				} catch (error) {
+					sessionLoadErrors.add(taskId);
+					tell(workspaceErrorMessage(error));
+					return { taskId, sessions: [] };
+				}
+			};
 			const focusedTask = () =>
 				entries[selected]?.kind === "task"
 					? (entries[selected] as Extract<WorkspaceEntry, { kind: "task" }>).task
@@ -301,6 +316,19 @@ export class AgentWorkspaceController {
 			};
 			const tell = (message: string) => {
 				if (notificationTimer) clearTimeout(notificationTimer);
+				if (nativePane) {
+					void host
+						.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({ ...shared, footerMessage: message }))
+						.catch(() => {});
+					notificationTimer = setTimeout(() => {
+						void host
+							.updateWorkspaceState?.<SharedWorkspaceState>((shared) =>
+								shared.footerMessage === message ? { ...shared, footerMessage: undefined } : shared,
+							)
+							.catch(() => {});
+					}, 3000);
+					return;
+				}
 				statusRow.setContent(` ${message} `);
 				statusRow.show();
 				notificationTimer = setTimeout(() => {
@@ -325,14 +353,15 @@ export class AgentWorkspaceController {
 						taskId: task && session?.status === "running" ? task.id : undefined,
 						sessionId: session?.status === "running" ? session.id : undefined,
 					};
-					if (displayedAgent && displayedAgent.taskId === next.taskId && displayedAgent.sessionId === next.sessionId) {
-						await touchDisplayedAgent();
-						return;
-					}
 					await host.showAgentSession(next.taskId, next.sessionId);
 					displayedAgent = next;
 					if (next.taskId && next.sessionId) await workspaceState.touchSession(next.taskId, next.sessionId);
 				});
+			const ensureActiveSession = async (task: Task, sessions: TaskSessions): Promise<TaskSessions> => {
+				if (sessionLoadErrors.has(task.id) || activeSessionOf(sessions)) return sessions;
+				const started = await workspaceState.startSession(task.id);
+				return started.sessions;
+			};
 			const updateFooter = () => {
 				if (nativePane) return;
 				footer.setContent(
@@ -347,6 +376,11 @@ export class AgentWorkspaceController {
 						screen.width,
 					).content,
 				);
+			};
+			const setSharedDetailsVisible = async (visible: boolean) => {
+				state.detailsVisible = visible;
+				await host.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({ ...shared, detailsVisible: visible }));
+				await host.setDetailsVisible?.(visible);
 			};
 			const showDetails = () => {
 				if (mode === "history" || mode === "output") return;
@@ -403,7 +437,9 @@ export class AgentWorkspaceController {
 					await showAgent(undefined, undefined, generation);
 				}
 				showDetails();
-				const sessions = await listRecoveredSessions(task.id);
+				let sessions = await safeListRecoveredSessions(task.id);
+				if (closed || generation !== selectionGeneration || selectedTask?.id !== task.id) return;
+				sessions = await ensureActiveSession(task, sessions);
 				if (closed || generation !== selectionGeneration || selectedTask?.id !== task.id) return;
 				taskSessions = sessions;
 				if (!unchanged) detailsViewport.setScroll(state.scrolls.get(task.id) ?? 0);
@@ -458,8 +494,10 @@ export class AgentWorkspaceController {
 						else {
 							const generation = selectionGeneration;
 							selectedTask = current.task;
-							const sessions = await listRecoveredSessions(current.task.id);
+							let sessions = await safeListRecoveredSessions(current.task.id);
 							if (generation === selectionGeneration && selectedTask?.id === current.task.id) {
+								sessions = await ensureActiveSession(current.task, sessions);
+								if (generation !== selectionGeneration || selectedTask?.id !== current.task.id) return;
 								taskSessions = sessions;
 								if (mode === "history") {
 									historySession =
@@ -527,6 +565,7 @@ export class AgentWorkspaceController {
 				fieldEditor.widget.destroy();
 				fieldEditor = undefined;
 				mode = "details";
+				details.setLabel?.(" Details (active) ");
 				details.focus();
 				showDetails();
 			};
@@ -798,6 +837,7 @@ export class AgentWorkspaceController {
 							taskSessions = await workspaceState.listSessions(task.id);
 							if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
 							session = active() ?? session;
+							showDetails();
 						}
 						await showAgent(task, session, generation);
 						if (closed || generation !== selectionGeneration || focusedTask()?.id !== task.id) return;
@@ -850,7 +890,7 @@ export class AgentWorkspaceController {
 					if (matchesKey(keymapKeys("workspace", "close"), key)) {
 						mode = "details";
 						historySession = undefined;
-						details.setLabel?.(" Details ");
+						details.setLabel?.(" Details (active) ");
 						activateFooterContext();
 						showDetails();
 						return;
@@ -914,6 +954,11 @@ export class AgentWorkspaceController {
 				if ((toggleDetails || focusDetails) && focusedTask()) {
 					if (tasksOnly) {
 						run(async () => {
+							if (toggleDetails) {
+								await setSharedDetailsVisible(!state.detailsVisible);
+								return;
+							}
+							if (!state.detailsVisible) return;
 							await host.updateWorkspaceState?.<SharedWorkspaceState>((shared) => ({
 								...shared,
 								footerContext: "details",
@@ -926,9 +971,9 @@ export class AgentWorkspaceController {
 						state.detailsVisible = !state.detailsVisible;
 						layout();
 					} else {
-						state.detailsVisible = true;
-						layout();
+						if (!state.detailsVisible) return;
 						mode = "details";
+						details.setLabel?.(" Details (active) ");
 						details.focus();
 					}
 					updateFooter();
@@ -1038,6 +1083,7 @@ export class AgentWorkspaceController {
 				await reload();
 				if (detailsOnly) {
 					mode = "details";
+					details.setLabel?.(" Details (active) ");
 					details.focus();
 					updateFooter();
 					render();
@@ -1170,6 +1216,7 @@ export class AgentWorkspaceController {
 			let closed = false;
 			let filters: FilterState = createWorkspaceViewState().filters;
 			let context: SharedWorkspaceState["footerContext"] = "tasks";
+			let message: string | undefined;
 			let pending = Promise.resolve();
 			let pendingQuery: string | undefined;
 			const queryPublisher = createLatestWorkspaceSearchPublisher(async (query) => {
@@ -1191,6 +1238,7 @@ export class AgentWorkspaceController {
 			const footer = new FooterSearch({
 				screen,
 				content: () => {
+					if (message) return ` {red-fg}${message}{/}`;
 					const query = filters.search ? ` | {yellow-fg}Search: ${filters.search}{/}` : "";
 					if (context === "details")
 						return ` [${formatKeymap("workspace", "edit")}] Edit | [${formatKeymap("workspace", "history")}] Sessions | [${formatKeymap("workspace", "close")}] Tasks${query}`;
@@ -1231,12 +1279,14 @@ export class AgentWorkspaceController {
 				const shared = await host.workspaceState?.<SharedWorkspaceState>();
 				if (shared?.filters) filters = shared.filters;
 				context = shared?.footerContext ?? context;
+				message = shared?.footerMessage;
 				footer.focus();
 			};
 			void (async () => {
 				const shared = await host.workspaceState?.<SharedWorkspaceState>();
 				if (shared?.filters) filters = shared.filters;
 				context = shared?.footerContext ?? context;
+				message = shared?.footerMessage;
 				footer.render();
 				screen.key(keymapKeys("workspace", "search"), () => {
 					void focusSearch();
@@ -1257,6 +1307,7 @@ export class AgentWorkspaceController {
 						}
 						if (shared.filters) filters = shared.filters;
 						context = shared.footerContext ?? "tasks";
+						message = shared.footerMessage;
 						footer.render();
 						screen.render();
 					});

@@ -26,6 +26,19 @@ function appendArguments(command: string, arguments_: string): string {
 	return `${command} ${arguments_}`;
 }
 
+export function nativeSessionIdForLaunch(preset: AgentPreset, sessionId: string): string | undefined {
+	switch (preset.bootstrap) {
+		case "claude":
+		case "gemini":
+			return sessionId;
+		case "opencode":
+		case "codex":
+		case "antigravity":
+		case "prompt":
+			return undefined;
+	}
+}
+
 /** Render only enough orientation to let an agent begin safely and load detail on demand. */
 export function renderSessionBootstrap(input: SessionBootstrapInput): string {
 	return [
@@ -42,17 +55,25 @@ export function renderSessionBootstrap(input: SessionBootstrapInput): string {
  * Returns a shell command that supplies the bootstrap as the agent's initial prompt.
  * The shell reads the file at launch time; its contents never become shell source.
  */
-export function buildAgentLaunchCommand(preset: AgentPreset, bootstrapPath: string): string {
+export function buildAgentLaunchCommand(preset: AgentPreset, bootstrapPath: string, nativeSessionId?: string): string {
 	const prompt = filePrompt(bootstrapPath);
 	switch (preset.bootstrap) {
 		case "opencode":
 			return appendArguments(preset.command, `--prompt ${prompt}`);
 		case "claude":
-			return appendArguments(preset.command, prompt);
+			return appendArguments(
+				preset.command,
+				nativeSessionId ? `--session-id ${shellQuote(nativeSessionId)} ${prompt}` : prompt,
+			);
 		case "codex":
 			return appendArguments(preset.command, prompt);
 		case "gemini":
-			return appendArguments(preset.command, `--prompt-interactive ${prompt}`);
+			return appendArguments(
+				preset.command,
+				nativeSessionId
+					? `--session-id ${shellQuote(nativeSessionId)} --prompt-interactive ${prompt}`
+					: `--prompt-interactive ${prompt}`,
+			);
 		case "antigravity":
 			return appendArguments(preset.command, `--prompt-interactive ${prompt}`);
 		case "prompt": {
@@ -63,5 +84,37 @@ export function buildAgentLaunchCommand(preset: AgentPreset, bootstrapPath: stri
 			}
 			return preset.command.replaceAll("{prompt}", prompt).replaceAll("{instructions}", prompt);
 		}
+	}
+}
+
+export function buildAgentResumeCommand(preset: AgentPreset, nativeSessionId?: string): string {
+	switch (preset.bootstrap) {
+		case "opencode":
+			return appendArguments(
+				preset.command,
+				nativeSessionId ? `--session ${shellQuote(nativeSessionId)}` : "--continue",
+			);
+		case "claude":
+			return appendArguments(
+				preset.command,
+				nativeSessionId ? `--resume ${shellQuote(nativeSessionId)}` : "--continue",
+			);
+		case "codex":
+			return appendArguments(
+				preset.command,
+				nativeSessionId ? `resume ${shellQuote(nativeSessionId)}` : "resume --last",
+			);
+		case "gemini":
+			return appendArguments(
+				preset.command,
+				nativeSessionId ? `--resume ${shellQuote(nativeSessionId)}` : "--resume latest",
+			);
+		case "antigravity":
+			return appendArguments(
+				preset.command,
+				nativeSessionId ? `--conversation ${shellQuote(nativeSessionId)}` : "--continue",
+			);
+		case "prompt":
+			throw new Error("Custom prompt agent commands do not define a native resume command.");
 	}
 }

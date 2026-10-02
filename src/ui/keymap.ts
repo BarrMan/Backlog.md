@@ -98,9 +98,9 @@ export const uiKeymap = {
 	},
 	workspace: {
 		save: ["C-s"],
-		close: ["escape"],
+		close: ["escape", "left"],
 		details: ["space"],
-		focusDetails: ["right", "l"],
+		focusDetails: ["right"],
 		open: ["enter"],
 		edit: ["e", "enter"],
 		history: ["s"],

@@ -2,7 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAgentLaunchCommand, renderSessionBootstrap } from "./bootstrap.ts";
+import {
+	buildAgentLaunchCommand,
+	buildAgentResumeCommand,
+	nativeSessionIdForLaunch,
+	renderSessionBootstrap,
+} from "./bootstrap.ts";
 import type { AgentPreset } from "./types.ts";
 
 const preset: AgentPreset = {
@@ -49,14 +54,15 @@ describe("agent session bootstrap", () => {
 		try {
 			for (const [bootstrapType, expected] of [
 				["opencode", ["--existing", "--prompt", bootstrap]],
-				["claude", ["--existing", bootstrap]],
+				["claude", ["--existing", "--session-id", "native-1", bootstrap]],
 				["codex", ["--existing", bootstrap]],
-				["gemini", ["--existing", "--prompt-interactive", bootstrap]],
+				["gemini", ["--existing", "--session-id", "native-1", "--prompt-interactive", bootstrap]],
 				["antigravity", ["--existing", "--prompt-interactive", bootstrap]],
 			] as const) {
 				const command = buildAgentLaunchCommand(
 					{ ...preset, command: `${agentPath} --existing`, bootstrap: bootstrapType },
 					bootstrapPath,
+					nativeSessionIdForLaunch({ ...preset, bootstrap: bootstrapType }, "native-1"),
 				);
 				const child = Bun.spawn(["/bin/sh", "-lc", command], {
 					env: { ...process.env, OUTPUT: outputPath },
@@ -81,6 +87,26 @@ describe("agent session bootstrap", () => {
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
+	});
+
+	it("renders exact native resume commands and explicit latest fallbacks", () => {
+		for (const [bootstrapType, native, fallback] of [
+			["opencode", "agent --existing --session 'native-1'", "agent --existing --continue"],
+			["claude", "agent --existing --resume 'native-1'", "agent --existing --continue"],
+			["codex", "agent --existing resume 'native-1'", "agent --existing resume --last"],
+			["gemini", "agent --existing --resume 'native-1'", "agent --existing --resume latest"],
+			["antigravity", "agent --existing --conversation 'native-1'", "agent --existing --continue"],
+		] as const) {
+			expect(
+				buildAgentResumeCommand({ ...preset, command: "agent --existing", bootstrap: bootstrapType }, "native-1"),
+			).toBe(native);
+			expect(buildAgentResumeCommand({ ...preset, command: "agent --existing", bootstrap: bootstrapType })).toBe(
+				fallback,
+			);
+		}
+		expect(() => buildAgentResumeCommand({ ...preset, command: "agent {prompt}", bootstrap: "prompt" })).toThrow(
+			"do not define a native resume command",
+		);
 	});
 
 	it("requires a prompt placeholder for custom commands and rejects unsafe built-in suffixes", () => {

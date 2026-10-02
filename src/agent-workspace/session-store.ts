@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, rename } from "node:fs/promises";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import type { AgentSessionRunner } from "./session-process.ts";
@@ -44,18 +44,42 @@ function isPreset(value: unknown): boolean {
 	);
 }
 
+const SESSION_KEYS = new Set([
+	"id",
+	"taskId",
+	"preset",
+	"presetSnapshot",
+	"configScope",
+	"tmuxName",
+	"nativeSessionId",
+	"cwd",
+	"createdAt",
+	"status",
+	"ownerPid",
+	"outputPath",
+	"bootstrapPath",
+	"endedAt",
+	"predecessorId",
+	"error",
+	"lastUsedAt",
+	"useCount",
+]);
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: Set<string>): boolean {
+	return Object.keys(value).every((key) => keys.has(key));
+}
+
 function isSession(value: unknown, taskId: string): value is AgentSession {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !hasOnlyKeys(value, SESSION_KEYS)) return false;
 	if (value.taskId !== taskId || !Object.values(AGENT_SESSION_STATUS).includes(value.status as AgentSession["status"]))
 		return false;
 	for (const key of ["id", "preset", "configScope", "tmuxName", "cwd", "createdAt", "outputPath", "bootstrapPath"]) {
 		if (typeof value[key] !== "string") return false;
 	}
 	return (
-		!("paneId" in value) &&
 		(value.presetSnapshot === undefined || isPreset(value.presetSnapshot)) &&
 		AGENT_CONFIG_SCOPES.includes(value.configScope as AgentSession["configScope"]) &&
-		["endedAt", "predecessorId", "error", "lastUsedAt"].every(
+		["nativeSessionId", "endedAt", "predecessorId", "error", "lastUsedAt"].every(
 			(key) => value[key] === undefined || typeof value[key] === "string",
 		) &&
 		(value.ownerPid === undefined || typeof value.ownerPid === "number") &&
@@ -99,6 +123,11 @@ export class SessionStore {
 			return this.validate(JSON.parse(await Bun.file(statePath).text()), taskId);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return this.empty(taskId);
+			if (error instanceof Error && error.message === "invalid state") {
+				throw new Error(
+					`Invalid agent session state for ${taskId}. Reset it with: backlog agent-session reset ${taskId}`,
+				);
+			}
 			throw new Error(
 				`Could not read session state for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -128,6 +157,11 @@ export class SessionStore {
 	async paths(taskId: string): Promise<SessionPaths> {
 		const taskDir = join(await this.projectStateRoot(), slug(taskId));
 		return { taskDir, statePath: join(taskDir, "state.json") };
+	}
+
+	async reset(taskId: string): Promise<void> {
+		const { statePath } = await this.paths(taskId);
+		await rm(statePath, { force: true });
 	}
 
 	async readAll(): Promise<SessionState[]> {

@@ -8,6 +8,15 @@ import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-
 
 const itRealTmux = process.env.RUN_INTERACTIVE_TUI_TESTS === "1" && Bun.which("tmux") ? it : it.skip;
 
+async function waitUntil(predicate: () => Promise<boolean> | boolean, message: string): Promise<void> {
+	const deadline = Date.now() + 15_000;
+	while (Date.now() < deadline) {
+		if (await predicate()) return;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error(`Timed out waiting for ${message}`);
+}
+
 class FakeTmux implements AgentSessionRunner {
 	readonly commands: string[][] = [];
 	readonly options: ({ cwd?: string; env?: Record<string, string>; stdin?: string; inherit?: boolean } | undefined)[] =
@@ -15,10 +24,11 @@ class FakeTmux implements AgentSessionRunner {
 	failPrepare = false;
 	failLaunch = false;
 	failStop = false;
-	prepareDelay = 0;
+	prepareGate: Promise<void> | undefined;
 	panes = 0;
 	missingPanes = new Set<string>();
 	paneMetadata = new Map<string, Record<string, string>>();
+	paneSessions = new Map<string, string>();
 
 	async run(
 		args: string[],
@@ -27,11 +37,14 @@ class FakeTmux implements AgentSessionRunner {
 		this.commands.push(args);
 		this.options.push(options);
 		if (args[0] === "/bin/sh" && this.failPrepare) {
-			await Bun.sleep(this.prepareDelay);
+			await this.prepareGate;
 			return { exitCode: 1, stdout: "", stderr: "prepare failed" };
 		}
-		if (args[0] === "tmux" && args[1] === "respawn-pane" && this.failLaunch)
-			return { exitCode: 1, stdout: "", stderr: "launch failed" };
+		if (args[0] === "tmux" && args[1] === "respawn-pane") {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			if (this.failLaunch) return { exitCode: 1, stdout: "", stderr: "launch failed" };
+			this.missingPanes.delete(target);
+		}
 		if (args[0] === "tmux" && args[1] === "kill-pane" && this.failStop)
 			return { exitCode: 1, stdout: "", stderr: "stop failed" };
 		if (args[0] === "tmux" && args[1] === "kill-pane") {
@@ -40,8 +53,11 @@ class FakeTmux implements AgentSessionRunner {
 			return { exitCode: 0, stdout: "", stderr: "" };
 		}
 		if (args[0] === "git" && args[1] === "rev-parse") return { exitCode: 0, stdout: ".git\n", stderr: "" };
-		if (args[0] === "tmux" && args[1] === "new-session")
-			return { exitCode: 0, stdout: `%${++this.panes}\n`, stderr: "" };
+		if (args[0] === "tmux" && args[1] === "new-session") {
+			const pane = `%${++this.panes}`;
+			this.paneSessions.set(pane, args[args.indexOf("-s") + 1] ?? "");
+			return { exitCode: 0, stdout: `${pane}\n`, stderr: "" };
+		}
 		if (args[0] === "tmux" && args[1] === "set-option" && args.includes("-p")) {
 			const target = args[args.indexOf("-t") + 1] ?? "";
 			const metadata = this.paneMetadata.get(target) ?? {};
@@ -50,16 +66,18 @@ class FakeTmux implements AgentSessionRunner {
 			return { exitCode: 0, stdout: "", stderr: "" };
 		}
 		if (args[0] === "tmux" && args[1] === "list-panes") {
-			const rows = [...this.paneMetadata.entries()].map(([pane, metadata]) =>
-				[
-					pane,
-					this.missingPanes.has(pane) ? "1" : "0",
-					metadata["@backlog_root"] ?? "",
-					metadata["@backlog_task"] ?? "",
-					metadata["@backlog_session"] ?? "",
-					metadata["@backlog_role"] ?? "",
-				].join("\t"),
-			);
+			const target = args.includes("-t") ? (args[args.indexOf("-t") + 1] ?? "") : "";
+			const rows = [...this.paneMetadata.entries()]
+				.filter(([pane]) => !target || this.paneSessions.get(pane) === target)
+				.map(([pane, metadata]) =>
+					[
+						pane,
+						this.missingPanes.has(pane) ? "1" : "0",
+						metadata["@backlog_root"] ?? "",
+						metadata["@backlog_task"] ?? "",
+						metadata["@backlog_role"] ?? "",
+					].join("\t"),
+				);
 			return { exitCode: 0, stdout: `${rows.join("\n")}\n`, stderr: "" };
 		}
 		if (args[0] === "tmux" && args[1] === "display-message") {
@@ -100,11 +118,20 @@ describe("AgentSessionService", () => {
 		const session = await service.start("task-1");
 		expect("paneId" in session).toBe(false);
 		expect("paneId" in ((await service.list("task-1")).sessions[0] ?? {})).toBe(false);
+		expect(session.nativeSessionId).toBeUndefined();
 		const created = runner.commands.find((command) => command[0] === "tmux" && command[1] === "new-session");
 		expect(created?.slice(0, 6)).toEqual(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}"]);
 		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_task", "TASK-1"]);
-		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_session", session.id]);
-		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_role", "agent"]);
+		expect(runner.commands).not.toContainEqual([
+			"tmux",
+			"set-option",
+			"-p",
+			"-t",
+			"%1",
+			"@backlog_session",
+			session.id,
+		]);
+		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_role", "live-preview"]);
 		expect(runner.commands).toContainEqual([
 			"tmux",
 			"respawn-pane",
@@ -115,6 +142,22 @@ describe("AgentSessionService", () => {
 			"-lc",
 			expect.anything(),
 		]);
+	});
+
+	it("stores native session ids for agents that support launch-time ids", async () => {
+		await upsertAgentConfiguration(core, "project", {
+			selectedPreset: "claude",
+			presets: {
+				claude: { command: "claude", env: {}, prepare: "", worktree: false, bootstrap: "claude" },
+			},
+		});
+		const service = new AgentSessionService(core, { runner });
+		const session = await service.start("task-1");
+		expect(session.nativeSessionId).toBe(session.id);
+		expect((await service.list("task-1")).sessions[0]?.nativeSessionId).toBe(session.id);
+		expect(runner.commands.find((command) => command[1] === "respawn-pane")?.at(-1)).toContain(
+			`exec claude --session-id '${session.id}'`,
+		);
 	});
 
 	it("puts the development backlog binary first on the agent PATH", async () => {
@@ -263,16 +306,61 @@ describe("AgentSessionService", () => {
 		expect(stopped).toBeGreaterThan(launched);
 	});
 
-	it("recovers a running session whose tmux pane target resolves to no pane", async () => {
+	it("resumes an active running session whose tmux pane is missing", async () => {
+		await upsertAgentConfiguration(core, "project", {
+			selectedPreset: "codex",
+			presets: {
+				codex: { command: "codex", env: {}, prepare: "", worktree: false, bootstrap: "codex" },
+			},
+		});
 		const service = new AgentSessionService(core, { runner });
-		await service.start("task-1");
+		const session = await service.start("task-1");
+		runner.paneMetadata.delete("%1");
+
+		await service.recover("task-1");
+
+		const recovered = await service.list("task-1");
+		expect(recovered.sessions[0]?.status).toBe("running");
+		expect(recovered.activeSessionId).toBe(session.id);
+		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%2", "@backlog_role", "live-preview"]);
+		expect(runner.commands.filter((command) => command[1] === "respawn-pane").at(-1)).toEqual([
+			"tmux",
+			"respawn-pane",
+			"-k",
+			"-t",
+			"%2",
+			"/bin/sh",
+			"-lc",
+			"exec codex resume --last",
+		]);
+	});
+
+	it("resumes an active running session whose tmux pane is dead with its exact native id", async () => {
+		await upsertAgentConfiguration(core, "project", {
+			selectedPreset: "claude",
+			presets: {
+				claude: { command: "claude", env: {}, prepare: "", worktree: false, bootstrap: "claude" },
+			},
+		});
+		const service = new AgentSessionService(core, { runner });
+		const session = await service.start("task-1");
 		runner.missingPanes.add("%1");
 
 		await service.recover("task-1");
 
 		const recovered = await service.list("task-1");
-		expect(recovered.sessions[0]?.status).toBe("stopped");
-		expect(recovered.activeSessionId).toBeUndefined();
+		expect(recovered.sessions[0]?.status).toBe("running");
+		expect(recovered.activeSessionId).toBe(session.id);
+		expect(runner.commands.filter((command) => command[1] === "respawn-pane").at(-1)).toEqual([
+			"tmux",
+			"respawn-pane",
+			"-k",
+			"-t",
+			"%1",
+			"/bin/sh",
+			"-lc",
+			`exec claude --resume '${session.id}'`,
+		]);
 	});
 
 	it("reconstructs a failed replacement handoff without duplicate active sessions", async () => {
@@ -325,12 +413,24 @@ describe("AgentSessionService", () => {
 			},
 		});
 		runner.failPrepare = true;
-		runner.prepareDelay = 100;
+		let releasePrepare: (() => void) | undefined;
+		runner.prepareGate = new Promise((resolve) => {
+			releasePrepare = resolve;
+		});
 		const service = new AgentSessionService(core, { runner });
 		const first = service.start("task-1");
-		await Bun.sleep(20);
+		await waitUntil(async () => (await service.list("task-1")).sessions.length === 1, "reserved starting session");
 		const second = service.start("task-1");
-		const results = await Promise.allSettled([first, second]);
+		const secondResult = await Promise.resolve(second).then(
+			(value) => ({ status: "fulfilled" as const, value }),
+			(reason) => ({ status: "rejected" as const, reason }),
+		);
+		releasePrepare?.();
+		const firstResult = await Promise.resolve(first).then(
+			(value) => ({ status: "fulfilled" as const, value }),
+			(reason) => ({ status: "rejected" as const, reason }),
+		);
+		const results = [firstResult, secondResult];
 		expect(results.filter((result) => result.status === "rejected")).toHaveLength(2);
 		expect(
 			results.some((result) => result.status === "rejected" && /already has an active/.test(String(result.reason))),
@@ -352,11 +452,10 @@ describe("AgentSessionService", () => {
 		const first = await service.start("task-1");
 		try {
 			await service.requestHandoff("task-1");
-			for (let attempt = 0; attempt < 100; attempt++) {
+			await waitUntil(async () => {
 				const state = await service.list("task-1");
-				if (state.handoff?.status === "completed" || state.handoff?.status === "failed") break;
-				await Bun.sleep(100);
-			}
+				return state.handoff?.status === "completed" || state.handoff?.status === "failed";
+			}, "handoff completion");
 			const state = await service.list("task-1");
 			expect(state.handoff?.status).toBe("completed");
 			expect(state.sessions.find((session) => session.id === first.id)?.status).toBe("handed-off");

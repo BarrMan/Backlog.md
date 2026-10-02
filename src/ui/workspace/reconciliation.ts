@@ -1,11 +1,10 @@
 import { getStatusColor, wrapStatusColor } from "../status-icon.ts";
-import { formatTaskViewerListItem } from "../task-viewer/detail-content.ts";
 import type { WorkspaceEntry } from "./model.ts";
 
 export function workspaceRows(entries: WorkspaceEntry[]): string[] {
 	return entries.map((entry) =>
 		entry.kind === "task"
-			? `  ${formatTaskViewerListItem(entry.task)}`
+			? `  {bold}${entry.task.id}{/bold} - ${entry.task.title}`
 			: `${entry.label.slice(0, 2)} ${wrapStatusColor(entry.status, getStatusColor(entry.status))}${entry.label.slice(2 + entry.status.length)}`,
 	);
 }

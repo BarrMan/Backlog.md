@@ -40,7 +40,7 @@ interactive(
 			const deadline = Date.now() + 10_000;
 			while (Date.now() < deadline) {
 				if (await check()) return;
-				await Bun.sleep(50);
+				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			throw new Error(`Timed out waiting for ${label}`);
 		};
@@ -74,9 +74,9 @@ interactive(
 			expect(state.sessions[0].status).toBe("handed-off");
 			expect(state.activeSessionId).toBe(state.sessions[1].id);
 			expect((await core.loadTaskById(task.id))?.description).toBe("Next: verify continuity.");
-			expect((await tmux("list-panes", "-a", "-F", "#{@backlog_session}:#{pane_dead}")).split("\n")).not.toContain(
-				`${first.id}:0`,
-			);
+			expect(
+				(await tmux("list-panes", "-a", "-F", "#{@backlog_task}:#{@backlog_role}:#{pane_dead}")).split("\n"),
+			).toContain(`${task.id}:live-preview:0`);
 
 			const script = join(root, "client.expect");
 			const launch = [...getTestCliCommand(), "workspace"]
@@ -122,7 +122,8 @@ interactive(
 			);
 			await waitFor("output footer", async () => (await capture(footer)).includes("Sessions"));
 			// A background task refresh must not replace the historical output with task details.
-			await Bun.sleep(2200);
+			const refreshDeadline = Date.now() + 2200;
+			await waitFor("background refresh interval", async () => Date.now() >= refreshDeadline);
 			expect(await capture(details)).toContain(`Saved output from ${first.id}`);
 			await tmux("send-keys", "-t", details, "Escape");
 			await waitFor("picker return", async () => (await capture(details)).includes("Session history"));

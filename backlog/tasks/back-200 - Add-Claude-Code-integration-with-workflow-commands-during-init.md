@@ -2,10 +2,11 @@
 task_schema_version: 2
 id: BACK-200
 title: Add Claude Code integration with workflow commands during init
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@OpenCode'
 created_date: '2025-07-23'
-updated_date: '2025-09-06 21:22'
+updated_date: '2026-10-02 14:18'
 labels:
   - enhancement
   - developer-experience
@@ -22,6 +23,19 @@ description: >-
 
   Based on contribution from PR #235:
   https://github.com/MrLesk/Backlog.md/pull/235
+implementation_notes: >-
+  Verified: Claude Code documents project skills at
+  .claude/skills/<name>/SKILL.md and still supports .claude/commands/*.md; the
+  documented command registration mechanism does not use claude.yaml
+  (https://code.claude.com/docs/en/slash-commands). Referenced PR #235 is
+  closed. Existing init tests cover a separate opt-in Claude project-manager
+  agent. Task view reports unresolved dependencies task-24.1 and task-208.
+
+  Blocker: acceptance criteria #4 and #8 require claude.yaml generation/merging,
+  which does not match the documented integration. Recommendation pending Alex
+  approval: use project skills for the eight named workflows and preserve
+  existing user files on repeated init; revise those criteria before
+  implementation. No implementation or test execution yet.
 acceptance_criteria:
   - index: 1
     text: Claude Code template files are stored in src/templates/claude/
