@@ -11,6 +11,7 @@ import type {
 } from "../../agent-workspace/types.ts";
 import { activeSessionOf, WorkspaceStateService } from "../../agent-workspace/workspace-state.ts";
 import type { Core } from "../../core/backlog.ts";
+import { UnsupportedTaskFrontmatterSchemaError } from "../../markdown/parser.ts";
 import type { Task, TaskUpdateInput } from "../../types/index.ts";
 import { collectAvailableLabels } from "../../utils/label-filter.ts";
 import { getPriorityOptions } from "../../utils/priority-config.ts";
@@ -139,6 +140,15 @@ export function createLatestWorkspaceSearchPublisher(publish: (search: string) =
 		return pending;
 	};
 	return { submit, flush: () => pending };
+}
+
+function workspaceErrorMessage(error: unknown): string {
+	if (error instanceof UnsupportedTaskFrontmatterSchemaError) {
+		const taskId = error.message.match(/^Task (.+?) uses unsupported task frontmatter schema/)?.[1];
+		const repair = taskId && taskId !== "(missing id)" ? ` Run: backlog task migrate-legacy ${taskId}` : "";
+		return `${error.message}${repair}`;
+	}
+	return error instanceof Error ? error.message : String(error);
 }
 
 function sessionLabel(session?: AgentSession): string {
@@ -299,8 +309,7 @@ export class AgentWorkspaceController {
 				}, 3000);
 				render();
 			};
-			const run = (action: () => Promise<void>) =>
-				void action().catch((error) => tell(error instanceof Error ? error.message : String(error)));
+			const run = (action: () => Promise<void>) => void action().catch((error) => tell(workspaceErrorMessage(error)));
 			const queuePresentation = (action: () => Promise<void>) => {
 				presentation = presentation.catch(() => {}).then(action);
 				return presentation;

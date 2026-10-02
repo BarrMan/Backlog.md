@@ -29,18 +29,12 @@ function appendArguments(command: string, arguments_: string): string {
 /** Render only enough orientation to let an agent begin safely and load detail on demand. */
 export function renderSessionBootstrap(input: SessionBootstrapInput): string {
 	return [
-		`You are the agent for Backlog task ${input.taskId}.`,
-		`Session: ${input.sessionId}`,
-		`Project: ${input.projectRoot}`,
-		`Working directory: ${input.cwd}`,
-		`Configuration scope: ${input.configScope}${input.worktree ? " (worktree)" : ""}`,
-		"",
-		`Begin by reading \`backlog task view ${input.taskId} --plain\`. Its description is the durable working context. Continue from the recorded state, following the user's latest instructions.`,
-		"Keep the description current after each meaningful update: direction, decisions, completed work, verification, blockers, and the next concrete step. Record enough for a fresh session to continue without this conversation.",
-		"Preserve requirements and useful context. Keep it concise and current, not a conversation log. Distinguish verified results from assumptions and unfinished work.",
-		"Use the Backlog CLI for task updates; consult command --help as needed. Before switching sessions, save any outstanding context to the description. No separate handover document is needed.",
-		"",
-		`Use BACKLOG_CWD=${input.projectRoot}; work in ${input.cwd}. Previous sessions: \`backlog agent-session list ${input.taskId}\`.`,
+		`You are working on Backlog task ${input.taskId} in ${input.cwd}.`,
+		`Session ${input.sessionId}; project root ${input.projectRoot}; config ${input.configScope}${input.worktree ? " worktree" : ""}.`,
+		`Read context first: \`BACKLOG_CWD=${input.projectRoot} backlog task view ${input.taskId} --plain\`.`,
+		`Update task state only with the Backlog CLI, usually \`BACKLOG_CWD=${input.projectRoot} backlog task edit ${input.taskId} ...\`; never edit files under backlog/ directly.`,
+		"Keep task updates concise: decisions, completed work, verification, blockers, and next step; distinguish verified facts from assumptions.",
+		`Optional prior sessions, if this CLI supports it: \`BACKLOG_CWD=${input.projectRoot} backlog agent-session list ${input.taskId}\`. If unavailable, ignore and continue from the task.`,
 	].join("\n");
 }
 
