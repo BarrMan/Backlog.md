@@ -5,7 +5,7 @@ import type { Core } from "../core/backlog.ts";
 import { TASK_SOURCE } from "../types/index.ts";
 import { nativeSessionIdForLaunch, renderSessionBootstrap } from "./bootstrap.ts";
 import { resolveAgentConfiguration } from "./config.ts";
-import { type AgentSessionRunner, BunRunner, SessionProcess } from "./session-process.ts";
+import { BunRunner, type ProcessRunner, SessionProcess, type TmuxServer } from "./session-process.ts";
 import { type SessionState, SessionStore } from "./session-store.ts";
 import { slug } from "./session-utils.ts";
 import { spawnSessionWorker } from "./session-worker-client.ts";
@@ -24,7 +24,7 @@ const TERMINAL_HANDOFF_STATUSES = new Set<HandoffStatus>([HANDOFF_STATUS.COMPLET
 const REPLACEABLE_HANDOFF_STATUSES = new Set<HandoffStatus>([HANDOFF_STATUS.READY, HANDOFF_STATUS.FAILED]);
 const DEFAULT_MAX_RUNNING_AGENT_SESSIONS = 10;
 
-export type { AgentSessionRunner } from "./session-process.ts";
+export type { ProcessRunner, TmuxServer } from "./session-process.ts";
 
 function timestamp(): string {
 	return new Date().toISOString();
@@ -32,17 +32,17 @@ function timestamp(): string {
 
 /** Durable task-scoped tmux sessions. State operations are short; terminals never run while a state lock is held. */
 export class AgentSessionService {
-	private readonly runner: AgentSessionRunner;
+	private readonly runner: ProcessRunner;
 	private readonly process: SessionProcess;
 	private readonly store: SessionStore;
 	private readonly backgroundWorkers: boolean;
 
 	constructor(
 		private readonly core: Core,
-		options: { runner?: AgentSessionRunner } = {},
+		options: { runner?: ProcessRunner; tmuxServer?: TmuxServer } = {},
 	) {
 		this.runner = options.runner ?? new BunRunner();
-		this.process = new SessionProcess(this.runner, this.core.filesystem.rootDir);
+		this.process = new SessionProcess(this.runner, this.core.filesystem.rootDir, options.tmuxServer);
 		this.store = new SessionStore(this.core.filesystem.rootDir, this.runner);
 		this.backgroundWorkers = !options.runner;
 	}

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
-import type { AgentSessionRunner } from "./session-process.ts";
+import type { ProcessRunner } from "./session-process.ts";
 import { slug } from "./session-utils.ts";
 import {
 	AGENT_BOOTSTRAP_TYPES,
@@ -114,7 +114,7 @@ function isHandoff(value: unknown): value is HandoffRequest {
 export class SessionStore {
 	constructor(
 		private readonly rootDir: string,
-		private readonly runner: AgentSessionRunner,
+		private readonly runner: ProcessRunner,
 	) {}
 
 	async read(taskId: string): Promise<SessionState> {

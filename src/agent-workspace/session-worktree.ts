@@ -1,9 +1,9 @@
-import type { AgentSessionRunner } from "./session-process.ts";
+import type { ProcessRunner } from "./session-process.ts";
 import { fail, slug } from "./session-utils.ts";
 
 /** Creates the task-owned branch and worktree while preserving injected process execution. */
 export async function ensureSessionWorktree(
-	runner: AgentSessionRunner,
+	runner: ProcessRunner,
 	root: string,
 	taskId: string,
 	path: string,

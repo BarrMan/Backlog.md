@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
+import { Server } from "libtmux";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
-import { TmuxWorkspace, type TmuxWorkspaceRunner } from "../agent-workspace/tmux-workspace.ts";
+import { TmuxWorkspace } from "../agent-workspace/tmux-workspace.ts";
 import { Core } from "../core/backlog.ts";
 import { getTestCliCommand, runTestCli } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
@@ -44,21 +45,13 @@ describe("workspace native tmux integration", () => {
 		paths.push(directory);
 		await mkdir(directory, { recursive: true });
 		const socket = `backlog-stale-bootstrap-${crypto.randomUUID().slice(0, 8)}`;
-		const runner: TmuxWorkspaceRunner = {
-			run: async (args) => {
-				const child = Bun.spawn([tmuxPath as string, "-f", "/dev/null", "-L", socket, ...args.slice(1)], {
-					cwd: directory,
-					stdout: "pipe",
-					stderr: "pipe",
-				});
-				return {
-					exitCode: await child.exited,
-					stdout: await new Response(child.stdout).text(),
-					stderr: await new Response(child.stderr).text(),
-				};
-			},
-		};
-		const workspace = new TmuxWorkspace(directory, runner);
+		const server = new Server({
+			tmuxBin: tmuxPath as string,
+			socketName: socket,
+			configFile: "/dev/null",
+			environment: { ...process.env, TMUX: "" },
+		});
+		const workspace = new TmuxWorkspace(directory, server);
 		const readyPath = join(directory, "stale-bootstrap-ready");
 		const owner = Bun.spawn([
 			"sh",
@@ -81,10 +74,10 @@ describe("workspace native tmux integration", () => {
 			await owner.exited;
 
 			await workspace.showWorkspace();
-			expect((await runner.run(["tmux", "has-session", "-t", workspace.sessionName])).exitCode).toBe(0);
+			expect(await server.hasSession(workspace.sessionName)).toBe(true);
 		} finally {
 			if (owner.exitCode === null) owner.kill("SIGKILL");
-			await runner.run(["tmux", "kill-server"]);
+			await server.cmd("kill-server").catch(() => {});
 		}
 	});
 

@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentSessionRunner } from "./session-process.ts";
+import type { ProcessRunner } from "./session-process.ts";
 import { SessionStore } from "./session-store.ts";
 import type { AgentSession } from "./types.ts";
 
-class FakeRunner implements AgentSessionRunner {
+class FakeRunner implements ProcessRunner {
 	async run(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 		return { exitCode: 1, stdout: "", stderr: "not a git repository" };
 	}

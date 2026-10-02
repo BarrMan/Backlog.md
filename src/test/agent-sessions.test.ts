@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmod, mkdir } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
-import { type AgentSessionRunner, AgentSessionService } from "../agent-workspace/sessions.ts";
+import { AgentSessionService, type ProcessRunner, type TmuxServer } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
@@ -17,79 +17,137 @@ async function waitUntil(predicate: () => Promise<boolean> | boolean, message: s
 	throw new Error(`Timed out waiting for ${message}`);
 }
 
-class FakeTmux implements AgentSessionRunner {
-	readonly commands: string[][] = [];
-	readonly options: ({ cwd?: string; env?: Record<string, string>; stdin?: string; inherit?: boolean } | undefined)[] =
-		[];
+type ProcessOptions = { cwd?: string; env?: Record<string, string>; stdin?: string; inherit?: boolean };
+
+type TmuxAction =
+	| { type: "newSession"; options: { name?: string; environment?: Readonly<Record<string, string>> } }
+	| { type: "setOption"; pane: string; name: string; value: string }
+	| { type: "setWindowOption"; pane: string; name: string; value: string }
+	| { type: "setTitle"; pane: string; title: string }
+	| { type: "pipeTo"; pane: string; command?: string }
+	| { type: "respawn"; pane: string; command?: string }
+	| { type: "kill"; pane: string }
+	| { type: "cmd"; command: string; args: readonly string[] };
+
+function isRespawnAction(action: TmuxAction): action is Extract<TmuxAction, { type: "respawn" }> {
+	return action.type === "respawn";
+}
+
+class FakeWindow {
+	constructor(
+		private readonly owner: FakeTmux,
+		private readonly paneId: string,
+	) {}
+
+	async setOption(name: string, value: string): Promise<void> {
+		this.owner.actions.push({ type: "setWindowOption", pane: this.paneId, name, value });
+	}
+}
+
+class FakePane {
+	readonly window: FakeWindow;
+
+	constructor(
+		private readonly owner: FakeTmux,
+		readonly id: string,
+	) {
+		this.window = new FakeWindow(owner, id);
+	}
+
+	async setOption(name: string, value: string): Promise<void> {
+		const metadata = this.owner.paneMetadata.get(this.id) ?? {};
+		metadata[name] = value;
+		this.owner.paneMetadata.set(this.id, metadata);
+		this.owner.actions.push({ type: "setOption", pane: this.id, name, value });
+	}
+
+	async setTitle(title: string): Promise<void> {
+		this.owner.actions.push({ type: "setTitle", pane: this.id, title });
+	}
+
+	async pipeTo(command?: string): Promise<void> {
+		this.owner.actions.push({ type: "pipeTo", pane: this.id, command });
+	}
+
+	async respawn(command?: string): Promise<void> {
+		if (this.owner.failLaunch) throw new Error("launch failed");
+		this.owner.missingPanes.delete(this.id);
+		this.owner.actions.push({ type: "respawn", pane: this.id, command });
+	}
+
+	async displayMessage(message: string): Promise<readonly string[]> {
+		if (message === "#{pane_id} #{pane_dead}")
+			return [`${this.id} ${this.owner.missingPanes.has(this.id) ? "1" : "0"}`];
+		if (message === "#{pane_dead} #{pane_dead_status}") return [this.owner.missingPanes.has(this.id) ? "1 0" : "0 0"];
+		return [""];
+	}
+
+	async kill(): Promise<void> {
+		if (this.owner.failStop) throw new Error("stop failed");
+		this.owner.missingPanes.add(this.id);
+		this.owner.actions.push({ type: "kill", pane: this.id });
+	}
+}
+
+class FakeTmux implements ProcessRunner, TmuxServer {
+	readonly processCommands: string[][] = [];
+	readonly processOptions: (ProcessOptions | undefined)[] = [];
+	readonly actions: TmuxAction[] = [];
 	failPrepare = false;
 	failLaunch = false;
 	failStop = false;
 	prepareGate: Promise<void> | undefined;
-	panes = 0;
+	createdPanes = 0;
 	missingPanes = new Set<string>();
 	paneMetadata = new Map<string, Record<string, string>>();
 	paneSessions = new Map<string, string>();
+	paneHandles = new Map<string, FakePane>();
 
-	async run(
-		args: string[],
-		options?: { cwd?: string; env?: Record<string, string>; stdin?: string; inherit?: boolean },
-	): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-		this.commands.push(args);
-		this.options.push(options);
+	async run(args: string[], options?: ProcessOptions): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+		this.processCommands.push(args);
+		this.processOptions.push(options);
 		if (args[0] === "/bin/sh" && this.failPrepare) {
 			await this.prepareGate;
 			return { exitCode: 1, stdout: "", stderr: "prepare failed" };
 		}
-		if (args[0] === "tmux" && args[1] === "respawn-pane") {
-			const target = args[args.indexOf("-t") + 1] ?? "";
-			if (this.failLaunch) return { exitCode: 1, stdout: "", stderr: "launch failed" };
-			this.missingPanes.delete(target);
-		}
-		if (args[0] === "tmux" && args[1] === "kill-pane" && this.failStop)
-			return { exitCode: 1, stdout: "", stderr: "stop failed" };
-		if (args[0] === "tmux" && args[1] === "kill-pane") {
-			const target = args[args.indexOf("-t") + 1] ?? "";
-			this.missingPanes.add(target);
-			return { exitCode: 0, stdout: "", stderr: "" };
-		}
 		if (args[0] === "git" && args[1] === "rev-parse") return { exitCode: 0, stdout: ".git\n", stderr: "" };
-		if (args[0] === "tmux" && args[1] === "new-session") {
-			const pane = `%${++this.panes}`;
-			this.paneSessions.set(pane, args[args.indexOf("-s") + 1] ?? "");
-			return { exitCode: 0, stdout: `${pane}\n`, stderr: "" };
-		}
-		if (args[0] === "tmux" && args[1] === "set-option" && args.includes("-p")) {
-			const target = args[args.indexOf("-t") + 1] ?? "";
-			const metadata = this.paneMetadata.get(target) ?? {};
-			metadata[args.at(-2) ?? ""] = args.at(-1) ?? "";
-			this.paneMetadata.set(target, metadata);
-			return { exitCode: 0, stdout: "", stderr: "" };
-		}
-		if (args[0] === "tmux" && args[1] === "list-panes") {
-			const target = args.includes("-t") ? (args[args.indexOf("-t") + 1] ?? "") : "";
-			const rows = [...this.paneMetadata.entries()]
-				.filter(([pane]) => !target || this.paneSessions.get(pane) === target)
-				.map(([pane, metadata]) =>
-					[
-						pane,
-						this.missingPanes.has(pane) ? "1" : "0",
-						metadata["@backlog_root"] ?? "",
-						metadata["@backlog_task"] ?? "",
-						metadata["@backlog_role"] ?? "",
-					].join("\t"),
-				);
-			return { exitCode: 0, stdout: `${rows.join("\n")}\n`, stderr: "" };
-		}
-		if (args[0] === "tmux" && args[1] === "display-message") {
-			const target = args[args.indexOf("-t") + 1] ?? "";
-			const format = args.at(-1);
-			if (this.missingPanes.has(target))
-				return { exitCode: 0, stdout: format === "#{pane_id} #{pane_dead}" ? `${target} 1\n` : "\n", stderr: "" };
-			if (format === "#{pane_id} #{pane_dead}") return { exitCode: 0, stdout: `${target} 0\n`, stderr: "" };
-			return { exitCode: 0, stdout: format === "#{cursor_y}" ? "0\n" : "0 0\n", stderr: "" };
-		}
-		if (args[0] === "tmux" && args[1] === "capture-pane") return { exitCode: 0, stdout: ">\n", stderr: "" };
 		return { exitCode: 0, stdout: "", stderr: "" };
+	}
+
+	async newSession(
+		options: { name?: string; environment?: Readonly<Record<string, string>> } = {},
+	): Promise<{ activePane?: FakePane }> {
+		const id = `%${++this.createdPanes}`;
+		const pane = new FakePane(this, id);
+		this.paneHandles.set(id, pane);
+		this.paneSessions.set(id, options.name ?? "");
+		this.paneMetadata.set(id, {});
+		this.actions.push({ type: "newSession", options });
+		return { activePane: pane };
+	}
+
+	async panes(): Promise<Iterable<FakePane>> {
+		return [...this.paneMetadata.keys()].flatMap((id) => this.paneHandles.get(id) ?? []);
+	}
+
+	async cmd(command: string, args: readonly string[] = []): Promise<readonly string[]> {
+		this.actions.push({ type: "cmd", command, args });
+		if (command === "list-panes") {
+			return [...this.paneMetadata.entries()].map(([pane, metadata]) =>
+				[
+					pane,
+					this.missingPanes.has(pane) ? "1" : "0",
+					metadata["@backlog_root"] ?? "",
+					metadata["@backlog_task"] ?? "",
+					metadata["@backlog_role"] ?? "",
+				].join("\t"),
+			);
+		}
+		if (command === "display-message") {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			return [`${target} ${this.missingPanes.has(target) ? "1" : "0"}`];
+		}
+		return [];
 	}
 }
 
@@ -114,34 +172,17 @@ describe("AgentSessionService", () => {
 	});
 
 	it("tags the placeholder pane before launching the agent", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("task-1");
 		expect("paneId" in session).toBe(false);
 		expect("paneId" in ((await service.list("task-1")).sessions[0] ?? {})).toBe(false);
 		expect(session.nativeSessionId).toBeUndefined();
-		const created = runner.commands.find((command) => command[0] === "tmux" && command[1] === "new-session");
-		expect(created?.slice(0, 6)).toEqual(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}"]);
-		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_task", "TASK-1"]);
-		expect(runner.commands).not.toContainEqual([
-			"tmux",
-			"set-option",
-			"-p",
-			"-t",
-			"%1",
-			"@backlog_session",
-			session.id,
-		]);
-		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%1", "@backlog_role", "live-preview"]);
-		expect(runner.commands).toContainEqual([
-			"tmux",
-			"respawn-pane",
-			"-k",
-			"-t",
-			"%1",
-			"/bin/sh",
-			"-lc",
-			expect.anything(),
-		]);
+		const created = runner.actions.find((action) => action.type === "newSession");
+		expect(created).toMatchObject({ type: "newSession", options: { name: session.tmuxName } });
+		expect(runner.paneMetadata.get("%1")?.["@backlog_task"]).toBe("TASK-1");
+		expect(runner.paneMetadata.get("%1")?.["@backlog_session"]).toBeUndefined();
+		expect(runner.paneMetadata.get("%1")?.["@backlog_role"]).toBe("live-preview");
+		expect(runner.actions).toContainEqual({ type: "respawn", pane: "%1", command: expect.anything() });
 	});
 
 	it("stores native session ids for agents that support launch-time ids", async () => {
@@ -151,13 +192,13 @@ describe("AgentSessionService", () => {
 				claude: { command: "claude", env: {}, prepare: "", worktree: false, bootstrap: "claude" },
 			},
 		});
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("task-1");
 		expect(session.nativeSessionId).toBe(session.id);
 		expect((await service.list("task-1")).sessions[0]?.nativeSessionId).toBe(session.id);
-		expect(runner.commands.find((command) => command[1] === "respawn-pane")?.at(-1)).toContain(
-			`exec claude --session-id '${session.id}'`,
-		);
+		const launched = runner.actions.filter(isRespawnAction).find((action) => action.pane === "%1")?.command;
+		expect(launched).toContain("exec claude --session-id");
+		expect(launched).toContain(session.id);
 	});
 
 	it("puts the development backlog binary first on the agent PATH", async () => {
@@ -173,39 +214,33 @@ describe("AgentSessionService", () => {
 				},
 			},
 		});
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		await service.start("task-1");
-		const createEnv = runner.options.find(
-			(_, index) => runner.commands[index]?.[0] === "tmux" && runner.commands[index]?.[1] === "new-session",
-		)?.env;
-		expect(createEnv?.PATH).toBe(`${join(root, "dist")}${delimiter}/custom/bin`);
-		const created = runner.commands.find((command) => command[0] === "tmux" && command[1] === "new-session");
-		expect(created).toContain(`PATH=${join(root, "dist")}${delimiter}/custom/bin`);
+		const created = runner.actions.find((action) => action.type === "newSession");
+		expect(created?.options.environment?.PATH).toBe(`${join(root, "dist")}${delimiter}/custom/bin`);
 	});
 
 	it("requests replacement without injecting input or creating a handover document", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		await service.start("task-1");
-		const beforePaste = runner.commands.length;
+		const beforePaste = runner.actions.length;
 		const request = await service.requestHandoff("task-1");
 		expect(request.status).toBe("ready");
 		expect(request.documentPath).toBeUndefined();
-		expect(runner.commands.slice(beforePaste).filter(([command]) => command === "tmux")).toEqual([]);
+		expect(runner.actions.slice(beforePaste)).toEqual([]);
 	});
 
 	it("attaches outside tmux and switches the current client inside tmux", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("task-1");
 		const previousTmux = process.env.TMUX;
 		try {
 			delete process.env.TMUX;
 			await service.attach("task-1", session.id);
-			expect(runner.commands.at(-1)).toEqual(["tmux", "attach-session", "-t", "%1"]);
-			expect(runner.options.at(-1)).toEqual({ inherit: true });
+			expect(runner.actions.at(-1)).toEqual({ type: "cmd", command: "attach-session", args: ["-t", "%1"] });
 			process.env.TMUX = "/tmp/tmux-1/default,1,0";
 			await service.attach("task-1", session.id);
-			expect(runner.commands.at(-1)).toEqual(["tmux", "switch-client", "-t", "%1"]);
-			expect(runner.options.at(-1)).toEqual({ inherit: true });
+			expect(runner.actions.at(-1)).toEqual({ type: "cmd", command: "switch-client", args: ["-t", "%1"] });
 		} finally {
 			if (previousTmux === undefined) delete process.env.TMUX;
 			else process.env.TMUX = previousTmux;
@@ -217,19 +252,14 @@ describe("AgentSessionService", () => {
 	});
 
 	it("canonicalizes task identity, persists sessions, and transitions only its first launch", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("TASK-1");
 		expect(session.taskId).toBe("TASK-1");
 		expect((await service.list("task-1")).activeSessionId).toBe(session.id);
 		expect((await core.loadTaskById("task-1", { includeCrossBranch: false }))?.status).toBe("In Progress");
 		await expect(service.start("task-1")).rejects.toThrow("already has an active");
 		await service.stop("task-1");
-		expect(runner.commands.filter((command) => command[1] === "kill-pane").at(-1)).toEqual([
-			"tmux",
-			"kill-pane",
-			"-t",
-			"%1",
-		]);
+		expect(runner.actions.filter((action) => action.type === "kill").at(-1)).toEqual({ type: "kill", pane: "%1" });
 		await Bun.write(session.outputPath, "retired output\n");
 		expect(await service.output("task-1", session.id)).toBe("retired output\n");
 		await expect(service.attach("task-1", session.id)).rejects.toThrow("not active");
@@ -241,7 +271,7 @@ describe("AgentSessionService", () => {
 	it("auto-stops the least-used live session when the running cap is reached", async () => {
 		await core.createTaskFromInput({ title: "Second", status: "To Do" }, false);
 		await core.createTaskFromInput({ title: "Third", status: "To Do" }, false);
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const first = await service.start("task-1", { maxRunningSessions: 99 });
 		await service.start("task-2", { maxRunningSessions: 99 });
 		await service.touchUsage("task-1", first.id);
@@ -261,7 +291,7 @@ describe("AgentSessionService", () => {
 			},
 		});
 		runner.failPrepare = true;
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		await expect(service.start("task-1")).rejects.toThrow("preparation failed");
 		expect((await service.list("task-1")).sessions[0]?.status).toBe("failed");
 		runner.failPrepare = false;
@@ -276,13 +306,20 @@ describe("AgentSessionService", () => {
 				test: { command: "agent {prompt}", env: {}, prepare: "", worktree: true, bootstrap: "prompt" },
 			},
 		});
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("task-1");
-		expect(runner.commands).toContainEqual(["git", "worktree", "add", "-b", "backlog/session/task-1", session.cwd]);
+		expect(runner.processCommands).toContainEqual([
+			"git",
+			"worktree",
+			"add",
+			"-b",
+			"backlog/session/task-1",
+			session.cwd,
+		]);
 	});
 
 	it("starts one replacement before stopping its predecessor and preserves task context and output", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const first = await service.start("task-1");
 		await core.updateTaskFromInput("task-1", { description: "Verified step one. Next: step two." }, false);
 		await Bun.write(first.outputPath, "Previous session output");
@@ -300,8 +337,8 @@ describe("AgentSessionService", () => {
 		expect(await service.output("task-1", first.id)).toBe("Previous session output");
 		expect((await core.loadTaskById("task-1"))?.description).toBe("Verified step one. Next: step two.");
 		expect(await Bun.file(replacement?.bootstrapPath ?? "").text()).toContain("backlog task view TASK-1 --plain");
-		const launched = runner.commands.findIndex((args) => args[1] === "respawn-pane" && args[4] === "%2");
-		const stopped = runner.commands.findIndex((args) => args[1] === "kill-pane" && args[3] === "%1");
+		const launched = runner.actions.findIndex((action) => action.type === "respawn" && action.pane === "%2");
+		const stopped = runner.actions.findIndex((action) => action.type === "kill" && action.pane === "%1");
 		expect(launched).toBeGreaterThan(-1);
 		expect(stopped).toBeGreaterThan(launched);
 	});
@@ -313,7 +350,7 @@ describe("AgentSessionService", () => {
 				codex: { command: "codex", env: {}, prepare: "", worktree: false, bootstrap: "codex" },
 			},
 		});
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("task-1");
 		runner.paneMetadata.delete("%1");
 
@@ -322,17 +359,12 @@ describe("AgentSessionService", () => {
 		const recovered = await service.list("task-1");
 		expect(recovered.sessions[0]?.status).toBe("running");
 		expect(recovered.activeSessionId).toBe(session.id);
-		expect(runner.commands).toContainEqual(["tmux", "set-option", "-p", "-t", "%2", "@backlog_role", "live-preview"]);
-		expect(runner.commands.filter((command) => command[1] === "respawn-pane").at(-1)).toEqual([
-			"tmux",
-			"respawn-pane",
-			"-k",
-			"-t",
-			"%2",
-			"/bin/sh",
-			"-lc",
-			"exec codex resume --last",
-		]);
+		expect(runner.paneMetadata.get("%2")?.["@backlog_role"]).toBe("live-preview");
+		expect(runner.actions.filter((action) => action.type === "respawn").at(-1)).toMatchObject({
+			type: "respawn",
+			pane: "%2",
+			command: expect.stringContaining("exec codex resume --last"),
+		});
 	});
 
 	it("resumes an active running session whose tmux pane is dead with its exact native id", async () => {
@@ -342,7 +374,7 @@ describe("AgentSessionService", () => {
 				claude: { command: "claude", env: {}, prepare: "", worktree: false, bootstrap: "claude" },
 			},
 		});
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const session = await service.start("task-1");
 		runner.missingPanes.add("%1");
 
@@ -351,20 +383,14 @@ describe("AgentSessionService", () => {
 		const recovered = await service.list("task-1");
 		expect(recovered.sessions[0]?.status).toBe("running");
 		expect(recovered.activeSessionId).toBe(session.id);
-		expect(runner.commands.filter((command) => command[1] === "respawn-pane").at(-1)).toEqual([
-			"tmux",
-			"respawn-pane",
-			"-k",
-			"-t",
-			"%1",
-			"/bin/sh",
-			"-lc",
-			`exec claude --resume '${session.id}'`,
-		]);
+		const resumed = runner.actions.filter((action) => action.type === "respawn").at(-1);
+		expect(resumed).toMatchObject({ type: "respawn", pane: "%1" });
+		expect(resumed?.command).toContain("exec claude --resume");
+		expect(resumed?.command).toContain(session.id);
 	});
 
 	it("reconstructs a failed replacement handoff without duplicate active sessions", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const first = await service.start("task-1");
 		await service.requestHandoff("task-1");
 		runner.failLaunch = true;
@@ -373,10 +399,10 @@ describe("AgentSessionService", () => {
 		expect(failed.handoff?.status).toBe("failed");
 		expect(failed.sessions.filter((session) => session.status === "running")).toHaveLength(1);
 		expect(failed.activeSessionId).toBe(first.id);
-		expect(runner.commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+		expect(runner.actions).not.toContainEqual({ type: "kill", pane: "%1" });
 
 		runner.failLaunch = false;
-		const reconstructed = new AgentSessionService(core, { runner });
+		const reconstructed = new AgentSessionService(core, { runner, tmuxServer: runner });
 		await reconstructed.continueHandoff("task-1");
 		const recovered = await reconstructed.list("task-1");
 		expect(recovered.handoff?.status).toBe("completed");
@@ -387,7 +413,7 @@ describe("AgentSessionService", () => {
 	});
 
 	it("retries stopping a predecessor without launching another replacement", async () => {
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const first = await service.start("task-1");
 		await service.requestHandoff("task-1");
 		runner.failStop = true;
@@ -417,7 +443,7 @@ describe("AgentSessionService", () => {
 		runner.prepareGate = new Promise((resolve) => {
 			releasePrepare = resolve;
 		});
-		const service = new AgentSessionService(core, { runner });
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
 		const first = service.start("task-1");
 		await waitUntil(async () => (await service.list("task-1")).sessions.length === 1, "reserved starting session");
 		const second = service.start("task-1");
