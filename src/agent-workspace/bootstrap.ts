@@ -32,7 +32,7 @@ export function renderSessionBootstrap(input: SessionBootstrapInput): string {
 		`You are working on Backlog task ${input.taskId} in ${input.cwd}.`,
 		`Session ${input.sessionId}; project root ${input.projectRoot}; config ${input.configScope}${input.worktree ? " worktree" : ""}.`,
 		`Read context first: \`BACKLOG_CWD=${input.projectRoot} backlog task view ${input.taskId} --plain\`.`,
-		`Update task state only with the Backlog CLI, usually \`BACKLOG_CWD=${input.projectRoot} backlog task edit ${input.taskId} ...\`; never edit files under backlog/ directly.`,
+		`Manage tasks with the Backlog CLI: \`backlog task view/create/edit/delete/migrate-legacy --help\`; usually update this task with \`BACKLOG_CWD=${input.projectRoot} backlog task edit ${input.taskId} ...\`.`,
 		"Keep task updates concise: decisions, completed work, verification, blockers, and next step; distinguish verified facts from assumptions.",
 		`Optional prior sessions, if this CLI supports it: \`BACKLOG_CWD=${input.projectRoot} backlog agent-session list ${input.taskId}\`. If unavailable, ignore and continue from the task.`,
 	].join("\n");

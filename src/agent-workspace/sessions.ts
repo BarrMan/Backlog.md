@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { DEFAULT_IN_PROGRESS_STATUS, DEFAULT_STATUSES } from "../constants/index.ts";
 import type { Core } from "../core/backlog.ts";
 import { TASK_SOURCE } from "../types/index.ts";
@@ -118,7 +118,7 @@ export class AgentSessionService {
 		try {
 			if (preset.worktree)
 				await ensureSessionWorktree(this.runner, this.core.filesystem.rootDir, task.id, reserved.cwd);
-			const env = { ...process.env, ...preset.env, ...this.environment(reserved) } as Record<string, string>;
+			const env = this.environment(reserved, preset.env);
 			await this.process.create(reserved, env);
 			if (preset.prepare) await this.process.prepare(preset.prepare, reserved.cwd, env);
 			await this.store.write(
@@ -393,13 +393,17 @@ export class AgentSessionService {
 		return session;
 	}
 
-	private environment(session: AgentSession): Record<string, string> {
+	private environment(session: AgentSession, presetEnv: Record<string, string>): Record<string, string> {
+		const env = { ...process.env, ...presetEnv } as Record<string, string>;
+		const dist = join(this.core.filesystem.rootDir, "dist");
+		const path = env.PATH ? `${dist}${delimiter}${env.PATH}` : dist;
 		return {
-			...process.env,
+			...env,
+			PATH: path,
 			BACKLOG_CWD: this.core.filesystem.rootDir,
 			BACKLOG_SESSION_ID: session.id,
 			BACKLOG_TASK_ID: session.taskId,
-		} as Record<string, string>;
+		};
 	}
 
 	private ownerIsAlive(pid: number | undefined): boolean {

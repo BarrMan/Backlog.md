@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmod, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
 import { type AgentSessionRunner, AgentSessionService } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
@@ -115,6 +115,29 @@ describe("AgentSessionService", () => {
 			"-lc",
 			expect.anything(),
 		]);
+	});
+
+	it("puts the development backlog binary first on the agent PATH", async () => {
+		await upsertAgentConfiguration(core, "project", {
+			selectedPreset: "test",
+			presets: {
+				test: {
+					command: "agent {prompt}",
+					env: { PATH: "/custom/bin" },
+					prepare: "",
+					worktree: false,
+					bootstrap: "prompt",
+				},
+			},
+		});
+		const service = new AgentSessionService(core, { runner });
+		await service.start("task-1");
+		const createEnv = runner.options.find(
+			(_, index) => runner.commands[index]?.[0] === "tmux" && runner.commands[index]?.[1] === "new-session",
+		)?.env;
+		expect(createEnv?.PATH).toBe(`${join(root, "dist")}${delimiter}/custom/bin`);
+		const created = runner.commands.find((command) => command[0] === "tmux" && command[1] === "new-session");
+		expect(created).toContain(`PATH=${join(root, "dist")}${delimiter}/custom/bin`);
 	});
 
 	it("requests replacement without injecting input or creating a handover document", async () => {

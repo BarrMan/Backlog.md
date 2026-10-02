@@ -27,8 +27,9 @@ describe("agent session bootstrap", () => {
 		expect(bootstrap.length).toBeLessThan(900);
 		expect(bootstrap).toContain("BACKLOG_CWD=/project backlog task view BACK-123 --plain");
 		expect(bootstrap).toContain("You are working on Backlog task BACK-123");
+		expect(bootstrap).toContain("backlog task view/create/edit/delete/migrate-legacy --help");
 		expect(bootstrap).toContain("backlog task edit BACK-123");
-		expect(bootstrap).toContain("never edit files under backlog/ directly");
+		expect(bootstrap).not.toContain("never edit files under backlog/ directly");
 		expect(bootstrap).toContain("backlog agent-session list BACK-123");
 		expect(bootstrap).toContain("If unavailable, ignore");
 		expect(bootstrap).not.toContain("backlog instructions");
