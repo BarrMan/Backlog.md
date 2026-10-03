@@ -4,6 +4,14 @@ import { join } from "node:path";
 import type { NewWindowOptions, SplitOptions } from "libtmux";
 import { PaneDirection, Server, TmuxCommandError } from "libtmux";
 import { LockOwner } from "../file-system/lock-owner.ts";
+import { createTmuxChannels, type TmuxChannels } from "./tmux/channels.ts";
+import { createTmuxClient, createTmuxClientEntry, type TmuxClient, type TmuxClientEntry } from "./tmux/client.ts";
+import { createTmuxExec, type TmuxExec } from "./tmux/exec.ts";
+import { createTmuxOptions, DEFAULT_PREFIX, type TmuxOptions } from "./tmux/options.ts";
+import { createTmuxPane, type TmuxPane } from "./tmux/pane.ts";
+import { createTmuxServerSession, type TmuxServerSession } from "./tmux/server-session.ts";
+import { createTmuxSignalsKeys, type TmuxSignalsKeys } from "./tmux/signals-keys.ts";
+import { createTmuxWindow, type TmuxWindow } from "./tmux/window.ts";
 import { findAbandonedWorkspaces, OWNER_OPTION, OWNER_PID_OPTION } from "./tmux-orphan-sweep.ts";
 import { findTmuxPanesByTaskAndRole } from "./tmux-pane-lookup.ts";
 
@@ -72,9 +80,6 @@ const BOOTSTRAP_LOCK_STALE_MS = 2_000;
 const PANE_LIVENESS_BUDGET_MS = 200;
 const PANE_LIVENESS_STEP_MS = 25;
 const PANE_OUTPUT_TAIL_LINES = 20;
-const PANE_TREE_TERM_GRACE_MS = 100;
-/** `kill-session` reports an absent session or server on stderr; teardown must treat that as done. */
-const SESSION_ABSENT = /can't find session|no server running|error connecting/;
 const TERMINATION_SIGNALS = ["SIGINT", "SIGTERM"] as const;
 
 type SignalSource = {
@@ -169,13 +174,6 @@ const SHELL_PANES: Record<
 function quote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
-function signalProcess(pid: number, signal: NodeJS.Signals): void {
-	try {
-		process.kill(pid, signal);
-	} catch {
-		// The process is already gone, which is the outcome teardown wanted.
-	}
-}
 function placeholder(): string {
 	return "exec sleep 2147483647";
 }
@@ -214,22 +212,21 @@ export function isTmuxWorkspace(): boolean {
  * the user keeps their window layout, but a session with no client (or a client tmux refuses to switch)
  * cannot be switched to, so attaching is the fallback rather than a hard failure. Returns the command
  * that handed over the workspace.
+ *
+ * Routed through `tmux/client.ts`, like {@link TmuxWorkspace.attachClient}: the two paths differ
+ * only in fallback policy (`allowAttachFallback`), which the client module already models. Neither
+ * goes through `exec.run` — the handover child must own the terminal via inherited stdio.
  */
 export async function attachWorkspaceClient(
 	sessionName: string,
 	options: { insideTmux: boolean; spawn?: typeof Bun.spawn },
 ): Promise<string> {
-	const spawn = options.spawn ?? Bun.spawn;
-	const commands = options.insideTmux ? ["switch-client", "attach-session"] : ["attach-session"];
-	for (const command of commands) {
-		const child = spawn(["tmux", command, "-t", sessionName], {
-			stdin: "inherit",
-			stdout: "inherit",
-			stderr: "inherit",
-		});
-		if ((await child.exited) === 0) return command;
-	}
-	throw new Error(`Could not enter tmux workspace: tmux ${commands.join(" then ")} failed`);
+	// Typed against the entry-only surface: both branches hand the terminal to `Bun.spawn` with
+	// inherited stdio and never call `exec.run`, so no exec surface is needed or built here.
+	const client: TmuxClientEntry = createTmuxClientEntry();
+	return options.insideTmux
+		? await client.switchClientAttach(sessionName, { spawn: options.spawn })
+		: await client.attachSession(sessionName, { spawn: options.spawn });
 }
 
 /**
@@ -245,7 +242,7 @@ export class TmuxWorkspace {
 				runner: { run: (args: readonly string[]) => this.run(args) },
 			});
 			if (!swept.abandoned.includes(this.sessionName)) return false;
-			await this.killPaneProcessTrees();
+			await this.tmuxKeys.killPaneProcessTrees(this.sessionName);
 			await this.killSessionIfPresent();
 			return true;
 		} catch {
@@ -351,28 +348,20 @@ export class TmuxWorkspace {
 			await this.resizeRegion(NAV_PANE, NAV_HEIGHT, 3, "Could not resize workspace navigation");
 			await this.resizeRegion(FOOTER_PANE, FOOTER_HEIGHT, 1, "Could not resize workspace footer");
 			for (const target of [boardWindow, workspaceWindow]) {
-				await this.require(
-					["set-option", "-w", "-t", target, "automatic-rename", "off"],
-					"Could not stabilize workspace window",
-				);
-				await this.require(
-					["set-option", "-w", "-t", target, "remain-on-exit", "on"],
-					"Could not preserve workspace window",
-				);
+				await this.tmuxOptions.setWindowOption("automatic-rename", "off", target);
+				await this.tmuxOptions.setWindowOption("remain-on-exit", "on", target, "Could not preserve workspace window");
 			}
-			await this.require(["rename-window", "-t", boardWindow, "Board"], "Could not name Board window");
+			await this.tmuxWindow.renameWindow(boardWindow, "Board", "Could not name Board window");
 			const prefix = await this.prefix();
-			await this.require(["rename-window", "-t", workspaceWindow, "Workspace"], "Could not name Workspace window");
-			await this.require(
-				["set-option", "-t", this.sessionName, "key-table", this.table],
-				"Could not scope workspace keys",
-			);
-			await this.require(
-				["bind-key", "-T", this.table, prefix, "switch-client", "-T", "prefix"],
-				"Could not preserve tmux prefix",
-			);
+			await this.tmuxWindow.renameWindow(workspaceWindow, "Workspace", "Could not name Workspace window");
+			await this.tmuxOptions.setOption("key-table", this.table, this.sessionName, "Could not scope workspace keys");
+			await this.tmuxKeys.bindKey(prefix, "switch-client", {
+				table: this.table,
+				commandArgs: ["-T", "prefix"],
+				message: "Could not preserve tmux prefix",
+			});
 			for (const key of ["C-m", "C-i", "/"])
-				await this.require(["unbind-key", "-q", "-T", this.table, key], "Could not clear obsolete workspace key");
+				await this.tmuxKeys.unbindKey(key, { table: this.table }, "Could not clear obsolete workspace key");
 			await this.bindReturnKey(workspaceWindow, tasksPane.id);
 			await this.set(READY, "1");
 			await this.launchUi(boardPane, "board");
@@ -430,7 +419,7 @@ export class TmuxWorkspace {
 		const activePane = activeTask ? await this.findLivePreviewPane(activeTask) : undefined;
 		if (activePane) {
 			const display = await this.option(DISPLAY_PANE);
-			const agentWindow = await this.run(["display-message", "-p", "-t", activePane, "#{window_id}"]);
+			const agentWindow = await this.tmuxPane.displayMessage(activePane, "#{window_id}");
 			if (
 				display &&
 				display !== activePane &&
@@ -438,13 +427,10 @@ export class TmuxWorkspace {
 				agentWindow.exitCode === 0 &&
 				agentWindow.stdout.trim() === workspace
 			)
-				await this.require(
-					["swap-pane", "-d", "-s", activePane, "-t", display],
-					"Could not park active live preview pane",
-				);
+				await this.tmuxPane.swapPane(activePane, display, "Could not park active live preview pane");
 		}
 		if (await this.windowInSession(workspace))
-			await this.require(["kill-window", "-t", workspace], "Could not remove obsolete Workspace window");
+			await this.tmuxWindow.killWindow(workspace, "Could not remove obsolete Workspace window");
 		const session = await this.workspaceSession();
 		const { window, pane: nav } = await this.createWorkspaceWindow(session, "Could not rebuild Workspace window");
 		const footerPane = await this.splitPane(
@@ -493,13 +479,10 @@ export class TmuxWorkspace {
 			"Could not resize workspace footer",
 		);
 		await this.unset(ACTIVE_TASK);
-		await this.require(["rename-window", "-t", window, "Workspace"], "Could not name rebuilt Workspace window");
-		await this.require(
-			["set-option", "-w", "-t", window, "remain-on-exit", "on"],
-			"Could not preserve Workspace window",
-		);
+		await this.tmuxWindow.renameWindow(window, "Workspace", "Could not name rebuilt Workspace window");
+		await this.tmuxOptions.setWindowOption("remain-on-exit", "on", window, "Could not preserve Workspace window");
 		for (const key of ["C-m", "C-i", "/"])
-			await this.require(["unbind-key", "-q", "-T", this.table, key], "Could not clear obsolete workspace key");
+			await this.tmuxKeys.unbindKey(key, { table: this.table }, "Could not clear obsolete workspace key");
 		await this.bindReturnKey(window, task.id);
 		await this.launchUi(nav.id, "workspace-nav");
 		await this.launchUi(task.id, "workspace-tasks");
@@ -532,7 +515,7 @@ export class TmuxWorkspace {
 
 	private async swapPanes(source: string, target: string): Promise<void> {
 		if (source === target) return;
-		await this.require(["swap-pane", "-d", "-s", source, "-t", target], "Could not swap live preview pane");
+		await this.tmuxPane.swapPane(source, target, "Could not swap live preview pane");
 	}
 	private async liveUiPane(
 		key: typeof BOARD_PANE | typeof NAV_PANE | typeof TASKS_PANE | typeof DETAILS_PANE | typeof FOOTER_PANE,
@@ -554,7 +537,7 @@ export class TmuxWorkspace {
 			if (Date.now() >= deadline) break;
 			await Bun.sleep(PANE_LIVENESS_STEP_MS);
 		}
-		const captured = await this.run(["capture-pane", "-p", "-S", `-${PANE_OUTPUT_TAIL_LINES}`, "-t", pane]);
+		const captured = await this.tmuxPane.capture(pane, { lines: PANE_OUTPUT_TAIL_LINES });
 		const output = captured.stdout.trim();
 		throw new Error(`Could not recover ${view} pane${output ? `: ${output}` : ""}`);
 	}
@@ -584,10 +567,13 @@ export class TmuxWorkspace {
 	private async nameShellPane(key: ShellPaneKey, pane: string): Promise<void> {
 		// tmux has no "rename without activating", and `select-pane -T` activates its target, so the
 		// window's active pane is restored afterwards. Naming a pane must never move user focus.
-		const window = (await this.run(["display-message", "-p", "-t", pane, "#{window_id}"])).stdout.trim();
-		const active = window ? (await this.run(["display-message", "-p", "-t", window, "#{pane_id}"])).stdout.trim() : "";
-		await this.require(["select-pane", "-t", pane, "-T", SHELL_PANES[key].name], "Could not name workspace pane");
-		if (active && active !== pane) await this.run(["select-pane", "-t", active]);
+		const window = (await this.tmuxPane.displayMessage(pane, "#{window_id}")).stdout.trim();
+		const active = window ? (await this.tmuxPane.displayMessage(window, "#{pane_id}")).stdout.trim() : "";
+		// `setPaneTitle` throws, and the restore below deliberately does not run if it does: that is
+		// today's behaviour. Do not "fix" it by restoring focus in a `finally` — a caller that treats
+		// the throw as "focus already restored" is wrong twice.
+		await this.tmuxPane.setPaneTitle(pane, SHELL_PANES[key].name);
+		if (active && active !== pane) await this.tmuxPane.selectPane(active);
 	}
 	private async respawnUi(
 		key: typeof BOARD_PANE | typeof NAV_PANE | typeof TASKS_PANE | typeof DETAILS_PANE | typeof FOOTER_PANE,
@@ -597,38 +583,24 @@ export class TmuxWorkspace {
 		if (!(await this.paneLive(pane))) await this.launchUi(pane, view);
 	}
 	private async launchUi(pane: string, view: TmuxWorkspaceView): Promise<void> {
-		await this.require(
-			["respawn-pane", "-k", "-t", pane, "-c", this.rootPath, workspaceCommand(view, this.sessionName, this.rootPath)],
-			"Could not reopen workspace UI",
-		);
+		await this.tmuxPane.respawnPane(pane, {
+			cwd: this.rootPath,
+			command: workspaceCommand(view, this.sessionName, this.rootPath),
+		});
 	}
 	private async bindReturnKey(workspaceWindow: string, tasksPane: string): Promise<void> {
-		await this.require(
-			[
-				"bind-key",
-				"-T",
-				this.table,
-				"C-q",
-				"if-shell",
-				"-F",
-				`#{==:#{window_id},${workspaceWindow}}`,
-				`if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z; select-pane -t ${tasksPane}' 'select-pane -t ${tasksPane}'`,
-				"",
-			],
-			"Could not bind workspace return key",
-		);
+		// The `-Z` inside the embedded if-shell stays a bare atomic toggle (§2.3).
+		await this.tmuxKeys.bindReturnKey({
+			table: this.table,
+			workspaceWindow,
+			tasksPane,
+		});
 	}
 	private async selectWindow(window: string): Promise<void> {
-		await this.require(["select-window", "-t", window], "Could not select workspace window");
+		await this.tmuxWindow.selectWindow(window, "Could not select workspace window");
 	}
 	private async zoomed(): Promise<boolean> {
-		const result = await this.run([
-			"display-message",
-			"-p",
-			"-t",
-			await this.id(WORKSPACE_WINDOW),
-			"#{window_zoomed_flag}",
-		]);
+		const result = await this.tmuxPane.displayMessage(await this.id(WORKSPACE_WINDOW), "#{window_zoomed_flag}");
 		return result.exitCode === 0 && result.stdout.trim() === "1";
 	}
 	private async findLivePreviewPane(taskId: string): Promise<string | undefined> {
@@ -645,7 +617,9 @@ export class TmuxWorkspace {
 	> {
 		return (
 			await findTmuxPanesByTaskAndRole({
-				cmd: (command, args) => this.listPanes(command, args),
+				// `tmux/pane.ts` owns the `list-panes -a …` argv outright, so nothing is built here
+				// and nothing is parsed back out; `-a` comes from that layer, as it always has.
+				listPanes: (paneOptions) => this.tmuxPane.listPanes(paneOptions),
 				rootPath: this.rootPath,
 				taskId,
 				role: "live-preview",
@@ -653,27 +627,18 @@ export class TmuxWorkspace {
 			})
 		).flatMap((pane) => (pane.windowId ? [{ paneId: pane.paneId, taskId: pane.taskId, windowId: pane.windowId }] : []));
 	}
-	private async listPanes(command: string, args: readonly string[]): Promise<readonly string[]> {
-		const listed = await this.run([command, ...args]);
-		if (listed.exitCode !== 0) {
-			if (/no server running/i.test(listed.stderr)) return [];
-			throw this.error("Could not inspect live preview panes", listed);
-		}
-		return listed.stdout ? listed.stdout.split("\n") : [];
-	}
 	private async paneExists(pane: string): Promise<boolean> {
-		const result = await this.run(["display-message", "-p", "-t", pane, "#{pane_id}"]);
+		const result = await this.tmuxPane.displayMessage(pane, "#{pane_id}");
 		return result.exitCode === 0 && result.stdout.trim() === pane;
 	}
 	private async paneLive(pane: string): Promise<boolean> {
-		const result = await this.run(["display-message", "-p", "-t", pane, "#{pane_id} #{pane_dead}"]);
+		const result = await this.tmuxPane.displayMessage(pane, "#{pane_id} #{pane_dead}");
 		if (result.exitCode !== 0) return false;
 		const [actualPaneId, paneDead] = result.stdout.trim().split(/\s+/);
 		return actualPaneId === pane && paneDead !== "1";
 	}
 	private async prefix(): Promise<string> {
-		const result = await this.run(["show-options", "-gv", "prefix"]);
-		return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : "C-b";
+		return (await this.tmuxOptions.showGlobalOption("prefix")) ?? DEFAULT_PREFIX;
 	}
 	private async ready(): Promise<boolean> {
 		if ((await this.option(READY)) !== "1" || !(await this.owned())) return false;
@@ -681,11 +646,8 @@ export class TmuxWorkspace {
 		return !!workspaceWindow && (await this.windowInSession(workspaceWindow));
 	}
 	private async windowInSession(window: string): Promise<boolean> {
-		const windows = await this.command(
-			["list-windows", "-t", this.sessionName, "-F", "#{window_id}"],
-			"Could not inspect Workspace window",
-		);
-		return windows.stdout.split("\n").some((candidate) => candidate.trim() === window);
+		const windows = await this.tmuxWindow.listWindows(this.sessionName, "Could not inspect Workspace window");
+		return windows.some((candidate) => candidate.trim() === window);
 	}
 	private async owned(): Promise<boolean> {
 		return (await this.option(OWNER)) === this.rootPath;
@@ -696,8 +658,7 @@ export class TmuxWorkspace {
 		return value;
 	}
 	private async option(key: string): Promise<string | undefined> {
-		const result = await this.run(["show-options", "-qv", "-t", this.sessionName, key]);
-		return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
+		return await this.tmuxOptions.showOption(key, this.sessionName);
 	}
 	private async workspaceStateListeners(): Promise<string[]> {
 		const value = await this.option(VIEW_STATE_LISTENERS);
@@ -708,10 +669,10 @@ export class TmuxWorkspace {
 		}
 	}
 	private async set(key: string, value: string): Promise<void> {
-		await this.require(["set-option", "-t", this.sessionName, key, value], "Could not update tmux workspace state");
+		await this.tmuxOptions.setOption(key, value, this.sessionName);
 	}
 	private async unset(key: string): Promise<void> {
-		await this.require(["set-option", "-qu", "-t", this.sessionName, key], "Could not update tmux workspace state");
+		await this.tmuxOptions.unsetOption(key, this.sessionName);
 	}
 	private async resizeRegion(paneKey: string, heightKey: string, height: number, message: string): Promise<void> {
 		if (!Number.isFinite(height) || height <= 0)
@@ -719,11 +680,11 @@ export class TmuxWorkspace {
 		const rows = Math.max(1, Math.floor(height));
 		const pane = await this.id(paneKey);
 		if ((await this.option(heightKey)) === String(rows)) {
-			const current = await this.run(["display-message", "-p", "-t", pane, "#{pane_height}"]);
+			const current = await this.tmuxPane.displayMessage(pane, "#{pane_height}");
 			const currentRows = Number(current.stdout.trim());
 			if (Number.isFinite(currentRows) && currentRows > 0 && currentRows === rows) return;
 		}
-		await this.require(["resize-pane", "-t", pane, "-y", String(rows)], message);
+		await this.tmuxPane.resizePaneHeight(pane, rows, message);
 		await this.set(heightKey, String(rows));
 	}
 	/** Serializes shared state writes across panes with a lock that expires when its holder dies. */
@@ -770,17 +731,6 @@ export class TmuxWorkspace {
 		if (!(error instanceof TmuxCommandError)) return undefined;
 		return { exitCode: error.exitCode, stdout: outputText(error.stdout), stderr: outputText(error.stderr) };
 	}
-	private async command(args: readonly string[], message: string) {
-		const result = await this.run(args);
-		if (result.exitCode !== 0) throw this.error(message, result);
-		return result;
-	}
-	private async require(args: readonly string[], message: string, options?: TmuxCommandOptions): Promise<void> {
-		if (args[0] === "select-pane" || args[0] === "send-keys" || args[0] === "select-window" || args[0] === "set-option")
-			this.diag(`require ${JSON.stringify(args)}`);
-		const result = await this.run(args, options);
-		if (result.exitCode !== 0) throw this.error(message, result);
-	}
 	private error(message: string, result: { stderr: string }): Error {
 		return new Error(`${message}: ${result.stderr.trim() || "tmux command failed"}`);
 	}
@@ -789,6 +739,14 @@ export class TmuxWorkspace {
 	readonly sessionName: string;
 	private readonly tmux: TmuxWorkspaceServer;
 	private readonly table: string;
+	private readonly tmuxExec: TmuxExec;
+	private readonly tmuxServer: TmuxServerSession;
+	private readonly tmuxWindow: TmuxWindow;
+	private readonly tmuxPane: TmuxPane;
+	private readonly tmuxOptions: TmuxOptions;
+	private readonly tmuxKeys: TmuxSignalsKeys;
+	private readonly tmuxChannels: TmuxChannels;
+	private readonly tmuxClient: TmuxClient;
 	private readonly bootstrapLock = new LockOwner();
 	private readonly stateLock = new LockOwner();
 	private static readonly bootstraps = new Map<string, Promise<void>>();
@@ -799,6 +757,17 @@ export class TmuxWorkspace {
 		this.sessionName = `backlog-workspace-${hash}`;
 		this.table = `backlog-workspace-${hash}`;
 		this.tmux = tmux;
+		// `diag` is injected, not dropped: without it the `/tmp/focus.log` trace that diagnosed the
+		// focus race silently disappears, because `exec.require` calls it for the four traced
+		// subcommands (`select-pane`, `send-keys`, `select-window`, `set-option`) before running.
+		this.tmuxExec = createTmuxExec({ runner: tmux, diag: (line) => this.diag(line) });
+		this.tmuxServer = createTmuxServerSession({ exec: this.tmuxExec, graph: tmux });
+		this.tmuxWindow = createTmuxWindow(this.tmuxExec);
+		this.tmuxPane = createTmuxPane(this.tmuxExec);
+		this.tmuxOptions = createTmuxOptions(this.tmuxExec);
+		this.tmuxKeys = createTmuxSignalsKeys(this.tmuxExec);
+		this.tmuxChannels = createTmuxChannels(this.tmuxExec);
+		this.tmuxClient = createTmuxClient(this.tmuxExec);
 	}
 
 	async enter(view: TmuxWorkspaceView, taskId?: string): Promise<void> {
@@ -817,27 +786,25 @@ export class TmuxWorkspace {
 	 * outcomes must leave the session and its panes exactly as they were.
 	 */
 	private async attachClient(): Promise<void> {
-		const command = process.env.TMUX ? "switch-client" : "attach-session";
-		const child = Bun.spawn(["tmux", command, "-t", this.sessionName], {
-			stdin: "inherit",
-			stdout: "inherit",
-			stderr: "inherit",
-		});
-		if ((await child.exited) !== 0) throw new Error(`Could not enter tmux workspace: tmux ${command} failed`);
+		// Inside tmux the current client is switched, and `allowAttachFallback: false` is deliberate:
+		// this path tries exactly ONE command and fails if it does not take, unlike
+		// `attachWorkspaceClient` above.
+		if (process.env.TMUX) await this.tmuxClient.switchClientAttach(this.sessionName, { allowAttachFallback: false });
+		else await this.tmuxClient.attachSession(this.sessionName);
 	}
 	async showBoard(): Promise<void> {
 		await this.ensureHost();
 		await this.selectWindow(await this.id(BOARD_WINDOW));
 		await this.liveUiPane(BOARD_PANE, "board");
-		await this.require(["select-pane", "-t", await this.id(BOARD_PANE)], "Could not focus workspace board");
+		await this.tmuxPane.requireSelectPane(await this.id(BOARD_PANE), "Could not focus workspace board");
 	}
 	async showWorkspace(taskId?: string): Promise<void> {
 		await this.ensureHost();
 		await this.selectWindow(await this.id(WORKSPACE_WINDOW));
 		// Focus is claimed before the remaining regions are revalidated so a concurrent key press
 		// that arrives mid-handoff is not undone by the work that follows it.
-		await this.require(
-			["select-pane", "-t", await this.liveUiPane(TASKS_PANE, "workspace-tasks")],
+		await this.tmuxPane.requireSelectPane(
+			await this.liveUiPane(TASKS_PANE, "workspace-tasks"),
 			"Could not focus workspace task list",
 		);
 		await this.liveUiPane(FOOTER_PANE, "workspace-footer");
@@ -861,19 +828,17 @@ export class TmuxWorkspace {
 		const taskId = await this.option(ACTIVE_TASK);
 		const active = taskId ? await this.findLivePreviewPane(taskId) : undefined;
 		if (!active) return;
-		if (!zoom && (await this.zoomed()))
-			await this.require(["resize-pane", "-Z", "-t", active], "Could not unzoom agent pane");
-		await this.require(["select-pane", "-t", active], "Could not focus agent pane");
-		if (zoom && !(await this.zoomed()))
-			await this.require(["resize-pane", "-Z", "-t", active], "Could not zoom agent pane");
+		if (!zoom && (await this.zoomed())) await this.tmuxPane.toggleZoom(active, "Could not unzoom agent pane");
+		await this.tmuxPane.requireSelectPane(active, "Could not focus agent pane");
+		if (zoom && !(await this.zoomed())) await this.tmuxPane.toggleZoom(active, "Could not zoom agent pane");
 	}
 	readonly focusSearch = async (): Promise<void> => {
 		await this.ensureHost();
 		const pane = await this.liveUiPane(FOOTER_PANE, "workspace-footer");
 		this.diag(`focusSearch pane=${pane}`);
-		const sel = await this.run(["select-pane", "-t", pane]);
+		const sel = await this.tmuxPane.selectPane(pane);
 		this.diag(`select-pane rc=${sel.exitCode}`);
-		const send = await this.run(["send-keys", "-t", pane, "/"]);
+		const send = await this.tmuxKeys.sendKeys(pane, "/");
 		this.diag(`send-keys rc=${send.exitCode}`);
 	};
 	diag(line: string): void {
@@ -886,11 +851,11 @@ export class TmuxWorkspace {
 	}
 	async focusTasks(): Promise<void> {
 		await this.ensureHost();
-		await this.require(["select-pane", "-t", await this.id(TASKS_PANE)], "Could not focus workspace task list");
+		await this.tmuxPane.requireSelectPane(await this.id(TASKS_PANE), "Could not focus workspace task list");
 	}
 	async focusDetails(): Promise<void> {
 		await this.ensureHost();
-		await this.require(["select-pane", "-t", await this.id(DETAILS_PANE)], "Could not focus workspace details");
+		await this.tmuxPane.requireSelectPane(await this.id(DETAILS_PANE), "Could not focus workspace details");
 	}
 	async setDetailsVisible(visible: boolean): Promise<void> {
 		await this.ensureHost();
@@ -898,14 +863,14 @@ export class TmuxWorkspace {
 		const activeTask = await this.option(ACTIVE_TASK);
 		const display =
 			(activeTask ? await this.findLivePreviewPane(activeTask) : undefined) ?? (await this.id(DISPLAY_PANE));
-		const measured = await this.run(["display-message", "-p", "-t", details, "#{pane_height}"]);
-		const displayMeasured = await this.run(["display-message", "-p", "-t", display, "#{pane_height}"]);
+		const measured = await this.tmuxPane.displayMessage(details, "#{pane_height}");
+		const displayMeasured = await this.tmuxPane.displayMessage(display, "#{pane_height}");
 		const detailsHeight = Number(measured.stdout.trim());
 		const displayHeight = Number(displayMeasured.stdout.trim());
 		if (!Number.isFinite(detailsHeight) || !Number.isFinite(displayHeight)) return;
 		const total = Math.max(2, detailsHeight + displayHeight);
 		const rows = visible ? Math.max(3, Math.floor(total * 0.44)) : 1;
-		await this.require(["resize-pane", "-t", details, "-y", String(rows)], "Could not resize workspace details");
+		await this.tmuxPane.resizePaneHeight(details, rows, "Could not resize workspace details");
 	}
 	async resizeNavigation(height: number): Promise<void> {
 		await this.ensureHost();
@@ -922,15 +887,10 @@ export class TmuxWorkspace {
 		if (!request) return undefined;
 		// Task IDs are CLI identifiers; reject control characters before embedding in tmux format syntax.
 		if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(request)) return undefined;
-		await this.require(
-			[
-				"if-shell",
-				"-t",
-				this.sessionName,
-				"-F",
-				`#{==:#{${MAILBOX}},${request}}`,
-				`set-option -t ${this.sessionName} ${MAILBOX} ''`,
-			],
+		await this.tmuxServer.ifShell(
+			this.sessionName,
+			`#{==:#{${MAILBOX}},${request}}`,
+			`set-option -t ${this.sessionName} ${MAILBOX} ''`,
 			"Could not consume workspace task request",
 		);
 		return request;
@@ -959,7 +919,7 @@ export class TmuxWorkspace {
 			// tmux has no command chaining and `wait-for` takes a single channel, so each listener
 			// needs its own invocation; one argv holding `; wait-for ...` fails with "too many arguments".
 			for (const channel of listeners)
-				await this.require(["wait-for", "-S", channel], "Could not notify tmux workspace state listeners");
+				await this.tmuxChannels.signalChannel(channel, "Could not notify tmux workspace state listeners");
 		});
 	}
 	async subscribeWorkspaceState<T extends object>(
@@ -999,7 +959,7 @@ export class TmuxWorkspace {
 		}
 		const wait = (async () => {
 			while (!closed) {
-				await this.require(["wait-for", channel], "Could not wait for tmux workspace state");
+				await this.tmuxChannels.waitFor(channel, "Could not wait for tmux workspace state");
 				if (!closed) {
 					const value = await this.option(VIEW_STATE);
 					let state = {} as T;
@@ -1015,7 +975,7 @@ export class TmuxWorkspace {
 			if (closed) return;
 			closed = true;
 			await remove();
-			await this.require(["wait-for", "-S", channel], "Could not stop tmux workspace state listener");
+			await this.tmuxChannels.signalChannel(channel, "Could not stop tmux workspace state listener");
 			await wait.catch(() => {});
 		};
 	}
@@ -1026,8 +986,8 @@ export class TmuxWorkspace {
 	 * that merely disappears must leave no trace, and so does nothing beyond detaching.
 	 */
 	async detach(): Promise<void> {
-		if (process.env.TMUX) await this.run(["switch-client", "-l"]);
-		else await this.run(["detach-client", "-t", this.sessionName]);
+		if (process.env.TMUX) await this.tmuxClient.switchClientLast();
+		else await this.tmuxClient.detachClient(this.sessionName);
 	}
 
 	/**
@@ -1040,7 +1000,7 @@ export class TmuxWorkspace {
 	 */
 	async quitWorkspace(): Promise<void> {
 		if (!(await this.owned())) return;
-		await this.killPaneProcessTrees();
+		await this.tmuxKeys.killPaneProcessTrees(this.sessionName);
 		await this.detach();
 	}
 
@@ -1049,46 +1009,10 @@ export class TmuxWorkspace {
 		return watchWorkspaceTermination(() => this.quitWorkspace(), exit, source);
 	}
 
-	private async killPaneProcessTrees(): Promise<void> {
-		const listed = await this.run(["list-panes", "-s", "-t", this.sessionName, "-F", "#{pane_pid}"]);
-		if (listed.exitCode !== 0) return;
-		const pids = listed.stdout
-			.trim()
-			.split("\n")
-			.map((line) => Number(line.trim()))
-			.filter((pid) => Number.isInteger(pid) && pid > 1 && pid !== process.pid);
-		for (const pid of pids) await this.killProcessTree(pid);
-	}
-
-	/** Children first, then the pane process itself, so a pipe-pane chain cannot outlive the session. */
-	private async killProcessTree(pid: number): Promise<void> {
-		const tree = (await this.descendants(pid)).reverse();
-		for (const target of tree) signalProcess(target, "SIGTERM");
-		await Bun.sleep(PANE_TREE_TERM_GRACE_MS);
-		for (const target of tree) signalProcess(target, "SIGKILL");
-	}
-	private async descendants(pid: number): Promise<number[]> {
-		const children = new Map<number, number[]>();
-		for (const line of await this.processTable()) {
-			const [child, parent] = line.split(/\s+/).map(Number);
-			if (child === undefined || parent === undefined) continue;
-			if (!Number.isInteger(child) || !Number.isInteger(parent)) continue;
-			children.set(parent, [...(children.get(parent) ?? []), child]);
-		}
-		const tree = [pid];
-		for (const current of [...tree])
-			for (const child of children.get(current) ?? []) if (!tree.includes(child)) tree.push(child);
-		return tree;
-	}
-	private async processTable(): Promise<string[]> {
-		const child = Bun.spawn(["ps", "-A", "-o", "pid=,ppid="], { stdout: "pipe", stderr: "ignore" });
-		if ((await child.exited) !== 0) return [];
-		return (await new Response(child.stdout).text()).split("\n").filter((line) => line.trim());
-	}
 	private async killSessionIfPresent(): Promise<void> {
-		const killed = await this.run(["kill-session", "-t", this.sessionName]);
-		if (killed.exitCode === 0 || SESSION_ABSENT.test(killed.stderr.toLowerCase())) return;
-		throw this.error("Could not quit tmux workspace", killed);
+		// The ONLY session-destruction path in this file, and the only production caller of the
+		// layer's `killSessionIfPresent`. `killSession` has no caller here and must never gain one.
+		await this.tmuxServer.killSessionIfPresent(this.sessionName, "Could not quit tmux workspace");
 	}
 
 	private async ensureHost(): Promise<void> {

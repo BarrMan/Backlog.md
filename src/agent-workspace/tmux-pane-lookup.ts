@@ -8,10 +8,16 @@ export type PaneLookupRow = {
 	title: string;
 };
 
-type TmuxCommand = (command: string, args: readonly string[]) => Promise<readonly string[]>;
+/**
+ * The one tmux interaction this module has. Pane-specific on purpose: the caller owns the argv
+ * (`-a` included), so there is no `command` parameter to validate and nothing to re-parse. `filter`
+ * and `format` are both required — a lookup without either would not be a lookup, and an optional
+ * one would silently list every pane on the server.
+ */
+type ListPanes = (options: { filter: string; format: string }) => Promise<readonly string[]>;
 
 type FindPaneOptions = {
-	cmd: TmuxCommand;
+	listPanes: ListPanes;
 	rootPath: string;
 	role: string;
 	taskId?: string;
@@ -34,7 +40,7 @@ export function paneTitle(taskId: string, role: string): string {
 }
 
 export async function findTmuxPanesByTaskAndRole(options: FindPaneOptions): Promise<PaneLookupRow[]> {
-	const listed = await options.cmd("list-panes", ["-a", "-f", paneFilter(options), "-F", PANE_LOOKUP_FORMAT]);
+	const listed = await options.listPanes({ filter: paneFilter(options), format: PANE_LOOKUP_FORMAT });
 	return listed
 		.flatMap((line) => line.split("\n"))
 		.map(parsePaneLookupRow)

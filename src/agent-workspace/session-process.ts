@@ -293,7 +293,10 @@ export class SessionProcess {
 			for (const role of roles) {
 				matches = matches.concat(
 					await findTmuxPanesByTaskAndRole({
-						cmd: (command, args) => this.server.cmd(command, args),
+						// libtmux has no pane layer to hand this to, so the argv is built here. It is the
+						// same `list-panes -a -f <filter> -F <format>` the other caller reaches via
+						// `tmux/pane.ts`; `-a` is explicit because nothing downstream defaults it in.
+						listPanes: ({ filter, format }) => this.server.cmd("list-panes", ["-a", "-f", filter, "-F", format]),
 						rootPath: this.rootDir,
 						taskId: session.taskId,
 						role,
