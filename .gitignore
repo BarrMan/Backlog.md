@@ -71,3 +71,6 @@ test-benchmark-report.json
 
 # TUI screenshot captures
 .tui-screenshots
+
+# Serena agent-tool local state
+.serena/
