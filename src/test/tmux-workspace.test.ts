@@ -463,23 +463,14 @@ describe("TmuxWorkspace", () => {
 		expect(runner.calls).not.toContainEqual(["respawn-pane", "-k", "-t", "%3"]);
 	});
 
-	it("closes the workspace session once the last client leaves", async () => {
+	it("installs no hook that would tear the workspace down when its last client leaves", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
-		runner.calls.length = 0;
-		await workspace.closeWorkspace();
-		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
-	});
-
-	it("keeps the workspace session alive while another client is attached", async () => {
-		const runner = new RecordingTmuxServer();
-		const workspace = new TmuxWorkspace(process.cwd(), runner);
-		await workspace.showWorkspace();
-		runner.clients = "/dev/ttys002\n";
-		runner.calls.length = 0;
-		await workspace.closeWorkspace();
-		expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
+		// A client can disappear without anyone asking it to — terminal closed, client dropped,
+		// host killed. tmux must not treat that as permission to destroy the workspace.
+		const hook = runner.calls.filter((args) => args[0] === "set-hook" && args[3] === "client-detached");
+		expect(hook).toEqual([]);
 	});
 
 	it("collects an abandoned workspace session before rebuilding it", async () => {
@@ -522,24 +513,6 @@ describe("TmuxWorkspace", () => {
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
 		expect(runner.options.get("@backlog_workspace_owner_pid")).toBe(String(process.pid));
-	});
-
-	it("installs a tmux hook that tears the workspace down when its last client leaves", async () => {
-		const runner = new RecordingTmuxServer();
-		const workspace = new TmuxWorkspace(process.cwd(), runner);
-		await workspace.showWorkspace();
-		const hook = runner.calls.filter((args) => args[0] === "set-hook" && args[3] === "client-detached");
-		// The host process is killed whenever the terminal goes away, so cleanup must be owned by
-		// tmux itself; otherwise every interrupted run leaves its UI panes running forever.
-		expect(hook).toEqual([
-			[
-				"set-hook",
-				"-t",
-				workspace.sessionName,
-				"client-detached",
-				`if-shell -F '#{?#{==:#{session_attached},0},1,}' 'kill-session -t ${workspace.sessionName}' ''`,
-			],
-		]);
 	});
 
 	it("never takes a sticky tmux channel lock for shared workspace state", async () => {
@@ -614,7 +587,8 @@ describe("TmuxWorkspace", () => {
 		runner.calls.length = 0;
 		await workspace.updateWorkspaceState((state: { search?: string }) => ({ ...state, search: "latest" }));
 		expect(runner.calls.filter((args) => args[0] === "wait-for" && args[1] === "-S")).toEqual([
-			["wait-for", "-S", expect.any(String), ";", "wait-for", "-S", expect.any(String)],
+			["wait-for", "-S", expect.any(String)],
+			["wait-for", "-S", expect.any(String)],
 		]);
 		await waitUntil(() => first.includes("latest") && second.includes("latest"), "state subscribers");
 		expect(first).toEqual(["", "latest"]);
@@ -680,16 +654,19 @@ describe("TmuxWorkspace", () => {
 		expect(runner.calls.filter((args) => args[0] === "split-window")).toHaveLength(0);
 	});
 
-	it("quits the workspace no matter which pane or how many clients are attached", async () => {
+	it("quits no matter which pane or how many clients are attached, without killing the session", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
 		// Focus on the agent live preview with a second terminal attached: the old focus-and-count
 		// guard made quitting a silent no-op, which is why users could not quit the workspace.
 		runner.clients = "/dev/ttys001|%6\n/dev/ttys002|%6\n";
+		runner.panePids.set("%1", 0x7ffff001);
 		runner.calls.length = 0;
 		await workspace.quitWorkspace();
-		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+		expect(runner.calls).toContainEqual(["list-panes", "-s", "-t", workspace.sessionName, "-F", "#{pane_pid}"]);
+		// The view the user wants back on reopen outlives the quit; only the processes do not.
+		expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
 	});
 
 	it("hands the client back to the previous session when quitting from inside tmux", async () => {
@@ -709,10 +686,12 @@ describe("TmuxWorkspace", () => {
 		const commands = runner.calls.map((args) => args.join(" "));
 		expect(commands).toContain("switch-client -l");
 		expect(commands.some((command) => command.startsWith("detach-client"))).toBe(false);
-		expect(commands).toContain(`kill-session -t ${workspace.sessionName}`);
+		// A detach is not a quit: the session stays so re-attaching restores the same live view.
+		expect(commands).not.toContain(`kill-session -t ${workspace.sessionName}`);
+		expect(commands.some((command) => command.startsWith("kill "))).toBe(false);
 	});
 
-	it("detaches the attached client outside tmux and still tears the session down", async () => {
+	it("detaches the attached client outside tmux and leaves the workspace running", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showBoard();
@@ -727,11 +706,11 @@ describe("TmuxWorkspace", () => {
 				if (nested !== undefined) process.env.TMUX = nested;
 			}
 			expect(runner.calls).toContainEqual(["detach-client", "-t", workspace.sessionName]);
-			expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+			expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
 		}
 	});
 
-	it("kills pane process trees before the session and tolerates an already gone session", async () => {
+	it("kills pane process trees on quit and keeps the session for reattachment", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
@@ -739,9 +718,9 @@ describe("TmuxWorkspace", () => {
 		runner.calls.length = 0;
 		await workspace.quitWorkspace();
 		const pids = runner.calls.findIndex((args) => args[0] === "list-panes" && args.includes("#{pane_pid}"));
-		const killed = runner.calls.findIndex((args) => args[0] === "kill-session");
 		expect(pids).toBeGreaterThanOrEqual(0);
-		expect(killed).toBeGreaterThan(pids);
+		expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
+		// A quit on a session tmux no longer reports is a no-op success, not a failure.
 		runner.missingSession = true;
 		await workspace.quitWorkspace();
 	});
@@ -770,7 +749,7 @@ describe("TmuxWorkspace", () => {
 		expect(runner.calls).toContainEqual(["capture-pane", "-p", "-S", "-20", "-t", "%3"]);
 	});
 
-	it("tears the workspace down on SIGINT and SIGTERM, and stops listening once disposed", async () => {
+	it("stops the workspace processes on SIGINT and SIGTERM, and stops listening once disposed", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
@@ -783,7 +762,9 @@ describe("TmuxWorkspace", () => {
 		signals.fire("SIGINT");
 		await waitUntil(() => exits.length > 0, "workspace teardown on SIGINT");
 		expect(exits).toEqual([0]);
-		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+		expect(runner.calls).toContainEqual(["list-panes", "-s", "-t", workspace.sessionName, "-F", "#{pane_pid}"]);
+		// An interrupt stops what is running; it does not throw away the view to reopen next time.
+		expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
 		// A second signal must not re-enter teardown once the process is on its way out.
 		runner.calls.length = 0;
 		signals.fire("SIGTERM");
@@ -1040,7 +1021,7 @@ const realTmuxWithClient = tmuxPath && expectPath && process.platform !== "win32
 
 describe("TmuxWorkspace real tmux client cleanup", () => {
 	realTmuxWithClient(
-		"tears the workspace session down once its last client goes away",
+		"keeps the workspace session when a client goes away without quitting",
 		async () => {
 			const socket = `backlog-workspace-detach-${crypto.randomUUID().slice(0, 8)}`;
 			const server = isolatedTmuxServer(socket);
@@ -1063,12 +1044,17 @@ describe("TmuxWorkspace real tmux client cleanup", () => {
 				);
 				const client = Bun.spawn([expectPath, "-f", clientScript], { stdout: "ignore", stderr: "ignore" });
 				expect(await client.exited).toBe(0);
-				let tornDown = false;
-				for (let attempt = 0; attempt < 100 && !tornDown; attempt += 1) {
-					tornDown = !(await sessionExists());
-					if (!tornDown) await Bun.sleep(100);
+				// The client leaving is not a quit. Poll for the window the workspace publishes so the
+				// assertion reflects tmux's settled state rather than the moment the client exited.
+				let survived = false;
+				for (let attempt = 0; attempt < 100 && !survived; attempt += 1) {
+					survived = await sessionExists();
+					if (!survived) await Bun.sleep(100);
 				}
-				expect(tornDown).toBe(true);
+				expect(survived).toBe(true);
+				// And the layout the user wants back is still there, panes and all.
+				const panes = await cmdOutput(server, "list-panes", ["-s", "-t", workspace.sessionName]);
+				expect(panes.trim().length).toBeGreaterThan(0);
 			} finally {
 				await server.cmd("kill-server").catch(() => undefined);
 				await removeTmuxSocket(socket);

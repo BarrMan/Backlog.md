@@ -10,6 +10,7 @@ import {
 import { Core } from "../core/backlog.ts";
 import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
+import { killTmuxServer, uniqueTmuxSocket } from "./tmux-test-server.ts";
 
 const expectPath = Bun.which("expect");
 const tmuxPath = Bun.which("tmux");
@@ -27,7 +28,7 @@ describe("agent workspace PTY", () => {
 		async () => {
 			const directory = createUniqueTestDir("agent-workspace-pty");
 			const bin = join(directory, "bin");
-			const socket = `backlog-workspace-pty-${crypto.randomUUID().slice(0, 8)}`;
+			const socket = uniqueTmuxSocket("workspace-pty");
 			const script = `${directory}/workspace.expect`;
 			const transcript = `${directory}/workspace.log`;
 			const configHome = join(directory, "user-config");
@@ -116,8 +117,10 @@ expect {
 					throw new Error(`Interactive workspace failed with ${exitCode}.\n${stdout}\n${stderr}\n${terminal}`);
 				expect(await loadAgentConfiguration(core, "card", task.id)).toEqual(configuration);
 			} finally {
-				const tmux = Bun.spawn([join(bin, "tmux"), "kill-server"], { cwd: directory, env: environment });
-				await tmux.exited;
+				// Address the socket directly rather than through the PATH stub: a stub that was
+				// never written would silently turn this into a kill-server on the default socket,
+				// which destroys every unrelated live tmux session on the machine.
+				await killTmuxServer(socket);
 				await safeCleanup(directory);
 			}
 		},

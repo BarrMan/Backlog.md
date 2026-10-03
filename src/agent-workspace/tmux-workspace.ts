@@ -205,7 +205,10 @@ export function isTmuxWorkspace(): boolean {
 	return Boolean(process.env.BACKLOG_TMUX_WORKSPACE?.trim());
 }
 
-/** A root-owned native tmux host. It never kills its session or any agent pane. */
+/**
+ * A root-owned native tmux host. The session, its windows, and its panes outlive every client:
+ * only a deliberate quit stops the processes running inside them.
+ */
 /**
  * Hand the workspace to the user from the host process. Inside tmux the current client is switched so
  * the user keeps their window layout, but a session with no client (or a client tmux refuses to switch)
@@ -250,19 +253,6 @@ export class TmuxWorkspace {
 		}
 	}
 
-	/** Let tmux tear the workspace down when its last client leaves, even if this process is killed. */
-	private async installDetachHook(): Promise<void> {
-		await this.require(
-			[
-				"set-hook",
-				"-t",
-				this.sessionName,
-				"client-detached",
-				`if-shell -F '#{?#{==:#{session_attached},0},1,}' 'kill-session -t ${this.sessionName}' ''`,
-			],
-			"Could not install tmux workspace detach hook",
-		);
-	}
 	private async ensureHostUnlocked(attempts = 0): Promise<void> {
 		if (await this.ready()) return;
 		if (await this.tmux.hasSession(this.sessionName)) {
@@ -592,7 +582,12 @@ export class TmuxWorkspace {
 		return pane.id;
 	}
 	private async nameShellPane(key: ShellPaneKey, pane: string): Promise<void> {
+		// tmux has no "rename without activating", and `select-pane -T` activates its target, so the
+		// window's active pane is restored afterwards. Naming a pane must never move user focus.
+		const window = (await this.run(["display-message", "-p", "-t", pane, "#{window_id}"])).stdout.trim();
+		const active = window ? (await this.run(["display-message", "-p", "-t", window, "#{pane_id}"])).stdout.trim() : "";
 		await this.require(["select-pane", "-t", pane, "-T", SHELL_PANES[key].name], "Could not name workspace pane");
+		if (active && active !== pane) await this.run(["select-pane", "-t", active]);
 	}
 	private async respawnUi(
 		key: typeof BOARD_PANE | typeof NAV_PANE | typeof TASKS_PANE | typeof DETAILS_PANE | typeof FOOTER_PANE,
@@ -814,40 +809,40 @@ export class TmuxWorkspace {
 		else await this.showWorkspace();
 		await this.attachClient();
 	}
+	/**
+	 * Enter the workspace and stay attached until the client goes away.
+	 *
+	 * The client leaving is not a quit: the terminal can close, tmux can drop the client, or this
+	 * process can be killed at any moment. Nothing runs here afterwards, because every one of those
+	 * outcomes must leave the session and its panes exactly as they were.
+	 */
 	private async attachClient(): Promise<void> {
-		try {
-			const command = process.env.TMUX ? "switch-client" : "attach-session";
-			const child = Bun.spawn(["tmux", command, "-t", this.sessionName], {
-				stdin: "inherit",
-				stdout: "inherit",
-				stderr: "inherit",
-			});
-			if ((await child.exited) !== 0) throw new Error(`Could not enter tmux workspace: tmux ${command} failed`);
-		} finally {
-			await this.closeWorkspace();
-		}
-	}
-
-	/** Tear the workspace down once its last client leaves, so no UI process outlives the session. */
-	async closeWorkspace(): Promise<void> {
-		if (!(await this.owned())) return;
-		const clients = await this.run(["list-clients", "-t", this.sessionName, "-F", "#{client_tty}"]);
-		if (clients.exitCode !== 0 || clients.stdout.trim()) return;
-		await this.require(["kill-session", "-t", this.sessionName], "Could not close tmux workspace");
+		const command = process.env.TMUX ? "switch-client" : "attach-session";
+		const child = Bun.spawn(["tmux", command, "-t", this.sessionName], {
+			stdin: "inherit",
+			stdout: "inherit",
+			stderr: "inherit",
+		});
+		if ((await child.exited) !== 0) throw new Error(`Could not enter tmux workspace: tmux ${command} failed`);
 	}
 	async showBoard(): Promise<void> {
 		await this.ensureHost();
 		await this.selectWindow(await this.id(BOARD_WINDOW));
 		await this.liveUiPane(BOARD_PANE, "board");
+		await this.require(["select-pane", "-t", await this.id(BOARD_PANE)], "Could not focus workspace board");
 	}
 	async showWorkspace(taskId?: string): Promise<void> {
 		await this.ensureHost();
 		await this.selectWindow(await this.id(WORKSPACE_WINDOW));
+		// Focus is claimed before the remaining regions are revalidated so a concurrent key press
+		// that arrives mid-handoff is not undone by the work that follows it.
+		await this.require(
+			["select-pane", "-t", await this.liveUiPane(TASKS_PANE, "workspace-tasks")],
+			"Could not focus workspace task list",
+		);
 		await this.liveUiPane(FOOTER_PANE, "workspace-footer");
 		await this.liveUiPane(NAV_PANE, "workspace-nav");
-		await this.liveUiPane(TASKS_PANE, "workspace-tasks");
 		await this.liveUiPane(DETAILS_PANE, "workspace-details");
-		await this.require(["select-pane", "-t", await this.id(TASKS_PANE)], "Could not focus workspace task list");
 		if (taskId) await this.set(MAILBOX, taskId);
 	}
 
@@ -1025,20 +1020,28 @@ export class TmuxWorkspace {
 		};
 	}
 
+	/**
+	 * Step away from the workspace without stopping it. The session keeps running, so re-entering
+	 * restores the same view with the agent still live. This is also the incidental path: a client
+	 * that merely disappears must leave no trace, and so does nothing beyond detaching.
+	 */
 	async detach(): Promise<void> {
 		if (process.env.TMUX) await this.run(["switch-client", "-l"]);
 		else await this.run(["detach-client", "-t", this.sessionName]);
-		await this.quitWorkspace();
 	}
 
 	/**
-	 * Unconditional teardown: kill every pane process tree, then the session. Children of a pane
-	 * can survive the session dying, so the trees go first; an already absent session is success.
+	 * Deliberate close: no backlog or agent process may outlive it.
+	 *
+	 * Every pane process tree is killed, but the session, its windows, and its layout are kept —
+	 * `remain-on-exit` holds the panes in place — so the next `backlog workspace` reopens the same
+	 * view. The client is detached rather than killed for exactly that reason: killing the session
+	 * is what destroyed the view.
 	 */
 	async quitWorkspace(): Promise<void> {
 		if (!(await this.owned())) return;
 		await this.killPaneProcessTrees();
-		await this.killSessionIfPresent();
+		await this.detach();
 	}
 
 	/** Own the host's SIGINT/SIGTERM so an interrupt tears the workspace down instead of orphaning it. */
@@ -1098,7 +1101,6 @@ export class TmuxWorkspace {
 		} finally {
 			TmuxWorkspace.bootstraps.delete(this.sessionName);
 		}
-		await this.installDetachHook();
 		// Publish the live host pid so a later run can tell "no client attached" from "the
 		// process that built this workspace is provably gone" and collect the corpse.
 		await this.set(OWNER_PID, String(process.pid));

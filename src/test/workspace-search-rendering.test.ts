@@ -7,6 +7,7 @@ import { buildWorkspaceEntries } from "../ui/workspace/model.ts";
 import { workspaceRows } from "../ui/workspace/reconciliation.ts";
 import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
+import { killTmuxServer, uniqueTmuxSocket } from "./tmux-test-server.ts";
 
 const expectPath = Bun.which("expect");
 const tmuxPath = Bun.which("tmux");
@@ -46,7 +47,7 @@ describe("workspace footer search rendering", () => {
 		async () => {
 			const directory = createUniqueTestDir("workspace-search-rendering");
 			const bin = join(directory, "bin");
-			const socket = `backlog-workspace-search-${crypto.randomUUID().slice(0, 8)}`;
+			const socket = uniqueTmuxSocket("workspace-search-rendering");
 			const stepPath = join(directory, "client-step");
 			const acknowledgementPath = join(directory, "client-acknowledgement");
 			const environment = {
@@ -380,7 +381,7 @@ while {1} {
 					client.kill();
 					await Promise.race([client.exited, timeoutSignal(1_000, () => {})]).catch(() => undefined);
 				}
-				await tmux("kill-server");
+				await killTmuxServer(socket);
 				await safeCleanup(directory);
 			}
 		},

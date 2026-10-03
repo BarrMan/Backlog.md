@@ -5,6 +5,7 @@ import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
 import { Core } from "../core/backlog.ts";
 import { getTestCliCommand } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
+import { killTmuxServer, uniqueTmuxSocket } from "./tmux-test-server.ts";
 
 const tmuxPath = Bun.which("tmux");
 const expectPath = Bun.which("expect");
@@ -15,7 +16,7 @@ interactive(
 	async () => {
 		const root = createUniqueTestDir("workspace-session-selection");
 		const bin = join(root, "bin");
-		const socket = `backlog-session-picker-${crypto.randomUUID().slice(0, 8)}`;
+		const socket = uniqueTmuxSocket("session-picker");
 		const env = {
 			...process.env,
 			PATH: `${bin}:${process.env.PATH}`,
@@ -140,7 +141,7 @@ interactive(
 			expect(await client.exited).toBe(0);
 		} finally {
 			client?.kill();
-			await tmux("kill-server").catch(() => {});
+			await killTmuxServer(socket);
 			await safeCleanup(root);
 		}
 	},

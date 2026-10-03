@@ -368,7 +368,7 @@ while {1} {
 						"[Enter] Start/Show",
 						"[N] New",
 						"[Shift+B] Board",
-						"[Q] Close",
+						"[Q] Back",
 						...(search ? [`Search: ${search}`] : []),
 					];
 					const availableWidth = width - 1;
@@ -391,7 +391,7 @@ while {1} {
 					expect(footerLines).toEqual(expectedLines);
 					expect(footerLines.join("\n")).toContain("[N] New");
 					expect(footerLines.join("\n")).toContain("[Shift+B] Board");
-					expect(footerLines.join("\n")).toContain("[Q] Close");
+					expect(footerLines.join("\n")).toContain("[Q] Back");
 					for (const line of footerLines) expect(line.length).toBeLessThanOrEqual(width - 1);
 					expect(await requireTmux("display-message", "-p", "-t", footerId, "#{pane_width}")).toBe(String(width));
 				};
@@ -415,7 +415,8 @@ while {1} {
 						await waitFor(
 							async () => (await selectedPane(`${host}:Workspace`)) === pane && (await workspaceFooterEditing()),
 							"Workspace footer input focus",
-							() => capturePane(pane),
+							async () =>
+								`selected=${await selectedPane(`${host}:Workspace`)} expected=${pane} editing=${await workspaceFooterEditing()}`,
 						);
 					await requestClientKey("footer-character");
 					await waitFor(

@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmod, mkdir } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
+import { BunRunner } from "../agent-workspace/session-process.ts";
 import { AgentSessionService, type ProcessRunner, type TmuxServer } from "../agent-workspace/sessions.ts";
 import { Core } from "../core/backlog.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
+import { isolatedTmuxServer, killTmuxServer, uniqueTmuxSocket } from "./tmux-test-server.ts";
 
 const itRealTmux = process.env.RUN_INTERACTIVE_TUI_TESTS === "1" && Bun.which("tmux") ? it : it.skip;
 
@@ -492,10 +494,16 @@ describe("AgentSessionService", () => {
 				fake: { command: `${agent} {prompt}`, env: {}, prepare: "", worktree: false, bootstrap: "prompt" },
 			},
 		});
-		const service = new AgentSessionService(core);
+		// `runner` is supplied so the service never spawns its detached handoff worker: that worker
+		// is a fresh CLI process that builds its own `new Server()`, and libtmux emits no `-L` for
+		// it, so it creates and respawns the agent session on the developer's default tmux socket.
+		// `tmuxServer` keeps this process on an isolated socket for the same reason.
+		const socket = uniqueTmuxSocket("agent-sessions");
+		const service = new AgentSessionService(core, { runner: new BunRunner(), tmuxServer: isolatedTmuxServer(socket) });
 		const first = await service.start("task-1");
 		try {
 			await service.requestHandoff("task-1");
+			await service.continueHandoff("task-1");
 			await waitUntil(async () => {
 				const state = await service.list("task-1");
 				return state.handoff?.status === "completed" || state.handoff?.status === "failed";
@@ -507,6 +515,7 @@ describe("AgentSessionService", () => {
 			expect(await service.output("task-1", first.id)).toContain("Saved session output");
 		} finally {
 			await service.stop("task-1").catch(() => undefined);
+			await killTmuxServer(socket);
 		}
 	});
 });
