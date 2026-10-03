@@ -12,7 +12,7 @@ import {
 
 type Screen = ReturnType<typeof import("../tui.ts").createScreen>;
 
-export type EditableWidget = ReturnType<typeof textarea> & {
+type EditableWidget = ReturnType<typeof textarea> & {
 	cancel?(): void;
 	readInput?(): void;
 	cpos?: { x: number; y: number };

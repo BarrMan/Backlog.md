@@ -11,7 +11,6 @@ import {
 	mountFooterRegion,
 	mountNavigationRegion,
 	resolveNativeHost,
-	type WorkspaceQuittableHost,
 	type WorkspaceScreen,
 } from "./native-regions.ts";
 import { type WorkspaceHost, WorkspacePane } from "./pane.ts";
@@ -82,5 +81,3 @@ export class AgentWorkspaceController {
 		return pane.run();
 	}
 }
-
-export type { WorkspaceQuittableHost };

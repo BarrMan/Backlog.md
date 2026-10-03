@@ -2,10 +2,12 @@ import type { AgentSession, TaskSessions } from "../../agent-workspace/types.ts"
 import type { WorkspaceStateService } from "../../agent-workspace/workspace-state.ts";
 import type { Task } from "../../types/index.ts";
 import { keymapKeys, matchesKey } from "../keymap.ts";
-import { escapeBlessedTags } from "./footer.ts";
+import { escapeBlessedTags, type WorkspaceMode } from "./footer.ts";
 
 export type WorkspaceKey = { name?: string; full?: string; sequence?: string; ctrl?: boolean };
-export type WorkspaceMode = "details" | "history" | "output";
+
+/** The slice of {@link WorkspaceMode} these three views own, derived so it cannot drift from the full union. */
+export type SessionViewMode = Extract<WorkspaceMode, "details" | "history" | "output">;
 
 type FocusableWidget = { focus(): void };
 type DetailsWidget = { focus(): void; setLabel?(label: string): void; setContent(content: string): void };
@@ -17,8 +19,8 @@ type DetailsWidget = { focus(): void; setLabel?(label: string): void; setContent
  */
 export type SessionViewContext = {
 	key: WorkspaceKey;
-	mode: WorkspaceMode;
-	setMode(mode: WorkspaceMode): void;
+	mode: SessionViewMode;
+	setMode(mode: SessionViewMode): void;
 	details: DetailsWidget;
 	detailsViewport: { setScroll(value: number): void };
 	tree: FocusableWidget;
