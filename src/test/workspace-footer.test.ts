@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { withWorkspaceSearch } from "../ui/workspace/controller.ts";
+import { withWorkspaceSearch } from "../ui/workspace/state.ts";
 
 describe("workspace footer search", () => {
 	it("preserves filters changed outside the footer while applying a live query", () => {

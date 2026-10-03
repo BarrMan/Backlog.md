@@ -10,11 +10,8 @@ import { isTmuxWorkspace, TmuxWorkspace, type TmuxWorkspaceView } from "../agent
 import type { AgentConfigScope, AgentConfiguration, AgentPreset } from "../agent-workspace/types.ts";
 import type { Core } from "../core/backlog.ts";
 import { UnifiedViewController } from "../ui/unified/controller.ts";
-import {
-	AgentWorkspaceController,
-	type AgentWorkspaceOptions,
-	createWorkspaceViewState,
-} from "../ui/workspace/controller.ts";
+import { AgentWorkspaceController, type AgentWorkspaceOptions } from "../ui/workspace/controller.ts";
+import { createWorkspaceViewState } from "../ui/workspace/state.ts";
 import { addHelpSchema, choiceType } from "./help-schema.ts";
 
 const SCOPES = ["root", "project", "card"] as const;

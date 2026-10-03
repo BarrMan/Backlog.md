@@ -1,3 +1,4 @@
+import type { AgentSession } from "../../agent-workspace/types.ts";
 import { buildKanbanStatusGroups } from "../../board.ts";
 import type { AcceptanceCriterion, Task } from "../../types/index.ts";
 
@@ -28,6 +29,11 @@ function taskFieldValues(task: Task): Record<DraftField, string> {
 		implementationNotes: task.implementationNotes ?? "",
 		finalSummary: task.finalSummary ?? "",
 	};
+}
+
+export function sessionLabel(session?: AgentSession): string {
+	if (!session) return "No active session";
+	return `${session.status} · ${session.preset} · ${session.id.slice(0, 8)}`;
 }
 
 export function createWorkspaceDraft(task: Task): WorkspaceDraft {

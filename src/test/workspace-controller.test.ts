@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { createLatestWorkspaceSearchPublisher } from "../ui/workspace/controller.ts";
+import { createLatestWorkspaceSearchPublisher } from "../ui/workspace/footer.ts";
 
 describe("workspace search publisher", () => {
 	it("publishes the latest clear after an in-flight query", async () => {
@@ -42,5 +42,18 @@ describe("workspace search publisher", () => {
 		release?.();
 		await finalFocus;
 		expect(published).toEqual(["query", "focus:false"]);
+	});
+
+	it("recovers after a publish failure", async () => {
+		const published: string[] = [];
+		const publisher = createLatestWorkspaceSearchPublisher(async (query) => {
+			published.push(query);
+			if (query === "bad") throw new Error("publish failed");
+		});
+
+		await expect(publisher.submit("bad")).rejects.toThrow("publish failed");
+		await publisher.submit("good");
+
+		expect(published).toEqual(["bad", "good"]);
 	});
 });
