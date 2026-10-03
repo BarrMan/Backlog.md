@@ -18,6 +18,7 @@ import { createLoadingScreen } from "../loading.ts";
 import { buildTaskViewerMilestoneFilterModel, TaskViewerController } from "../task-viewer/controller.ts";
 import { createScreen, formatTuiTitle, keepTuiInputAlive } from "../tui.ts";
 import type { ViewType } from "../view-switcher.ts";
+import { quitWorkspaceHost } from "../workspace/native-regions.ts";
 import { UnifiedViewSession } from "./session.ts";
 
 export interface UnifiedViewOptions {
@@ -525,7 +526,8 @@ export class UnifiedViewController {
 	}
 
 	private async detachWorkspace(): Promise<void> {
-		await new TmuxWorkspace(this.options.core.filesystem.rootDir).detach();
+		// Quitting from the board must tear the whole tmux workspace down, not just drop the client.
+		await quitWorkspaceHost(new TmuxWorkspace(this.options.core.filesystem.rootDir));
 	}
 
 	private async createBoardTask(input: TaskCreateInput): Promise<Task> {

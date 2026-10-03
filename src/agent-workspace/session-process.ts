@@ -10,11 +10,11 @@ import {
 import { captureProcessOutput } from "../process/capture.ts";
 import { buildAgentLaunchCommand, buildAgentResumeCommand } from "./bootstrap.ts";
 import { fail, type SessionCommandResult } from "./session-utils.ts";
+import { findTmuxPanesByTaskAndRole, paneTitle } from "./tmux-pane-lookup.ts";
 import type { AgentPreset, AgentSession } from "./types.ts";
 
 const LAUNCH_SETTLE_DELAY_MS = 25;
 const TMUX_PLACEHOLDER_COMMAND = "exec sleep 2147483647";
-const PANE_METADATA_FORMAT = "#{pane_id}\t#{pane_dead}\t#{@backlog_root}\t#{@backlog_task}\t#{@backlog_role}";
 const PANE_OPTION_ROOT = "@backlog_root";
 const PANE_OPTION_TASK = "@backlog_task";
 const PANE_OPTION_ROLE = "@backlog_role";
@@ -138,7 +138,9 @@ export class SessionProcess {
 		] as const) {
 			await tmux(`Could not tag tmux session ${session.id}`, () => pane.setOption(option, value));
 		}
-		await tmux(`Could not title tmux session ${session.id}`, () => pane.setTitle(`${session.taskId} agent`));
+		await tmux(`Could not title tmux session ${session.id}`, () =>
+			pane.setTitle(paneTitle(session.taskId, LIVE_PREVIEW_ROLE)),
+		);
 	}
 
 	async preparePane(session: AgentSession, options: { includeDead?: boolean } = {}): Promise<void> {
@@ -185,15 +187,19 @@ export class SessionProcess {
 		if (await this.findPane(session, { roles: [RETIRED_SESSION_ROLE] })) return;
 		const pane = await this.findPaneHandle(session);
 		if (!pane) return;
-		await tmux(`Could not retag tmux session ${session.id}`, () =>
-			pane.setOption(PANE_OPTION_ROLE, RETIRED_SESSION_ROLE),
-		);
+		await tmux(`Could not retag tmux session ${session.id}`, async () => {
+			await pane.setOption(PANE_OPTION_ROLE, RETIRED_SESSION_ROLE);
+			await pane.setTitle(paneTitle(session.taskId, RETIRED_SESSION_ROLE));
+		});
 	}
 
 	async promote(session: AgentSession): Promise<void> {
 		const pane = await this.findPaneHandle(session, { roles: [RETIRED_SESSION_ROLE] });
 		if (!pane) return;
-		await tmux(`Could not retag tmux session ${session.id}`, () => pane.setOption(PANE_OPTION_ROLE, LIVE_PREVIEW_ROLE));
+		await tmux(`Could not retag tmux session ${session.id}`, async () => {
+			await pane.setOption(PANE_OPTION_ROLE, LIVE_PREVIEW_ROLE);
+			await pane.setTitle(paneTitle(session.taskId, LIVE_PREVIEW_ROLE));
+		});
 	}
 
 	async kill(session: AgentSession): Promise<void> {
@@ -282,25 +288,24 @@ export class SessionProcess {
 		options: { includeDead?: boolean; roles?: string[] } = {},
 	): Promise<string | undefined> {
 		const roles = options.roles ?? [LIVE_PREVIEW_ROLE];
-		let listed: readonly string[];
+		let matches: Array<{ paneId: string }> = [];
 		try {
-			listed = await this.server.cmd("list-panes", ["-a", "-F", PANE_METADATA_FORMAT]);
+			for (const role of roles) {
+				matches = matches.concat(
+					await findTmuxPanesByTaskAndRole({
+						cmd: (command, args) => this.server.cmd(command, args),
+						rootPath: this.rootDir,
+						taskId: session.taskId,
+						role,
+						includeDead: options.includeDead,
+					}),
+				);
+			}
 		} catch (error) {
 			if (isMissingTmux(error)) return undefined;
 			throw fail(`Could not find tmux pane for session ${session.id}`, errorResult(error));
 		}
-		const matches = listed
-			.flatMap((line) => line.split("\n"))
-			.map((line) => line.split("\t"))
-			.filter(
-				([paneId, dead, root, taskId, role]) =>
-					paneId?.startsWith("%") &&
-					(options.includeDead || dead !== "1") &&
-					root === this.rootDir &&
-					taskId === session.taskId &&
-					roles.includes(role ?? ""),
-			);
 		if (matches.length > 1) throw new Error(`Multiple tmux panes match agent session ${session.id}.`);
-		return matches[0]?.[0];
+		return matches[0]?.paneId;
 	}
 }

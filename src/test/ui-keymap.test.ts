@@ -20,6 +20,38 @@ function press(screen: EmittingScreen, keyName: string, character = ""): void {
 	screen.emit(`key ${keyName}`, character, key);
 }
 
+/**
+ * A stand-in for the native tmux host. A real `TmuxWorkspace` builds a tmux server whose bootstrap
+ * `tmux new-session -d -P` client outlives the test process, so a run inside the user's own tmux left
+ * real `backlog-workspace-*` sessions behind on their default socket. This suite covers key dispatch
+ * and footer text only, so it injects a host and never starts tmux.
+ */
+class StubWorkspaceHost {
+	readonly calls: string[] = [];
+	async showBoard(): Promise<void> {
+		this.calls.push("showBoard");
+	}
+	async showAgentSession(taskId: string | undefined, sessionId?: string): Promise<void> {
+		this.calls.push(`showAgentSession:${taskId ?? ""}:${sessionId ?? ""}`);
+	}
+	async focusAgent(zoom: boolean): Promise<void> {
+		this.calls.push(`focusAgent:${zoom}`);
+	}
+	async takeTaskRequest(): Promise<string | undefined> {
+		this.calls.push("takeTaskRequest");
+		return undefined;
+	}
+	async quitWorkspace(): Promise<void> {
+		this.calls.push("quitWorkspace");
+	}
+}
+
+function defaultSocketSessions(): Set<string> {
+	const listed = Bun.spawnSync(["tmux", "list-sessions", "-F", "#{session_name}"]);
+	if (listed.exitCode !== 0) return new Set();
+	return new Set(listed.stdout.toString().split("\n").filter(Boolean));
+}
+
 async function waitUntil(predicate: () => boolean): Promise<void> {
 	for (let attempt = 0; attempt < 100; attempt += 1) {
 		if (predicate()) return;
@@ -108,6 +140,7 @@ describe("TUI keymap", () => {
 
 	it("dispatches remapped Workspace shortcuts and updates its footer", async () => {
 		const directory = createUniqueTestDir("ui-keymap-workspace");
+		const before = defaultSocketSessions();
 		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const screen = createScreen({ smartCSR: false }) as EmittingScreen;
@@ -131,6 +164,7 @@ describe("TUI keymap", () => {
 					composerCalls += 1;
 					return null;
 				},
+				host: new StubWorkspaceHost(),
 			}).run();
 			await waitUntil(() => screen.children.length > 0);
 			press(screen, "n", "n");
@@ -151,6 +185,7 @@ describe("TUI keymap", () => {
 			screen.destroy();
 			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
 			else Reflect.deleteProperty(process.stdout, "isTTY");
+			expect([...defaultSocketSessions()].filter((name) => !before.has(name))).toEqual([]);
 			await safeCleanup(directory);
 		}
 	});

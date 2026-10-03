@@ -62,6 +62,7 @@ class FakePane {
 	}
 
 	async setTitle(title: string): Promise<void> {
+		this.owner.paneTitles.set(this.id, title);
 		this.owner.actions.push({ type: "setTitle", pane: this.id, title });
 	}
 
@@ -102,6 +103,7 @@ class FakeTmux implements ProcessRunner, TmuxServer {
 	paneMetadata = new Map<string, Record<string, string>>();
 	paneSessions = new Map<string, string>();
 	paneHandles = new Map<string, FakePane>();
+	paneTitles = new Map<string, string>();
 
 	async run(args: string[], options?: ProcessOptions): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 		this.processCommands.push(args);
@@ -137,9 +139,11 @@ class FakeTmux implements ProcessRunner, TmuxServer {
 				[
 					pane,
 					this.missingPanes.has(pane) ? "1" : "0",
+					"@agent",
 					metadata["@backlog_root"] ?? "",
 					metadata["@backlog_task"] ?? "",
 					metadata["@backlog_role"] ?? "",
+					this.paneTitles.get(pane) ?? "",
 				].join("\t"),
 			);
 		}
@@ -182,7 +186,21 @@ describe("AgentSessionService", () => {
 		expect(runner.paneMetadata.get("%1")?.["@backlog_task"]).toBe("TASK-1");
 		expect(runner.paneMetadata.get("%1")?.["@backlog_session"]).toBeUndefined();
 		expect(runner.paneMetadata.get("%1")?.["@backlog_role"]).toBe("live-preview");
+		expect(runner.actions).toContainEqual({ type: "setTitle", pane: "%1", title: "TASK-1 live-preview" });
 		expect(runner.actions).toContainEqual({ type: "respawn", pane: "%1", command: expect.anything() });
+	});
+
+	it("finds panes with a tmux task and role filter", async () => {
+		const service = new AgentSessionService(core, { runner, tmuxServer: runner });
+		await service.start("task-1");
+		await service.recover("task-1");
+		const lookup = runner.actions.find(
+			(action): action is Extract<TmuxAction, { type: "cmd" }> =>
+				action.type === "cmd" && action.command === "list-panes",
+		);
+		expect(lookup?.args).toContain("-f");
+		expect(lookup?.args.join(" ")).toContain("@backlog_task");
+		expect(lookup?.args.join(" ")).toContain("@backlog_role");
 	});
 
 	it("stores native session ids for agents that support launch-time ids", async () => {

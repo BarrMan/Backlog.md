@@ -1,117 +1,45 @@
-# Read This First
+# Agent Instructions — Backlog.md
 
-At the beginning of each conversation, read [MANIFESTO.md](MANIFESTO.md) in the
-repository root before doing anything else. It is the project's constitution: who
-Backlog.md serves, its core loop, source of truth, surface hierarchy, interface posture,
-design principles, boundaries, and risks. All architecture and product decisions must
-align with it.
+## Rebuild the binary after every code change
 
-If a request appears to conflict with the manifesto, or would materially change a
-principle in it, surface the conflict and ask Alex rather than silently proceeding. Do
-not edit the manifesto as a side effect of implementation; changes to it require an
-explicit product decision.
+**After each code change, run `bun run build`.**
 
-When this session is explicitly assigned to a Backlog task, assign it to yourself: -a @{your-name}.
+This is not optional and not batchable at end-of-task. Rebuild immediately after the change.
 
-In addition to the rules above, please consider the following:
-At the end of every task implementation, try to take a moment to see if you can simplify it. 
-When you are done implementing, you know much more about a task than when you started.
-At this point you can better judge retrospectively what can be the simplest architecture to solve the problem.
-If you can simplify the code, do it.
+### Why
 
-## Simplicity-first implementation rules
+`/opt/homebrew/bin/backlog` is a symlink:
 
-- Prefer a single implementation for similar concerns. Reuse or refactor to a shared helper instead of duplicating.
-- Keep APIs minimal. Favor load + upsert over load/save/update, and do not add unused methods.
-- Avoid extra layers (services, normalizers, versioning) unless there is an immediate, proven need.
-- Keep behavior consistent across similar stores (defaults, parse errors, locking). Divergence requires a clear reason.
-- Don't add new exported helpers just to compute a path; derive from existing paths or add one shared helper only when reused.
+```
+/opt/homebrew/bin/backlog -> /Users/imribarr/Projects/Backlog.md/dist/backlog
+```
 
-## UI descriptions
+So `backlog` runs whatever `dist/backlog` happened to be at the time of the last build. Editing
+`src/**` changes nothing about what the `backlog` command actually does.
 
-Do not add subtitles, helper text, or descriptive copy beneath headings, labels, cards, or settings by default. Prefer
-one concise, self-explanatory heading or label. Only add supporting copy when the user explicitly asks for it or when it
-is necessary to prevent misunderstanding or error, and never use it to restate the heading.
+### The trap this prevents
 
+A passing test suite proves the *source tree* is correct. It says nothing about the binary.
+Handing back a stale binary makes a correct fix look broken, and a broken fix look fixed.
 
-## Commands
+This has already happened repeatedly on this project. On 2026-10-03 `dist/backlog` was built at
+09:15 while `src/agent-workspace/tmux-workspace.ts` was edited at 09:48 — 14 source files were
+newer than the binary. Manual retest of the quit fix was blocked until the next rebuild.
 
-### Development
+**Never report a fix as verified until the binary has been rebuilt and the verification run
+against the rebuilt binary.** State explicitly when a rebuild happened.
 
-- In this source checkout, use `bun run cli` in place of the global `backlog` command,
-  including for task operations below. The installed binary can use an older task
-  format even when its package version matches, and editing tasks with it can
-  discard structured fields and prevent the current CLI from loading tasks.
-- `bun i` - Install dependencies
-- `bunx tsc --noEmit` - Type-check code
-- `bun run check .` - Run all Biome checks (format + lint)
-- `bun run build` - Build the CLI tool
-- `bun run cli` - Uses the CLI tool directly
+### Verify the rebuild landed
 
-### Testing
+```sh
+bun run build
+find src -name '*.ts' -newer dist/backlog   # must print nothing
+```
 
-- `bun run test` - Run all tests (applies the same test timeout CI uses)
-- `bun test --timeout=10000 <filename>` - Run specific test file
+If the second command lists files, the build did not pick them up. Do not proceed to manual
+testing.
 
-### Configuration Management
+### When tests and manual verification disagree
 
-- `bun run cli config list` - View all configuration values
-- `bun run cli config get <key>` - Get a specific config value (e.g. defaultEditor)
-- `bun run cli config set <key> <value>` - Set a config value with validation
-
-## Core Structure
-
-- **CLI Tool**: Built with Bun and TypeScript as a global npm package (`npm i -g backlog.md`)
-- **Source Code**: Located in `/src` directory with modular TypeScript structure
-- **Task Management**: Uses markdown files in `backlog/` directory structure
-- **Workflow**: Git-integrated with task IDs referenced in commits and PRs
-
-## Agent POV
-
-- Treat Backlog.md as a shipped CLI/MCP binary that may be used from other repositories where agents cannot inspect this source tree.
-- Backlog.md is not a supported JavaScript or TypeScript library API for external consumers. Do not treat exported source symbols, classes, or methods in `/src` as stable public interfaces unless they are explicitly documented in shipped CLI/MCP/instruction surfaces.
-- Use only the stable public surface—CLI behavior, MCP tools/resources and schemas,
-  configuration, CLI help, and shipped instruction files—when deciding what external
-  agents can rely on or evaluating compatibility. Internal TypeScript exports are
-  implementation details unless public docs explicitly promise them.
-- Do not assume external agents know internal implementation details, constants, or source-only conventions.
-- When reviewing changes, do not ask for compatibility shims just because a source-level method exists or was removed. Only preserve compatibility for behavior that is part of the documented CLI, MCP, config, or instruction contract.
-- If a convention matters for agent behavior, document it in the public MCP/instruction surface rather than relying on source-code discovery.
-
-## Maintainer Workflow Guardrails
-
-- Treat GitHub issues as reports, proposals, or evidence, not implementation specs. Do not automatically implement the requested solution; first evaluate whether the change fits Backlog.md's public CLI/MCP/instruction surface and current documented behavior.
-- Escalate ambiguous product behavior to Alex before implementation. For example, pause before deciding whether ordinal-only task ordering changes should update edit metadata.
-- PRs should normally link to a scoped issue first. If a broad feature PR or request has no issue, ask for an issue or discussion before implementation rather than turning the PR into the scope definition.
-- Investigations should not create implementation PRs by default. Leave findings as comments, reports, or notes unless a narrow accepted fix is clear.
-- Use the documented `backlog task create` workflow for task creation. Do not manually edit task files, pick IDs, pre-reserve IDs, or create coordination-only IDs as a workaround; rely on the CLI allocator and lock to assign task IDs.
-- When acting publicly on Alex's behalf, use neutral maintainer language and identify yourself as `Alex's Agent:` if identification is needed. Do not reveal private strategy, roadmap, or status framing; keep scope decisions grounded in the project's public docs and shipped behavior.
-
-## Code Standards
-
-- **Runtime**: Bun with TypeScript 5
-- **Formatting**: Biome with tab indentation and double quotes
-- **Linting**: Biome recommended rules
-- **Testing**: Bun's built-in test runner
-- **Pre-commit**: Husky + lint-staged automatically runs Biome checks before commits
-
-The pre-commit hook automatically runs `biome check --write` on staged files to ensure code quality. If linting errors
-are found, the commit will be blocked until fixed.
-
-## Git Workflow
-
-- **Branching**: Use feature branches when working on tasks (e.g. `tasks/back-123-feature-name`)
-- **Committing**: Use the following format: `BACK-123 - Title of the task`
-- **PR titles**: Use `{taskId} - {taskTitle}` (e.g. `BACK-123 - Title of the task`)
-- **Github CLI**: Use `gh` whenever possible for PRs and issues
-
-<!-- BACKLOG.MD GUIDELINES START -->
-## Backlog.md
-
-Use the `backlog` CLI when the user requests task operations or this session is explicitly assigned to a Backlog task. Other work does not require a Backlog startup command, workflow guide, or task creation.
-
-Use `backlog task create` to create tasks, `backlog task view <id> --plain` to read them, `backlog task edit <id>` to update them, and `backlog search` or `backlog task list` to find tasks. Consult `backlog <command> --help` for options as needed.
-
-Do not edit Backlog task, draft, document, decision, or milestone markdown files directly. Use the `backlog` CLI so metadata, relationships, and history stay consistent.
-
-<!-- BACKLOG.MD GUIDELINES END -->
+The test suite runs against source. The user runs against `dist/backlog`. When those disagree,
+suspect a stale binary before suspecting the code.

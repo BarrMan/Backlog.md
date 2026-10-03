@@ -2,8 +2,36 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { $ } from "bun";
 import { Server } from "libtmux";
-import { isTmuxWorkspace, TmuxWorkspace, type TmuxWorkspaceServer } from "../agent-workspace/tmux-workspace.ts";
+import {
+	attachWorkspaceClient,
+	isTmuxWorkspace,
+	TmuxWorkspace,
+	type TmuxWorkspaceServer,
+	watchWorkspaceTermination,
+} from "../agent-workspace/tmux-workspace.ts";
+import { Core } from "../core/backlog.ts";
+import { withTestCliEntrypoint } from "./test-cli.ts";
+import { initializeTestProject } from "./test-utils.ts";
+
+class RecordingSignals {
+	readonly listeners = new Map<string, Set<() => void>>();
+	on(signal: string, listener: () => void): void {
+		const set = this.listeners.get(signal) ?? new Set<() => void>();
+		set.add(listener);
+		this.listeners.set(signal, set);
+	}
+	off(signal: string, listener: () => void): void {
+		this.listeners.get(signal)?.delete(listener);
+	}
+	count(signal: string): number {
+		return this.listeners.get(signal)?.size ?? 0;
+	}
+	fire(signal: string): void {
+		for (const listener of [...(this.listeners.get(signal) ?? [])]) listener();
+	}
+}
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
 	for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -22,7 +50,13 @@ class RecordingTmuxServer implements TmuxWorkspaceServer {
 	readonly missingPanes = new Set<string>();
 	readonly paneMetadata = new Map<string, Record<string, string>>();
 	readonly paneWindows = new Map<string, string>();
+	readonly paneTitles = new Map<string, string>();
+	readonly panePids = new Map<string, number>();
+	readonly paneOutput = new Map<string, string>();
+	readonly delayedDead = new Map<string, number>();
 	clients = "";
+	missingSession = false;
+	sessionName = "backlog-workspace-test";
 	#nextPane = 3;
 	#locks = new Set<string>();
 	#waiters = new Map<string, (() => void)[]>();
@@ -119,6 +153,22 @@ class RecordingTmuxServer implements TmuxWorkspaceServer {
 		}
 		if (args[0] === "list-windows") return { exitCode: 0, stdout: "@1\n@2\n", stderr: "" };
 		if (args[0] === "has-session") return { exitCode: this.options.has("session") ? 0 : 1, stdout: "", stderr: "" };
+		if (args[0] === "list-panes" && args.includes("#{pane_pid}"))
+			return { exitCode: 0, stdout: [...this.panePids.values()].map((pid) => `${pid}\n`).join(""), stderr: "" };
+		if (args[0] === "capture-pane") {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			return { exitCode: 0, stdout: this.paneOutput.get(target) ?? "", stderr: "" };
+		}
+		if (args[0] === "kill-session") {
+			this.options.delete("session");
+			return this.missingSession
+				? { exitCode: 1, stdout: "", stderr: `can't find session: ${args[args.indexOf("-t") + 1] ?? ""}\n` }
+				: { exitCode: 0, stdout: "", stderr: "" };
+		}
+		if (args[0] === "list-sessions")
+			return this.options.has("session")
+				? { exitCode: 0, stdout: `${this.sessionName}\n`, stderr: "" }
+				: { exitCode: 1, stdout: "", stderr: "no server running on /private/tmp/tmux-501/default\n" };
 		if (args[0] === "list-panes") {
 			const rows = [...this.paneMetadata.entries()].map(([pane, metadata]) =>
 				[
@@ -128,6 +178,7 @@ class RecordingTmuxServer implements TmuxWorkspaceServer {
 					metadata["@backlog_root"] ?? "",
 					metadata["@backlog_task"] ?? "",
 					metadata["@backlog_role"] ?? "",
+					this.paneTitles.get(pane) ?? `${metadata["@backlog_task"] ?? ""} ${metadata["@backlog_role"] ?? ""}`.trim(),
 				].join("\t"),
 			);
 			return { exitCode: 0, stdout: `${rows.join("\n")}\n`, stderr: "" };
@@ -152,12 +203,12 @@ class RecordingTmuxServer implements TmuxWorkspaceServer {
 			if (target && this.missingPanes.has(target)) return { exitCode: 0, stdout: "\n", stderr: "" };
 			if (format === "#{pane_id}")
 				return { exitCode: 0, stdout: target?.startsWith("%") ? `${target}\n` : "%9\n", stderr: "" };
-			if (format === "#{pane_id} #{pane_dead}")
-				return {
-					exitCode: 0,
-					stdout: `${target} ${this.deadPanes.has(target ?? "") ? "1" : "0"}\n`,
-					stderr: "",
-				};
+			if (format === "#{pane_id} #{pane_dead}") {
+				const remaining = this.delayedDead.get(target ?? "") ?? 0;
+				const dead = remaining > 0 || this.deadPanes.has(target ?? "");
+				if (remaining > 0) this.delayedDead.set(target ?? "", remaining - 1);
+				return { exitCode: 0, stdout: `${target} ${dead ? "1" : "0"}\n`, stderr: "" };
+			}
 			if (format === "#{pane_width} #{pane_height}")
 				return {
 					exitCode: 0,
@@ -173,6 +224,11 @@ class RecordingTmuxServer implements TmuxWorkspaceServer {
 			return { exitCode: 0, stdout: "0\n", stderr: "" };
 		}
 		const pane = args[args.indexOf("-t") + 1];
+		if (args[0] === "select-pane" && args.includes("-T")) {
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			const title = args[args.indexOf("-T") + 1] ?? "";
+			if (target && title) this.paneTitles.set(target, title);
+		}
 		if (args[0] === "swap-pane") {
 			const source = args[args.indexOf("-s") + 1] ?? "";
 			const target = args[args.indexOf("-t") + 1] ?? "";
@@ -212,6 +268,12 @@ describe("TmuxWorkspace", () => {
 			"exec sleep 2147483647",
 		]);
 		expect(commands).toContain("rename-window -t @1 Board");
+		expect(commands).toContain("select-pane -t %1 -T board");
+		expect(commands).toContain("select-pane -t %2 -T workspace-nav");
+		expect(commands).toContain("select-pane -t %3 -T workspace-footer");
+		expect(commands).toContain("select-pane -t %4 -T tasks-list");
+		expect(commands).toContain("select-pane -t %5 -T empty-details");
+		expect(commands).toContain("select-pane -t %6 -T empty-live-preview");
 		expect(commands).toContain(`newWindow ${workspace.rootPath} exec sleep 2147483647`);
 		expect(commands).toContain("split %2 BELOW 1% exec sleep 2147483647");
 		expect(commands).toContain("split %2 BELOW 90% exec sleep 2147483647");
@@ -268,16 +330,66 @@ describe("TmuxWorkspace", () => {
 		await workspace.showAgentSession("TASK-1", "session-1");
 		await expect(workspace.showAgentSession("TASK-3", "session-3")).rejects.toThrow("no longer exists");
 		await workspace.showAgentSession("TASK-2", "session-2");
+		const lookup = runner.calls.find((args) => args[0] === "list-panes");
+		expect(lookup).toContain("-f");
+		expect(lookup?.join(" ")).toContain("@backlog_task");
+		expect(lookup?.join(" ")).toContain("@backlog_role");
+		const lookupFilters = runner.calls
+			.filter((args) => args[0] === "list-panes")
+			.map((args) => args[args.indexOf("-f") + 1] ?? "");
+		expect(lookupFilters.every((filter) => filter.includes("@backlog_task"))).toBe(true);
 		expect(runner.calls.some((args) => args[0] === "resize-window")).toBe(false);
 		const swaps = runner.calls.filter((args) => args[0] === "swap-pane");
 		expect(swaps).toEqual([
-			["swap-pane", "-d", "-s", "%42", "-t", "%6"],
-			["swap-pane", "-d", "-s", "%43", "-t", "%42"],
+			["swap-pane", "-d", "-s", "%6", "-t", "%42"],
+			["swap-pane", "-d", "-s", "%42", "-t", "%43"],
 		]);
 		expect(runner.calls.some((args) => args[0] === "break-pane")).toBe(false);
 		expect(swaps.some((command) => command.includes("%44"))).toBe(false);
 		expect(runner.options.get("@backlog_workspace_active_return_42")).toBeUndefined();
 		expect(runner.options.get("@backlog_workspace_active_return_43")).toBeUndefined();
+	});
+
+	it("swaps the active preview slot with the selected task preview", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		runner.paneMetadata.set("%42", {
+			"@backlog_root": workspace.rootPath,
+			"@backlog_task": "TASK-1",
+			"@backlog_role": "live-preview",
+		});
+		runner.paneMetadata.set("%43", {
+			"@backlog_root": workspace.rootPath,
+			"@backlog_task": "TASK-2",
+			"@backlog_role": "live-preview",
+		});
+		runner.paneWindows.set("%42", "@agent-a");
+		runner.paneWindows.set("%43", "@agent-b");
+		await workspace.showAgentSession("TASK-1", "session-1");
+		runner.calls.length = 0;
+		await workspace.showAgentSession("TASK-2", "session-2");
+		expect(runner.calls).toContainEqual(["swap-pane", "-d", "-s", "%42", "-t", "%43"]);
+		expect(runner.calls.filter((args) => args[0] === "split")).toHaveLength(0);
+		expect(runner.paneWindows.get("%42")).toBe("@agent-b");
+		expect(runner.paneWindows.get("%43")).toBe("@2");
+	});
+
+	it("clears the active preview by swapping it back to the display pane", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		runner.paneMetadata.set("%42", {
+			"@backlog_root": workspace.rootPath,
+			"@backlog_task": "TASK-1",
+			"@backlog_role": "live-preview",
+		});
+		runner.paneWindows.set("%42", "@agent-a");
+		await workspace.showAgentSession("TASK-1", "session-1");
+		runner.calls.length = 0;
+		await workspace.showAgentSession(undefined);
+		expect(runner.calls).toContainEqual(["swap-pane", "-d", "-s", "%42", "-t", "%6"]);
+		expect(runner.options.get("@backlog_workspace_active_task")).toBeUndefined();
+		expect(runner.paneWindows.get("%42")).toBe("@agent-a");
+		expect(runner.paneWindows.get("%6")).toBe("@2");
 	});
 
 	it("focuses tasks and resizes measured header and footer without repeated tmux resizes", async () => {
@@ -315,35 +427,133 @@ describe("TmuxWorkspace", () => {
 		runner.calls.length = 0;
 		await workspace.focusSearch();
 		const respawn = runner.calls.findIndex((args) => args[0] === "respawn-pane" && args.includes("%3"));
-		const select = runner.calls.findIndex((args) => args[0] === "select-pane" && args.includes("%3"));
+		const select = runner.calls.findIndex(
+			(args) => args[0] === "select-pane" && args.includes("%3") && !args.includes("-T"),
+		);
 		expect(respawn).toBeGreaterThanOrEqual(0);
 		expect(select).toBeGreaterThan(respawn);
 		expect(runner.calls).toContainEqual(["send-keys", "-t", "%3", "/"]);
 	});
 
-	it("rebuilds a stale footer before focusing workspace search", async () => {
+	it("recreates a missing workspace-footer pane before focusing workspace search", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
 		runner.missingPanes.add("%3");
 		runner.calls.length = 0;
 		await workspace.focusSearch();
-		expect(runner.calls).toContainEqual(["kill-window", "-t", "@2"]);
+		expect(runner.calls).not.toContainEqual(["kill-window", "-t", "@2"]);
+		expect(runner.calls).toContainEqual(["split", "%2", "BELOW", "1%", "exec sleep 2147483647"]);
+		expect(runner.calls).toContainEqual(["select-pane", "-t", "%7", "-T", "workspace-footer"]);
 		expect(runner.calls).toContainEqual(["select-pane", "-t", "%7"]);
 		expect(runner.calls).toContainEqual(["send-keys", "-t", "%7", "/"]);
 		expect(runner.calls).not.toContainEqual(["select-pane", "-t", "%3"]);
 	});
 
-	it("rebuilds a stale footer before showing the workspace", async () => {
+	it("recreates a missing workspace-footer pane before showing the workspace", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
 		runner.missingPanes.add("%3");
 		runner.calls.length = 0;
 		await workspace.showWorkspace();
-		expect(runner.calls).toContainEqual(["kill-window", "-t", "@2"]);
-		expect(runner.calls).toContainEqual(["select-pane", "-t", "%8"]);
+		expect(runner.calls).not.toContainEqual(["kill-window", "-t", "@2"]);
+		expect(runner.calls).toContainEqual(["split", "%2", "BELOW", "1%", "exec sleep 2147483647"]);
+		expect(runner.calls).toContainEqual(["select-pane", "-t", "%7", "-T", "workspace-footer"]);
 		expect(runner.calls).not.toContainEqual(["respawn-pane", "-k", "-t", "%3"]);
+	});
+
+	it("closes the workspace session once the last client leaves", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.calls.length = 0;
+		await workspace.closeWorkspace();
+		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+	});
+
+	it("keeps the workspace session alive while another client is attached", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.clients = "/dev/ttys002\n";
+		runner.calls.length = 0;
+		await workspace.closeWorkspace();
+		expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
+	});
+
+	it("collects an abandoned workspace session before rebuilding it", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		runner.sessionName = workspace.sessionName;
+		// A workspace whose host died mid-run: it still exists, Backlog owns it, but nobody is
+		// attached and it was never marked ready, so it is a corpse to collect rather than reuse.
+		runner.options.set("session", "yes");
+		runner.options.set("@backlog_workspace_owner", workspace.rootPath);
+
+		await workspace.showBoard();
+
+		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+		expect(runner.calls).toContainEqual([
+			"newSession",
+			workspace.sessionName,
+			workspace.rootPath,
+			"exec sleep 2147483647",
+		]);
+	});
+
+	it("keeps a workspace session that still has a client attached", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		runner.sessionName = workspace.sessionName;
+		await workspace.showWorkspace();
+		// A workspace whose host died while a user is still watching it: nobody may collect it.
+		runner.options.delete("@backlog_workspace_ready");
+		runner.clients = "/dev/ttys002\n";
+		runner.calls.length = 0;
+
+		await workspace.showBoard();
+
+		expect(runner.calls.some((args) => args[0] === "kill-session")).toBe(false);
+	});
+
+	it("records the host pid so a later run can prove this workspace is abandoned", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		expect(runner.options.get("@backlog_workspace_owner_pid")).toBe(String(process.pid));
+	});
+
+	it("installs a tmux hook that tears the workspace down when its last client leaves", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		const hook = runner.calls.filter((args) => args[0] === "set-hook" && args[3] === "client-detached");
+		// The host process is killed whenever the terminal goes away, so cleanup must be owned by
+		// tmux itself; otherwise every interrupted run leaves its UI panes running forever.
+		expect(hook).toEqual([
+			[
+				"set-hook",
+				"-t",
+				workspace.sessionName,
+				"client-detached",
+				`if-shell -F '#{?#{==:#{session_attached},0},1,}' 'kill-session -t ${workspace.sessionName}' ''`,
+			],
+		]);
+	});
+
+	it("never takes a sticky tmux channel lock for shared workspace state", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		const stop = await workspace.subscribeWorkspaceState<{ search?: string }>(() => {});
+		runner.calls.length = 0;
+		await workspace.updateWorkspaceState((state: { search?: string }) => ({ ...state, search: "leak" }));
+		await stop();
+		// A tmux `wait-for -L` lock outlives the process that took it: a pane killed between
+		// acquire and release wedges every later state update, leaving one blocked
+		// `tmux wait-for -L` process per update behind forever.
+		expect(runner.calls.filter((args) => args[0] === "wait-for" && (args[1] === "-L" || args[1] === "-U"))).toEqual([]);
 	});
 
 	it("rejects invalid workspace region heights", async () => {
@@ -357,7 +567,7 @@ describe("TmuxWorkspace", () => {
 		expect(runner.calls.some((args) => args[0] === "resize-pane")).toBe(false);
 	});
 
-	it("preserves valid measured heights when rebuilding workspace panes", async () => {
+	it("keeps measured region heights when recreating a missing workspace pane", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
@@ -366,10 +576,10 @@ describe("TmuxWorkspace", () => {
 		runner.options.delete("@backlog_workspace_tasks_pane");
 		runner.calls.length = 0;
 		await workspace.showWorkspace();
-		expect(runner.calls.filter((args) => args[0] === "resize-pane")).toEqual([
-			["resize-pane", "-t", "%2", "-y", "4"],
-			["resize-pane", "-t", "%7", "-y", "2"],
-		]);
+		expect(runner.calls).not.toContainEqual(["kill-window", "-t", "@2"]);
+		expect(runner.calls.filter((args) => args[0] === "resize-pane")).toEqual([]);
+		expect(runner.options.get("@backlog_workspace_nav_height")).toBe("4");
+		expect(runner.options.get("@backlog_workspace_footer_height")).toBe("2");
 	});
 
 	it("serializes concurrent workspace state updates", async () => {
@@ -457,39 +667,147 @@ describe("TmuxWorkspace", () => {
 		expect(await workspace.takeTaskRequest()).toBe("BACK-723.1");
 	});
 
-	it("rebuilds an owned host missing native workspace panes", async () => {
+	it("recreates a missing tasks-list pane without rebuilding the workspace", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showWorkspace();
 		runner.options.delete("@backlog_workspace_tasks_pane");
 		runner.calls.length = 0;
 		await workspace.showWorkspace();
-		expect(runner.calls).toContainEqual(["kill-window", "-t", "@2"]);
-		expect(runner.calls.filter((args) => args[0] === "split")).toHaveLength(4);
+		expect(runner.calls).not.toContainEqual(["kill-window", "-t", "@2"]);
+		expect(runner.calls).toContainEqual(["split", "%2", "BELOW", "90%", "exec sleep 2147483647"]);
+		expect(runner.calls).toContainEqual(["select-pane", "-t", "%7", "-T", "tasks-list"]);
 		expect(runner.calls.filter((args) => args[0] === "split-window")).toHaveLength(0);
-		expect(runner.calls).toContainEqual([
-			"bind-key",
-			"-T",
-			`backlog-workspace-${workspace.sessionName.split("-").at(-1)}`,
-			"C-q",
-			"if-shell",
-			"-F",
-			"#{==:#{window_id},@2}",
-			"if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z; select-pane -t %8' 'select-pane -t %8'",
-			"",
-		]);
 	});
 
-	it("detaches the client from either owned UI pane", async () => {
+	it("quits the workspace no matter which pane or how many clients are attached", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		// Focus on the agent live preview with a second terminal attached: the old focus-and-count
+		// guard made quitting a silent no-op, which is why users could not quit the workspace.
+		runner.clients = "/dev/ttys001|%6\n/dev/ttys002|%6\n";
+		runner.calls.length = 0;
+		await workspace.quitWorkspace();
+		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+	});
+
+	it("hands the client back to the previous session when quitting from inside tmux", async () => {
 		const runner = new RecordingTmuxServer();
 		const workspace = new TmuxWorkspace(process.cwd(), runner);
 		await workspace.showBoard();
-		for (const pane of ["%1", "%2", "%3", "%4", "%5"]) {
-			runner.calls.length = 0;
-			runner.clients = `/dev/ttys001|${pane}\n`;
+		const nested = process.env.TMUX;
+		runner.clients = "/dev/ttys001|%6\n";
+		runner.calls.length = 0;
+		try {
+			process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 			await workspace.detach();
-			expect(runner.calls).toContainEqual(["detach-client", "-t", "/dev/ttys001"]);
+		} finally {
+			if (nested === undefined) delete process.env.TMUX;
+			else process.env.TMUX = nested;
 		}
+		const commands = runner.calls.map((args) => args.join(" "));
+		expect(commands).toContain("switch-client -l");
+		expect(commands.some((command) => command.startsWith("detach-client"))).toBe(false);
+		expect(commands).toContain(`kill-session -t ${workspace.sessionName}`);
+	});
+
+	it("detaches the attached client outside tmux and still tears the session down", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showBoard();
+		const nested = process.env.TMUX;
+		for (const clients of ["/dev/ttys001|%1\n", "/dev/ttys001|%1\n/dev/ttys002|%6\n", ""]) {
+			runner.clients = clients;
+			runner.calls.length = 0;
+			try {
+				delete process.env.TMUX;
+				await workspace.detach();
+			} finally {
+				if (nested !== undefined) process.env.TMUX = nested;
+			}
+			expect(runner.calls).toContainEqual(["detach-client", "-t", workspace.sessionName]);
+			expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+		}
+	});
+
+	it("kills pane process trees before the session and tolerates an already gone session", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.panePids.set("%1", 0x7ffff001);
+		runner.calls.length = 0;
+		await workspace.quitWorkspace();
+		const pids = runner.calls.findIndex((args) => args[0] === "list-panes" && args.includes("#{pane_pid}"));
+		const killed = runner.calls.findIndex((args) => args[0] === "kill-session");
+		expect(pids).toBeGreaterThanOrEqual(0);
+		expect(killed).toBeGreaterThan(pids);
+		runner.missingSession = true;
+		await workspace.quitWorkspace();
+	});
+
+	it("retries a pane that is still respawning instead of failing immediately", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.delayedDead.set("%3", 4);
+		runner.calls.length = 0;
+		await workspace.focusSearch();
+		const probes = runner.calls.filter(
+			(args) => args[0] === "display-message" && args.at(-1) === "#{pane_id} #{pane_dead}" && args.includes("%3"),
+		);
+		expect(probes.length).toBeGreaterThanOrEqual(5);
+	});
+
+	it("reports captured pane output when a pane never comes back", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		runner.delayedDead.set("%3", 50);
+		runner.paneOutput.set("%3", "Error: cannot start workspace UI\n");
+		runner.calls.length = 0;
+		await expect(workspace.focusSearch()).rejects.toThrow(/Could not recover workspace-footer pane.*cannot start/s);
+		expect(runner.calls).toContainEqual(["capture-pane", "-p", "-S", "-20", "-t", "%3"]);
+	});
+
+	it("tears the workspace down on SIGINT and SIGTERM, and stops listening once disposed", async () => {
+		const runner = new RecordingTmuxServer();
+		const workspace = new TmuxWorkspace(process.cwd(), runner);
+		await workspace.showWorkspace();
+		const signals = new RecordingSignals();
+		const exits: number[] = [];
+		const handlers = workspace.installTerminationHandlers((code) => exits.push(code), signals);
+		expect(signals.count("SIGINT")).toBe(1);
+		expect(signals.count("SIGTERM")).toBe(1);
+		runner.calls.length = 0;
+		signals.fire("SIGINT");
+		await waitUntil(() => exits.length > 0, "workspace teardown on SIGINT");
+		expect(exits).toEqual([0]);
+		expect(runner.calls).toContainEqual(["kill-session", "-t", workspace.sessionName]);
+		// A second signal must not re-enter teardown once the process is on its way out.
+		runner.calls.length = 0;
+		signals.fire("SIGTERM");
+		expect(exits).toEqual([0]);
+		expect(runner.calls).toEqual([]);
+		handlers.dispose();
+		expect(signals.count("SIGINT")).toBe(0);
+		expect(signals.count("SIGTERM")).toBe(0);
+	});
+
+	it("tears the workspace down even when teardown itself fails", async () => {
+		const exits: number[] = [];
+		const signals = new RecordingSignals();
+		const handlers = watchWorkspaceTermination(
+			() => Promise.reject(new Error("teardown failed")),
+			(code) => exits.push(code),
+			signals,
+		);
+		signals.fire("SIGTERM");
+		await waitUntil(() => exits.length > 0, "exit after a failed teardown");
+		expect(exits).toEqual([0]);
+		expect(signals.count("SIGTERM")).toBe(0);
+		handlers.dispose();
+		expect(signals.count("SIGTERM")).toBe(0);
 	});
 
 	it("recognizes only a non-empty workspace environment marker", () => {
@@ -528,17 +846,56 @@ async function cmdOutput(server: Server, command: string, args: readonly string[
 	return lines.length ? `${lines.join("\n")}\n` : "";
 }
 
+const withCliEntrypoint = withTestCliEntrypoint;
+
+/**
+ * Real tmux panes launch the real CLI, so their root must be a real Backlog project: against a
+ * bare temp directory every `workspace-ui` pane exits with "run `backlog init`" and the workspace
+ * then reads as a pile of dead panes.
+ */
+async function realProjectRoot(prefix: string): Promise<string> {
+	const directory = await mkdtemp(join(tmpdir(), prefix));
+	paths.push(directory);
+	await $`git init -b main`.cwd(directory).quiet();
+	await initializeTestProject(new Core(directory), "Tmux workspace");
+	return await realpath(directory);
+}
+
+describe("attachWorkspaceClient", () => {
+	it("falls back to attaching a session when tmux cannot switch the current client", async () => {
+		const entered: string[] = [];
+		const fakeSpawn = ((argv: string[]) => {
+			entered.push(argv[1] as string);
+			return { exited: Promise.resolve(argv[1] === "switch-client" ? 1 : 0) };
+		}) as unknown as typeof Bun.spawn;
+
+		const command = await attachWorkspaceClient("backlog-workspace-deadbeef", {
+			insideTmux: true,
+			spawn: fakeSpawn,
+		});
+
+		expect(command).toBe("attach-session");
+		expect(entered).toEqual(["switch-client", "attach-session"]);
+	});
+
+	it("reports the attempted commands when neither a switch nor an attach works", async () => {
+		const fakeSpawn = (() => ({ exited: Promise.resolve(1) })) as unknown as typeof Bun.spawn;
+
+		await expect(
+			attachWorkspaceClient("backlog-workspace-deadbeef", { insideTmux: true, spawn: fakeSpawn }),
+		).rejects.toThrow("Could not enter tmux workspace: tmux switch-client then attach-session failed");
+	});
+});
+
 describe("TmuxWorkspace real tmux", () => {
 	realTmux(
 		"creates Board and Workspace windows on an isolated server",
 		async () => {
-			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
-			paths.push(directory);
 			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
 			const server = isolatedTmuxServer(socket);
-			const workspace = new TmuxWorkspace(await realpath(directory), server);
+			const workspace = new TmuxWorkspace(await realProjectRoot("backlog-tmux-workspace-"), server);
 			try {
-				await workspace.showWorkspace();
+				await withCliEntrypoint(() => workspace.showWorkspace());
 				const listed = await cmdOutput(server, "list-windows", ["-t", workspace.sessionName, "-F", "#{window_name}"]);
 				expect(listed.split("\n")).toEqual(expect.arrayContaining(["Board", "Workspace"]));
 			} finally {
@@ -552,13 +909,11 @@ describe("TmuxWorkspace real tmux", () => {
 	realTmux(
 		"recreates a deleted Workspace window without removing Board",
 		async () => {
-			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
-			paths.push(directory);
 			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
 			const server = isolatedTmuxServer(socket);
-			const workspace = new TmuxWorkspace(await realpath(directory), server);
+			const workspace = new TmuxWorkspace(await realProjectRoot("backlog-tmux-workspace-"), server);
 			try {
-				await workspace.showWorkspace();
+				await withCliEntrypoint(() => workspace.showWorkspace());
 				const removed = await cmdOutput(server, "show-options", [
 					"-qv",
 					"-t",
@@ -574,7 +929,7 @@ describe("TmuxWorkspace real tmux", () => {
 				]);
 				expect(afterRemoval.trim()).toBe("Board:1");
 
-				await workspace.showWorkspace();
+				await withCliEntrypoint(() => workspace.showWorkspace());
 				const rebuilt = await cmdOutput(server, "list-windows", [
 					"-t",
 					workspace.sessionName,
@@ -593,13 +948,11 @@ describe("TmuxWorkspace real tmux", () => {
 	realTmux(
 		"keeps presentation non-focusing, returns agents through stable slots, and recovers a dead display pane",
 		async () => {
-			const directory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
-			paths.push(directory);
 			const socket = `backlog-workspace-${crypto.randomUUID().slice(0, 8)}`;
 			const server = isolatedTmuxServer(socket);
-			const host = new TmuxWorkspace(await realpath(directory), server);
+			const host = new TmuxWorkspace(await realProjectRoot("backlog-tmux-workspace-"), server);
 			try {
-				await host.showBoard();
+				await withCliEntrypoint(() => host.showBoard());
 				const placeholderCommand = "exec sleep 60";
 				const agent = async (name: string, taskId: string, _sessionId: string, rootPath = host.rootPath) => {
 					const [pane = ""] = await server.cmd("new-session", [
@@ -617,6 +970,7 @@ describe("TmuxWorkspace real tmux", () => {
 						["@backlog_role", "live-preview"],
 					] as const)
 						await server.cmd("set-option", ["-p", "-t", pane, option, value]);
+					await server.cmd("select-pane", ["-t", pane, "-T", `${taskId} live-preview`]);
 					return pane;
 				};
 				const a = await agent("agent-a", "TASK-1", "session-a");
@@ -661,10 +1015,8 @@ describe("TmuxWorkspace real tmux", () => {
 					"@backlog_workspace_display_pane",
 				]);
 				expect(display.trim()).toStartWith("%");
-				const secondDirectory = await mkdtemp(join(tmpdir(), "backlog-tmux-workspace-"));
-				paths.push(secondDirectory);
-				const second = new TmuxWorkspace(await realpath(secondDirectory), server);
-				await second.showBoard();
+				const second = new TmuxWorkspace(await realProjectRoot("backlog-tmux-workspace-"), server);
+				await withCliEntrypoint(() => second.showBoard());
 				await agent("agent-c", "TASK-3", "session-c", second.rootPath);
 				await expect(host.showAgentSession("TASK-3", "session-c")).rejects.toThrow("no longer exists");
 				const secondCurrent = await cmdOutput(server, "display-message", [
@@ -680,5 +1032,48 @@ describe("TmuxWorkspace real tmux", () => {
 			}
 		},
 		10_000,
+	);
+});
+
+const expectPath = Bun.which("expect") ?? "";
+const realTmuxWithClient = tmuxPath && expectPath && process.platform !== "win32" ? it : it.skip;
+
+describe("TmuxWorkspace real tmux client cleanup", () => {
+	realTmuxWithClient(
+		"tears the workspace session down once its last client goes away",
+		async () => {
+			const socket = `backlog-workspace-detach-${crypto.randomUUID().slice(0, 8)}`;
+			const server = isolatedTmuxServer(socket);
+			const directory = await realProjectRoot("backlog-workspace-detach-");
+			const workspace = new TmuxWorkspace(directory, server);
+			const sessionExists = async () => {
+				try {
+					return (await cmdOutput(server, "list-sessions", ["-F", "#{session_name}"])).includes(workspace.sessionName);
+				} catch {
+					return false;
+				}
+			};
+			try {
+				await withCliEntrypoint(() => workspace.showWorkspace());
+				expect(await sessionExists()).toBe(true);
+				const clientScript = join(directory, "client.exp");
+				await Bun.write(
+					clientScript,
+					`set timeout 20\nspawn ${tmuxPath} -f /dev/null -L ${socket} attach-session -t ${workspace.sessionName}\nafter 2000\nexit 0\n`,
+				);
+				const client = Bun.spawn([expectPath, "-f", clientScript], { stdout: "ignore", stderr: "ignore" });
+				expect(await client.exited).toBe(0);
+				let tornDown = false;
+				for (let attempt = 0; attempt < 100 && !tornDown; attempt += 1) {
+					tornDown = !(await sessionExists());
+					if (!tornDown) await Bun.sleep(100);
+				}
+				expect(tornDown).toBe(true);
+			} finally {
+				await server.cmd("kill-server").catch(() => undefined);
+				await removeTmuxSocket(socket);
+			}
+		},
+		20_000,
 	);
 });

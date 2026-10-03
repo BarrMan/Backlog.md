@@ -6,7 +6,7 @@ import { Server } from "libtmux";
 import { upsertAgentConfiguration } from "../agent-workspace/config.ts";
 import { TmuxWorkspace } from "../agent-workspace/tmux-workspace.ts";
 import { Core } from "../core/backlog.ts";
-import { getTestCliCommand, runTestCli } from "./test-cli.ts";
+import { getTestCliCommand, runTestCli, withTestCliEntrypoint } from "./test-cli.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 const tmuxPath = Bun.which("tmux");
@@ -87,7 +87,7 @@ describe("workspace native tmux integration", () => {
 			owner.kill("SIGKILL");
 			await owner.exited;
 
-			await workspace.showWorkspace();
+			await withTestCliEntrypoint(() => workspace.showWorkspace());
 			expect(await server.hasSession(workspace.sessionName)).toBe(true);
 		} finally {
 			if (owner.exitCode === null) owner.kill("SIGKILL");

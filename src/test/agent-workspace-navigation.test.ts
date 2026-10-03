@@ -4,7 +4,8 @@ import type { AgentSessionService } from "../agent-workspace/sessions.ts";
 import type { AgentSession, TaskSessions } from "../agent-workspace/types.ts";
 import { Core } from "../core/backlog.ts";
 import { createScreen } from "../ui/tui.ts";
-import { AgentWorkspaceController, createWorkspaceViewState } from "../ui/workspace/controller.ts";
+import { AgentWorkspaceController } from "../ui/workspace/controller.ts";
+import { createWorkspaceViewState } from "../ui/workspace/state.ts";
 import { createUniqueTestDir, initializeTestProject, safeCleanup } from "./test-utils.ts";
 
 type Widget = {
@@ -301,6 +302,54 @@ describe("agent workspace native tmux presentation", () => {
 			await waitUntil(() => state.selectedTaskId === task.id, "handoff task selection");
 			expect(state.filters.search).toBe("");
 			expect(state.collapsed.size).toBe(0);
+			screen.destroy();
+			await workspace;
+		} finally {
+			screen.destroy();
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			await safeCleanup(directory);
+		}
+	});
+
+	it("does not start an agent session just by selecting a task", async () => {
+		const directory = createUniqueTestDir("workspace-selection-no-autostart");
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as unknown as Widget & { destroy(): void };
+		const state = createWorkspaceViewState();
+		let starts = 0;
+		try {
+			await mkdir(directory, { recursive: true });
+			const core = new Core(directory);
+			await initializeTestProject(core, "Workspace selection no autostart");
+			await core.createTaskFromInput({ title: "First", status: "To Do" }, false);
+			await core.createTaskFromInput({ title: "Second", status: "To Do" }, false);
+			const workspace = new AgentWorkspaceController(core, {
+				screen: screen as never,
+				state,
+				host: {
+					showBoard: async () => {},
+					showAgentSession: async () => {},
+					focusAgent: async () => {},
+					takeTaskRequest: async () => undefined,
+					detach: async () => {},
+				},
+				service: {
+					list: async (taskId: string) => ({ taskId, sessions: [] }),
+					recover: async () => {},
+					start: async () => {
+						starts += 1;
+						return session("unexpected");
+					},
+				} as unknown as AgentSessionService,
+			}).run();
+			await waitUntil(() => state.selectedTaskId === "TASK-1", "initial task selection");
+			press(screen, "down");
+			await waitUntil(() => state.selectedTaskId === "TASK-2", "second task selection");
+			await nextTurn();
+			expect(starts).toBe(0);
+			press(screen, "q", "q");
 			screen.destroy();
 			await workspace;
 		} finally {

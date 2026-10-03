@@ -118,6 +118,10 @@ export function registerAgentWorkspaceCommands(program: Command, getCore: CoreFa
 		const host = new TmuxWorkspace(core.filesystem.rootDir);
 		if (process.env.BACKLOG_TMUX_WORKSPACE !== host.sessionName)
 			throw new Error("workspace-ui belongs to a different Backlog tmux workspace.");
+		// A pane that is not focused has no reader for C-c, so the signal reaches this process
+		// directly; owning it here means an interrupt tears the whole workspace down instead of
+		// leaving its sibling panes running.
+		host.installTerminationHandlers();
 		if (view === "board") {
 			await new UnifiedViewController({ core, initialView: "kanban" }).run();
 			return;
